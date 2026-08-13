@@ -32,6 +32,265 @@ Two consequences worth remembering:
 
 ---
 
+## Repository & Remotes
+
+Development happens in **`n0rthwood/omp-web`**. Issues, branches, and PRs all
+live there.
+
+| Remote | URL | Use |
+|--------|-----|-----|
+| `origin` | `git@github.com:n0rthwood/omp-web.git` | our fork — push here |
+| `piweb` | `https://github.com/agegr/pi-web` | distant ancestor (pi), reference only; push disabled |
+
+The GitHub parent of this fork is `ddallabenetta/omp-web`. Pull from it when you
+want its fixes; never push to it.
+
+⚠️ **Name collision — read this before running `gh`.** `~/.local/bin/gh` is a
+Python "open GitHub in a browser" script and shadows the real GitHub CLI on
+`PATH`. Verify before use:
+
+```bash
+gh --version            # must print "gh version 2.x" — NOT an argparse error
+```
+
+If it errors, call `/usr/bin/gh` explicitly (the real CLI, authenticated as
+`n0rthwood` with `repo` scope). `gh repo set-default` is already pointed at
+`n0rthwood/omp-web`; otherwise pass `--repo n0rthwood/omp-web` every time.
+
+---
+
+## GitHub Issue Workflow (mandatory gate)
+
+**No code work starts without a GitHub Issue.** This is a hard gate. The issue
+number is what ties the branch, the commits, and the review together.
+
+### When the issue is created
+
+```
+user describes a need / bug   → backlog   (problem stated)
+        ↓
+restate it, user confirms      → todo      (scope locked)
+        ↓  ← create the Issue here ← the gate
+investigate and implement      → in-progress
+```
+
+The issue number must appear in:
+
+- **Branch name** — `feature/omp{N}-{brief-summary}` or `fix/omp{N}-{brief-summary}`
+- **Commit message** — `fix: ... (closes #{N})`
+- **A progress comment on the issue** at the end of each stage — not only in chat
+
+### Labels
+
+Every issue carries **one `type:` label** and **one `priority:` label**.
+
+| Label | Meaning |
+|-------|---------|
+| `type:bug` | behavior contradicts an existing expectation ("works but wrong", intermittent errors, a feature stopped working) |
+| `type:feature` | new user-visible capability — the expectation itself is new |
+| `type:task` | refactor / infrastructure / docs / release — no new user-facing function |
+
+| Label | Meaning | Response |
+|-------|---------|----------|
+| `priority:P0` | broken main branch, or data at risk | drop everything |
+| `priority:P1` | blocks the current milestone | next in line |
+| `priority:P2` | normal planned work (**default**) | in order |
+| `priority:P3` | nice to have | when there is room |
+
+Bootstrap the labels once per repo:
+
+```bash
+gh label create "type:bug"      --repo n0rthwood/omp-web --color d73a4a --force
+gh label create "type:feature"  --repo n0rthwood/omp-web --color 0e8a16 --force
+gh label create "type:task"     --repo n0rthwood/omp-web --color 0052cc --force
+gh label create "priority:P0"   --repo n0rthwood/omp-web --color b60205 --force
+gh label create "priority:P1"   --repo n0rthwood/omp-web --color d93f0b --force
+gh label create "priority:P2"   --repo n0rthwood/omp-web --color fbca04 --force
+gh label create "priority:P3"   --repo n0rthwood/omp-web --color c5def5 --force
+```
+
+### Creating an issue
+
+Write the body to `.gh-issue/` in the repo root (gitignored — never `/tmp`, so
+the draft survives and is reviewable):
+
+```bash
+mkdir -p .gh-issue
+
+gh issue create \
+  --repo n0rthwood/omp-web \
+  --title "{short title}" \
+  --label "type:feature,priority:P2" \
+  --body-file .gh-issue/spec.md
+```
+
+Then report the URL to the user as: `Recorded in n0rthwood/omp-web#{N}`.
+
+### Issue body templates
+
+**Bug**
+
+```markdown
+## Problem
+Current behavior: XXX
+Expected behavior: YYY
+
+## Reproduction
+1. Environment (OS, Bun version, omp version, browser):
+2. Steps:
+
+**Actual result:** <error text / screenshot description, quoted verbatim — do not paraphrase>
+**Expected result:** <what should happen>
+
+## Affected components
+- Route / module:
+- Files: (write "unknown" if unsure)
+
+## Evidence
+<log lines, API responses, file:line. Write "unknown" rather than guessing.>
+
+## Acceptance criteria
+- [ ] The reproduction steps no longer trigger the problem
+- [ ] <specific correct behavior>
+- [ ] <regression guard: a test, or a check to run>
+
+## Out of scope
+<related problems deliberately not fixed here>
+```
+
+**Feature**
+
+```markdown
+## Need
+<what user problem this solves. One short paragraph.>
+
+## User-visible behavior
+<what the user actually sees and does — concrete: where in the UI, what click, what state, what copy>
+
+## Design notes
+- Modules touched:
+- API changes (if any):
+- Client changes (if any):
+- Bun/SDK constraint affected (if any):
+
+## Acceptance criteria
+- [ ] <independently verifiable without asking follow-up questions>
+- [ ] ...
+
+## Out of scope
+<deliberately excluded>
+
+## Open questions
+- [ ] <needs a user decision before in-progress>
+```
+
+**Task (refactor / infrastructure / release)**
+
+```markdown
+## Goal
+<the end state — what the world looks like when done, not the steps>
+
+## Why now
+<what it costs to not do it>
+
+## Steps
+1. <ordered and concrete; write the command where a command exists>
+
+## Paths touched
+- `{path}` — what changes
+
+## Acceptance criteria
+- [ ] <verifiable end state + the command that verifies it>
+```
+
+### Progress comments
+
+At the end of each stage, comment on the issue:
+
+```bash
+gh issue comment {N} --repo n0rthwood/omp-web --body "$(cat <<'EOF'
+**[Stage] Coding / QA / Review**
+
+**Done**
+- `{file}:{line}` — what changed and why
+
+**Acceptance criteria**
+- [x] met: ...
+- [ ] not met: ... (reason)
+
+**Next**
+...
+EOF
+)"
+```
+
+### Standing rules
+
+- **Only create issues the user actually asked for.** Other problems found
+  along the way get mentioned in chat, not filed unprompted.
+- **If the user says skip the issue** — comply, say once "this change is not
+  tracked by an issue", then drop it.
+- **The issue exists before in-progress.** No issue number → no branch name →
+  no commit.
+
+---
+
+## Agent instruction files
+
+`CLAUDE.md` is a **symlink to this file** (`AGENTS.md`), so Claude Code, Codex,
+and every other agent tool read one source of truth. Edit `AGENTS.md`.
+
+The GitNexus block below was previously the whole of `CLAUDE.md`; it is kept
+here verbatim, markers included, so GitNexus can still find and refresh it. If a
+tool ever replaces `CLAUDE.md` with a regular file, restore the link with
+`ln -sfn AGENTS.md CLAUDE.md`.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **omp-web** (2786 symbols, 7305 relationships, 233 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/omp-web/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/omp-web/clusters` | All functional areas |
+| `gitnexus://repo/omp-web/processes` | All execution flows |
+| `gitnexus://repo/omp-web/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->
+
+---
+
 ## Architecture
 
 ```
