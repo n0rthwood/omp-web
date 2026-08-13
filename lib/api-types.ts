@@ -194,3 +194,13 @@ export interface OmpWebUpdateResponse {
   install: OmpWebInstallPlan;
   checkedAt: string;
 }
+
+/** A live (or recently exited, not yet pruned) terminal tab shell. */
+export interface TerminalInfo {
+  id: string;
+  cwd: string;
+  name: string;
+  createdAt: string; // ISO
+  exited: boolean;
+  exitCode?: number;
+}

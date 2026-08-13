@@ -532,6 +532,19 @@ never proxies loopback — which is what local providers need. It ignores
 resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
 `fetch` and `install` does not exist.
 
+### Terminal tab — Bun.Terminal, not node-pty
+- node-pty is dead on Bun (`onData` never fires — verified, see `HANDOFF.md`).
+  The Terminal tab uses `Bun.Terminal` (Bun ≥ 1.3.14) instead.
+- `Bun.Terminal`'s read side is a `data` callback passed in the constructor —
+  not a stream, iterator, or `onData`. Probing nonexistent surfaces is what
+  made the first spike hang.
+- The pty `exit` callback fires on `term.close()`, **not** when the shell
+  exits on its own — `proc.exited` is the authoritative exit signal.
+- Shells spawn through `setsid -c <shell> -i` so the pty becomes the
+  controlling terminal (otherwise bash has no job control). The shell is its
+  own session leader, so closing a terminal signals the **negative pid**
+  (process group) — otherwise TUI children (vim, htop, …) orphan.
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

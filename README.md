@@ -136,6 +136,15 @@ Requests to loopback addresses are never proxied, so a local provider (Ollama, L
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
 - **Configure less from the terminal**: manage providers, logins/API keys, model tests, plugins, and skill switches from the web UI.
 - **Use the interface in your language**: switch between the supported UI languages from the top bar.
+- **Run a shell beside the agent**: open a Terminal tab in the workspace (Bun/Linux/macOS only, off by default):
+
+```bash
+OMP_WEB_TERMINALS=1 omp-web   # enable the Terminal tab (off by default)
+```
+
+Enabling this turns the web UI into a **full shell** for whoever can reach it —
+the same trust boundary as the agent itself. On a non-loopback bind it refuses
+to activate unless `OMP_WEB_PASSWORD` is also set.
 
 ## Screenshots
 
