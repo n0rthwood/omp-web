@@ -197,6 +197,19 @@ export function ConfigIcon({ size = 14 }: IconProps) {
   );
 }
 
+// ── Terminal (shell tab) ───────────────────────────────────────────────────
+
+export function TerminalIcon({ size = 14 }: IconProps) {
+  // terminal window + prompt caret
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M2 3h12v10H2V3Z" stroke={DIM} strokeWidth="1" fill={DIM} fillOpacity="0.08" />
+      <path d="M4 6.5 6.5 8.5 4 10.5" stroke={DIM} strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 10.5H11" stroke={DIM} strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // ── Main resolver ─────────────────────────────────────────────────────────
 
 export function getFileIcon(name: string, size = 14): React.ReactNode {

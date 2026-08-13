@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { getFileIcon } from "./FileIcons";
+import { getFileIcon, TerminalIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
 
 export interface Tab {
@@ -10,6 +10,8 @@ export interface Tab {
   filePath: string;
   sourceSessionId?: string | null;
   initialDisplayMode?: "source" | "preview" | "diff";
+  kind?: "file" | "terminal"; // default "file" when absent — every existing call site is unaffected
+  terminalId?: string; // present when kind === "terminal"; the server-side terminal id
 }
 
 interface Props {
@@ -70,7 +72,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {getFileIcon(tab.label, 13)}
+              {tab.kind === "terminal" ? <TerminalIcon size={13} /> : getFileIcon(tab.label, 13)}
             </span>
             <span
               style={{

@@ -7,7 +7,9 @@ import { SessionSidebar } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
+import { TerminalPanel } from "./TerminalPanel";
 import { TabBar, type Tab } from "./TabBar";
+import { TerminalIcon } from "./FileIcons";
 import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
@@ -19,6 +21,7 @@ import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
+import { loadTerminalTabs, saveTerminalTabs } from "@/lib/terminal-tabs";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import {
@@ -43,6 +46,17 @@ type AutoNameStatus =
   | { kind: "naming" }
   | { kind: "success" }
   | { kind: "error"; message: string };
+
+// Structurally identical to the backend's TerminalInfo — defined locally so
+// this module does not import server-owned API types.
+interface TerminalInfoClient {
+  id: string;
+  cwd: string;
+  name: string;
+  createdAt: string;
+  exited: boolean;
+  exitCode?: number;
+}
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
@@ -240,9 +254,25 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel, isMobile]);
 
-  // Right panel — file tabs only
+  // Right panel — file tabs and terminal tabs share one TabBar/Tab[] array.
+  // A terminal tab carries kind:"terminal" + terminalId (server-side id).
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  // Server-wide flag — fetched once; gates the "New Terminal" affordance.
+  const [terminalsEnabled, setTerminalsEnabled] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/terminals/status")
+      .then(async (response) => {
+        if (!response.ok) return;
+        const body = await response.json().catch(() => ({})) as { enabled?: unknown };
+        if (!cancelled && body.enabled === true) setTerminalsEnabled(true);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -261,6 +291,69 @@ export function AppShell() {
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  // Reattach BEFORE the save effect below: on mount/cwd-change fileTabs is
+  // empty, so an unguarded save would wipe the persisted ids before the
+  // reattach effect ever reads them. The ref gate keeps the two in order.
+  const terminalReattachCwdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!terminalsEnabled || !activeCwd) return;
+    terminalReattachCwdRef.current = activeCwd;
+    let cancelled = false;
+    const persisted = loadTerminalTabs(activeCwd);
+    if (persisted.ids.length === 0) return;
+
+    void fetch(`/api/terminals?cwd=${encodeURIComponent(activeCwd)}`)
+      .then(async (response) => {
+        if (!response.ok) return [];
+        return await response.json().catch(() => []) as TerminalInfoClient[];
+      })
+      .then((live) => {
+        if (cancelled) return;
+        const liveById = new Map(live.filter((info) => !info.exited).map((info) => [info.id, info]));
+        // Keep only ids the server still lists as live — never POST here,
+        // that would spawn a duplicate shell.
+        const reattached = persisted.ids
+          .map((id) => liveById.get(id))
+          .filter((info): info is TerminalInfoClient => Boolean(info));
+        // Prune dead ids from storage right away (also happens via the save
+        // effect once the restored tabs land in state).
+        const activeId = persisted.activeId && liveById.has(persisted.activeId) ? persisted.activeId : null;
+        saveTerminalTabs(activeCwd, { ids: reattached.map((info) => info.id), activeId });
+        if (reattached.length === 0) return;
+        setFileTabs((prev) => {
+          const existing = new Set(prev.filter((t) => t.kind === "terminal").map((t) => t.terminalId));
+          const additions = reattached
+            .filter((info) => !existing.has(info.id))
+            .map((info): Tab => ({
+              id: `terminal-${info.id}`,
+              label: info.name,
+              filePath: info.name,
+              kind: "terminal",
+              terminalId: info.id,
+            }));
+          return additions.length > 0 ? [...prev, ...additions] : prev;
+        });
+        if (activeId) setActiveFileTabId((cur) => (cur ? cur : `terminal-${activeId}`));
+      })
+      .catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [terminalsEnabled, activeCwd]);
+
+  // Persist the open terminal-tab set per cwd so a reload can reattach to the
+  // still-live server-side shells instead of spawning duplicates.
+  const terminalTabs = fileTabs.filter((t): t is Tab & { kind: "terminal"; terminalId: string } =>
+    t.kind === "terminal" && typeof t.terminalId === "string");
+  useEffect(() => {
+    if (!activeCwd) return;
+    // Skip while the reattach effect for this cwd hasn't run yet — otherwise
+    // the empty pre-reattach tab set would erase the persisted ids.
+    if (terminalReattachCwdRef.current !== activeCwd) return;
+    const ids = terminalTabs.map((t) => t.terminalId);
+    const activeTab = fileTabs.find((t) => t.id === activeFileTabId);
+    const activeId = activeTab?.kind === "terminal" && activeTab.terminalId ? activeTab.terminalId : null;
+    saveTerminalTabs(activeCwd, { ids, activeId });
+  }, [activeCwd, terminalTabs, fileTabs, activeFileTabId]);
   const { isDark, toggleTheme } = useTheme({
     cwd: selectedSession?.cwd ?? newSessionCwd ?? activeCwd,
     syncWithOmp: true,
@@ -533,6 +626,14 @@ export function AppShell() {
   }, [handleOpenFile, selectedSession?.id]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
+    // Terminal tabs: the X button is the one and only place a shell is killed.
+    // Unmounting TerminalPanel (navigation/reload) never deletes — that is
+    // what lets a reload reattach to the live process.
+    const closing = fileTabs.find((t) => t.id === tabId);
+    if (closing?.kind === "terminal" && closing.terminalId) {
+      void fetch(`/api/terminals/${encodeURIComponent(closing.terminalId)}`, { method: "DELETE" })
+        .catch(() => {});
+    }
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
       if (next.length === 0) setRightPanelOpen(false);
@@ -544,6 +645,47 @@ export function AppShell() {
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
   }, [fileTabs]);
+
+  const handleNewTerminal = useCallback(() => {
+    if (!activeCwd) return;
+    void fetch("/api/terminals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: activeCwd }),
+    })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return await response.json().catch(() => null) as TerminalInfoClient | null;
+      })
+      .then((info) => {
+        if (!info) return;
+        const tabId = `terminal-${info.id}`;
+        setFileTabs((prev) => {
+          if (prev.some((t) => t.id === tabId)) return prev;
+          return [...prev, {
+            id: tabId,
+            label: info.name,
+            filePath: info.name,
+            kind: "terminal" as const,
+            terminalId: info.id,
+          }];
+        });
+        setActiveFileTabId(tabId);
+        setRightPanelOpen(true);
+      })
+      .catch(() => {});
+  }, [activeCwd]);
+
+  // Shell process exited on its own (e.g. `exit`): keep the tab so the final
+  // output stays readable, but mark it so the user can see it is no longer
+  // live. Closing it later DELETEs a dead id — harmless (idempotent close).
+  const handleTerminalExit = useCallback((terminalId: string) => {
+    setFileTabs((prev) => prev.map((t) =>
+      t.kind === "terminal" && t.terminalId === terminalId && !t.label.endsWith(" (exited)")
+        ? { ...t, label: `${t.label} (exited)` }
+        : t,
+    ));
+  }, []);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1570,11 +1712,36 @@ export function AppShell() {
             />
           </div>
 
+          {terminalsEnabled && activeCwd && (
+            <button
+              onClick={handleNewTerminal}
+              title="New Terminal"
+              aria-label="New Terminal"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28, height: 28, marginRight: 8, flexShrink: 0,
+                background: "transparent",
+                border: "none", borderRadius: 4,
+                color: "var(--text-dim)",
+                cursor: "pointer", padding: 0,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              <TerminalIcon size={13} />
+            </button>
+          )}
+
         </div>
 
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {activeFileTab?.filePath ? (
+          {activeFileTab?.kind === "terminal" && activeFileTab.terminalId ? (
+            <TerminalPanel
+              terminalId={activeFileTab.terminalId}
+              onExit={() => handleTerminalExit(activeFileTab.terminalId!)}
+            />
+          ) : activeFileTab?.filePath ? (
             <FileViewer
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
