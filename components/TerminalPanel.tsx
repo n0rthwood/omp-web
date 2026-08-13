@@ -91,12 +91,42 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
 
       // xterm's onData already emits ANSI-encoded bytes for typing and
       // paste — send the string verbatim, never double-encode.
+      // POSTs are serialized through one queue: parallel fire-and-forget
+      // fetches can be delivered out of order, which scrambles fast typing.
+      let inputQueue = "";
+      let inputSending = false;
+      const pumpInput = async () => {
+        if (inputSending) return;
+        inputSending = true;
+        try {
+          while (inputQueue) {
+            const chunk = inputQueue;
+            inputQueue = "";
+            try {
+              await fetch(`/api/terminals/${encodeURIComponent(terminalId)}/input`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ data: chunk }),
+              });
+            } catch {
+              // Network hiccup — best effort; the next keystroke retries.
+            }
+          }
+        } finally {
+          inputSending = false;
+        }
+      };
+      // The first output frame is the server's replay buffer. It can contain
+      // terminal-query sequences (DA / OSC color queries emitted by vim, htop,
+      // … in the previous session); a fresh xterm answers them via onData,
+      // and piping those answers to the shell makes bash execute garbage.
+      // Suppress input until the replay chunk has finished parsing — xterm's
+      // write callback runs after the parser (and thus its responses) fired.
+      let replayDone = false;
       dataSubscription = term.onData((data) => {
-        void fetch(`/api/terminals/${encodeURIComponent(terminalId)}/input`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data }),
-        }).catch(() => {});
+        if (!replayDone) return;
+        inputQueue += data;
+        void pumpInput();
       });
 
       eventSource = new EventSource(`/api/terminals/${encodeURIComponent(terminalId)}/events`);
@@ -108,7 +138,15 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
             exitCode?: unknown;
           };
           if (frame.type === "output" && typeof frame.data === "string") {
-            term?.write(frame.data);
+            if (replayDone) {
+              term?.write(frame.data);
+            } else {
+              // Replay chunk: keep input suppressed until xterm has finished
+              // parsing it — its write callback runs after parser responses.
+              term?.write(frame.data, () => {
+                replayDone = true;
+              });
+            }
           } else if (frame.type === "exit") {
             const exitCode = typeof frame.exitCode === "number" ? frame.exitCode : null;
             onExitRef.current?.(exitCode);
