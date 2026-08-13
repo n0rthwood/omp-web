@@ -27,15 +27,28 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
+  let commandType: string | undefined;
+  let promptAccepted = false;
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
     const { cwd, ...command } = body;
+    commandType = typeof command.type === "string" ? command.type : undefined;
 
     if (!cwd || typeof cwd !== "string") {
-      return NextResponse.json({ error: "cwd is required" }, { status: 400 });
+      return NextResponse.json({
+        error: "cwd is required",
+        ...(commandType === "prompt"
+          ? { code: "prompt_rejected", accepted: false }
+          : {}),
+      }, { status: 400 });
     }
     if (!existsSync(cwd)) {
-      return NextResponse.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
+      return NextResponse.json({
+        error: `Directory does not exist: ${cwd}`,
+        ...(commandType === "prompt"
+          ? { code: "prompt_rejected", accepted: false }
+          : {}),
+      }, { status: 400 });
     }
     const allowedRoots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
@@ -83,6 +96,7 @@ export async function POST(req: Request) {
     }
 
     const result = await session.send(promptCommand);
+    promptAccepted = promptCommand.type === "prompt";
 
     return NextResponse.json({
       success: true,
@@ -94,6 +108,11 @@ export async function POST(req: Request) {
       thinkingLevel: state.thinkingLevel,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : String(error),
+      ...(commandType === "prompt" && !promptAccepted
+        ? { code: "prompt_rejected", accepted: false }
+        : {}),
+    }, { status: 500 });
   }
 }

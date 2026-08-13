@@ -180,7 +180,6 @@ function SubagentDetail({
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12, fontWeight: 700 }}>{subagent.id}</span>
             <span style={{ padding: "1px 5px", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-dim)", fontSize: 9 }}>{subagent.agent}</span>
           </div>
-          <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 10.5, lineHeight: 1.45 }}>{subagentTitle(subagent, t("subagents.noTask"))}</div>
         </div>
       </div>
 

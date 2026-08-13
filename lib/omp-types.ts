@@ -61,6 +61,8 @@ export interface SessionStatsInfo {
   };
   cost: number;
   contextUsage?: ContextUsage;
+  /** Estimated active time across all entries in the session file. */
+  totalActiveMs?: number;
 }
 
 /** Where a slash command came from, in the shape the browser consumes. */

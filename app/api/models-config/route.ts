@@ -46,11 +46,32 @@ function readModelsConfig(): Record<string, unknown> {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Drop blank model rows (empty/whitespace string ids) before persisting, but
+// keep non-string ids and non-object entries so schema errors elsewhere stay
+// visible to the user instead of being silently rewritten.
+function sanitizeModelsConfig(data: Record<string, unknown>): Record<string, unknown> {
+  if (!isRecord(data.providers)) return data;
+
+  const providers = Object.fromEntries(Object.entries(data.providers).map(([providerId, provider]) => {
+    if (!isRecord(provider) || !Array.isArray(provider.models)) return [providerId, provider];
+    const models = provider.models.filter((model) => (
+      !isRecord(model) || typeof model.id !== "string" || model.id.trim().length > 0
+    ));
+    return [providerId, { ...provider, models }];
+  }));
+
+  return { ...data, providers };
+}
+
 function writeModelsConfig(data: Record<string, unknown>): void {
   const path = getWritePath();
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writePrivateFileAtomicSync(path, stringifyYaml(data, { lineWidth: 0 }));
+  writePrivateFileAtomicSync(path, stringifyYaml(sanitizeModelsConfig(data), { lineWidth: 0 }));
 }
 
 export async function GET(req: Request) {

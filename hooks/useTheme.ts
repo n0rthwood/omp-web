@@ -3,7 +3,19 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { WebThemeConfig } from "@/lib/settings-api";
 
-type Theme = "light" | "dark";
+export type ThemePreference = "light" | "dark" | "auto";
+export type ResolvedTheme = "light" | "dark";
+
+type ThemeState = {
+  preference: ThemePreference;
+  theme: ResolvedTheme;
+};
+
+type ToggleOrigin = { x: number; y: number };
+
+const STORAGE_KEY = "pi-theme";
+const PREFERENCE_CYCLE: ThemePreference[] = ["light", "dark", "auto"];
+const SERVER_SNAPSHOT: ThemeState = { preference: "auto", theme: "light" };
 
 const THEME_MODE_KEY = "omp-theme";
 const THEME_CONFIG_KEY = "omp-theme-config";
@@ -11,30 +23,47 @@ let themeConfig: WebThemeConfig | null = null;
 let themeRequestId = 0;
 
 const listeners = new Set<() => void>();
+let state: ThemeState | null = null;
+let systemListening = false;
 
-function subscribe(cb: () => void): () => void {
-  listeners.add(cb);
-  return () => {
-    listeners.delete(cb);
-  };
+function emit(): void {
+  listeners.forEach((cb) => cb());
 }
 
-function getSnapshot(): Theme {
-  if (typeof document === "undefined") return "light";
-  return document.documentElement.dataset.ompThemeMode === "dark" ? "dark" : "light";
+function getSystemTheme(): ResolvedTheme {
+  if (typeof window === "undefined") return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function getServerSnapshot(): Theme {
-  return "light";
+function readStoredPreference(): ThemePreference {
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    if (value === "light" || value === "dark" || value === "auto") return value;
+    // Legacy omp-web key: a stored mode keeps meaning as that preference so
+    // existing dark-mode users do not silently flip to auto on upgrade.
+    const legacy = localStorage.getItem(THEME_MODE_KEY);
+    if (legacy === "light" || legacy === "dark") return legacy;
+  } catch {
+    // ignore storage errors (private mode, quota, etc.)
+  }
+  return "auto";
 }
 
-type ToggleOrigin = { x: number; y: number };
+function resolveTheme(preference: ThemePreference): ResolvedTheme {
+  return preference === "auto" ? getSystemTheme() : preference;
+}
 
-function applyTheme(mode: Theme, persist: boolean): void {
+/**
+ * Apply the resolved theme to the DOM: omp's palette CSS variables when the
+ * theme config is loaded, the `.dark` class otherwise. The mode is also
+ * persisted under the legacy key so the SSR bootstrap script paints the same
+ * theme before hydration.
+ */
+function applyOmpPalette(theme: ResolvedTheme): void {
   const root = document.documentElement;
-  const palette = themeConfig?.palettes[mode];
-  root.dataset.ompThemeMode = mode;
-  root.classList.toggle("dark", palette ? palette.colorScheme === "dark" : mode === "dark");
+  const palette = themeConfig?.palettes[theme];
+  root.dataset.ompThemeMode = theme;
+  root.classList.toggle("dark", palette ? palette.colorScheme === "dark" : theme === "dark");
   if (palette) {
     for (const [name, value] of Object.entries(palette.variables)) {
       root.style.setProperty(name, value);
@@ -42,14 +71,79 @@ function applyTheme(mode: Theme, persist: boolean): void {
     root.dataset.ompThemeName = palette.name;
     root.style.colorScheme = palette.colorScheme;
   }
+  try {
+    localStorage.setItem(THEME_MODE_KEY, theme);
+  } catch {
+    // The in-memory state still applies when storage is unavailable.
+  }
+}
+
+function ensureState(): ThemeState {
+  if (typeof window === "undefined") return SERVER_SNAPSHOT;
+  if (state) return state;
+
+  const preference = readStoredPreference();
+  const theme = resolveTheme(preference);
+  applyOmpPalette(theme);
+  state = { preference, theme };
+  return state;
+}
+
+function setThemeState(preference: ThemePreference, theme: ResolvedTheme, persist: boolean): void {
+  applyOmpPalette(theme);
   if (persist) {
     try {
-      localStorage.setItem(THEME_MODE_KEY, mode);
+      localStorage.setItem(STORAGE_KEY, preference);
     } catch {
-      // Ignore storage errors in private mode or at quota.
+      // ignore storage errors (private mode, quota, etc.)
     }
   }
-  listeners.forEach((callback) => callback());
+  state = { preference, theme };
+  emit();
+}
+
+function syncAutoThemeFromSystem(): void {
+  const current = ensureState();
+  if (current.preference !== "auto") return;
+  const theme = getSystemTheme();
+  if (theme === current.theme) return;
+  setThemeState("auto", theme, false);
+}
+
+function ensureSystemListener(): void {
+  if (systemListening || typeof window === "undefined" || !window.matchMedia) return;
+
+  const mql = window.matchMedia("(prefers-color-scheme: dark)");
+  mql.addEventListener("change", syncAutoThemeFromSystem);
+  // Some browsers delay or miss scheme events while backgrounded.
+  window.addEventListener("focus", syncAutoThemeFromSystem);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") syncAutoThemeFromSystem();
+  });
+  systemListening = true;
+}
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  ensureState();
+  ensureSystemListener();
+  syncAutoThemeFromSystem();
+  return () => {
+    listeners.delete(cb);
+  };
+}
+
+function getSnapshot(): ThemeState {
+  return ensureState();
+}
+
+function getServerSnapshot(): ThemeState {
+  return SERVER_SNAPSHOT;
+}
+
+function nextPreference(preference: ThemePreference): ThemePreference {
+  const index = PREFERENCE_CYCLE.indexOf(preference);
+  return PREFERENCE_CYCLE[(index + 1) % PREFERENCE_CYCLE.length];
 }
 
 export async function refreshOmpTheme(cwd?: string | null): Promise<void> {
@@ -65,11 +159,11 @@ export async function refreshOmpTheme(cwd?: string | null): Promise<void> {
   } catch {
     // The in-memory configuration still applies when storage is unavailable.
   }
-  applyTheme(getSnapshot(), false);
+  applyOmpPalette(ensureState().theme);
 }
 
 export function useTheme(options?: { cwd?: string | null; syncWithOmp?: boolean }) {
-  const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   useEffect(() => {
     if (!options?.syncWithOmp) return;
@@ -80,7 +174,7 @@ export function useTheme(options?: { cwd?: string | null; syncWithOmp?: boolean 
         const cached = localStorage.getItem(THEME_CONFIG_KEY);
         if (cached) {
           themeConfig = JSON.parse(cached) as WebThemeConfig;
-          applyTheme(getSnapshot(), false);
+          applyOmpPalette(ensureState().theme);
         }
       } catch {
         // Keep the built-in CSS fallback when neither endpoint nor cache works.
@@ -92,9 +186,13 @@ export function useTheme(options?: { cwd?: string | null; syncWithOmp?: boolean 
   }, [options?.cwd, options?.syncWithOmp]);
 
   const toggleTheme = useCallback((origin?: ToggleOrigin) => {
-    const next: Theme = getSnapshot() === "dark" ? "light" : "dark";
+    const current = ensureState();
+    const nextPref = nextPreference(current.preference);
+    const nextTheme = resolveTheme(nextPref);
 
-    const apply = () => applyTheme(next, true);
+    const apply = () => {
+      setThemeState(nextPref, nextTheme, true);
+    };
 
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const supportsVT = typeof document.startViewTransition === "function";
@@ -133,5 +231,10 @@ export function useTheme(options?: { cwd?: string | null; syncWithOmp?: boolean 
       });
   }, []);
 
-  return { theme, toggleTheme, isDark: theme === "dark" };
+  return {
+    theme: snapshot.theme,
+    preference: snapshot.preference,
+    toggleTheme,
+    isDark: snapshot.theme === "dark",
+  };
 }

@@ -31,6 +31,19 @@ export function findFirstUserMessage(messages: readonly AgentMessage[]): string 
   return undefined;
 }
 
+/**
+ * Text to base a session title on: the first user turn, or — after a full
+ * compaction replaced the history — the compaction summary (upstream #381).
+ */
+export function findFirstTitleSource(messages: readonly AgentMessage[]): string | undefined {
+  const userText = findFirstUserMessage(messages);
+  if (userText) return userText;
+  const summary = (messages as ReadonlyArray<{ role?: string; summary?: unknown }>)
+    .find((m) => m.role === "compactionSummary" && typeof m.summary === "string")
+    ?.summary as string | undefined;
+  return summary?.trim() ? summary : undefined;
+}
+
 export function truncateTitle(value: string): string {
   const trimmed = value.replace(/\s+/g, " ").trim();
   const characters = Array.from(trimmed);
@@ -52,7 +65,7 @@ export async function generateSessionTitle(
   session: AgentSessionLike,
 ): Promise<GeneratedSessionTitle | null> {
   const context = session.sessionManager.buildSessionContext();
-  const firstMessage = findFirstUserMessage(context.messages);
+  const firstMessage = findFirstTitleSource(context.messages);
   if (!firstMessage) {
     throw new Error("The session has no user messages to name");
   }

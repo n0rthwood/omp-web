@@ -1,7 +1,12 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
+import {
+  loadModelsWithCache,
+  withModelRuntimeError,
+  withSafeModelLoadFailure,
+  type ModelsData,
+} from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { listModelRoles, readDefaultModelRole } from "@/lib/model-roles";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -101,6 +106,6 @@ export async function GET(req: Request) {
   try {
     return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
   } catch {
-    return Response.json(EMPTY_MODELS);
+    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }
 }

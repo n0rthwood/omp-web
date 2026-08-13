@@ -51,7 +51,9 @@ const nextConfig: NextConfig = {
     ];
     return config;
   },
-  allowedDevOrigins: ['192.168.*.*'],
+  // Allow the dev server to be reached over the loopback interface (the
+  // browser tab connects to http://127.0.0.1:30141) and from LAN devices.
+  allowedDevOrigins: ["127.0.0.1", "192.168.*.*"],
   async headers() {
     return [
       {

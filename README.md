@@ -180,6 +180,30 @@ to activate unless `OMP_WEB_PASSWORD` is also set.
 - **Skills**: the skill installer shells out to `npx skills add --agent claude-code`, which writes the `.claude/skills` layout omp discovers by default.
 - **Internationalization**: see [Internationalization](./docs/i18n.md) for using translations and adding languages or UI text.
 
+### Downstream Session Context Menu
+
+Electron wrappers and other downstream integrations can provide a session-row
+context menu without patching `SessionSidebar`. Listen for the cancelable
+`pi-web:session-row-contextmenu` browser event and call `preventDefault()`
+synchronously when the integration will handle it:
+
+```js
+window.addEventListener("pi-web:session-row-contextmenu", (event) => {
+  event.preventDefault();
+  const { id, path, cwd, name, clientX, clientY, refresh } = event.detail;
+
+  void openSessionMenu({ id, path, cwd, name, clientX, clientY }).then((changed) => {
+    if (changed) refresh();
+  });
+});
+```
+
+The detail object contains `id`, `path`, `cwd`, optional `name`, pointer
+coordinates, and a `refresh()` callback for actions that change the session
+list. If no listener cancels the extension event, Pi Web preserves the
+browser's native context menu. This hook is browser-side and independent of
+Pi agent extensions.
+
 ## Development
 
 ```bash
