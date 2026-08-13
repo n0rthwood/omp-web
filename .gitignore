@@ -42,4 +42,4 @@ next-env.d.ts
 .factory
 
 # GitHub issue body drafts (see AGENTS.md → GitHub Issue Workflow)
-.gh-issue/
+.gh-issue/.worktrees/
