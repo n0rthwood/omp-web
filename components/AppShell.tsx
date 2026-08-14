@@ -20,6 +20,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
+import { useWebUser } from "@/hooks/useWebUser";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import {
@@ -89,6 +90,13 @@ export function AppShell() {
   // also fire for tasks finishing in a non-active workspace whose ChatWindow
   // is not mounted. ChatWindow receives the audio callbacks as props.
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, soundEnabledRef } = useAudio();
+  const { user: webUser, authRequired: webAuthRequired, loading: webUserLoading } = useWebUser();
+  // Auth-required installs with no resolved identity (expired or missing
+  // session cookie) get bounced to the login page, preserving location in `next`.
+  useEffect(() => {
+    if (webUserLoading || !webAuthRequired || webUser) return;
+    window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search));
+  }, [webAuthRequired, webUser, webUserLoading]);
   const notifiedAttentionRequestIdsRef = useRef(new Set<string>());
   const handleBackgroundTaskDone = useCallback(() => {
     if (soundEnabledRef.current) playDoneSound();

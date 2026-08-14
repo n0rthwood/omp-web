@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { NextResponse } from "next/server";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { requireVisibleSession } from "@/lib/web-session-guard";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +111,8 @@ export async function GET(
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
 
   const inline = new URL(req.url).searchParams.get("inline") === "1";
 

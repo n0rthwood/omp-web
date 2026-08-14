@@ -6,6 +6,7 @@ import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { useI18n } from "@/hooks/useI18n";
+import { useWebUser } from "@/hooks/useWebUser";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
@@ -446,6 +447,10 @@ function PiWebTitle() {
 
 export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone }: Props) {
   const { t } = useI18n();
+  const { user: webUser } = useWebUser();
+  // The custom-cwd picker adds arbitrary project roots; user-role accounts are
+  // limited to the projects an admin assigned them.
+  const canAddCustomPath = webUser?.role !== "user";
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionsForDisplay = optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
     ? [optimisticSession, ...allSessions]
@@ -1099,6 +1104,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         <h2 style={{ margin: 0, flex: 1, color: "var(--text-muted)", fontSize: 13, fontWeight: 600, letterSpacing: "0.01em" }}>
           {t("sidebar.projects")}
         </h2>
+        {canAddCustomPath && (
         <button
           type="button"
           onClick={handleCustomPathClick}
@@ -1132,6 +1138,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
             <path d="M15.5 10.5v5M13 13h5" />
           </svg>
         </button>
+        )}
       </div>
         <label style={{ position: "relative", display: "block", margin: "0 8px 8px" }}>
           <svg

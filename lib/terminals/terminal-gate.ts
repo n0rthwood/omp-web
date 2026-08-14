@@ -1,4 +1,5 @@
 import { isWebPasswordEnabled } from "../web-auth";
+import { authEnabled, hasStoredWebUsers } from "../web-users";
 
 // Static membership tables — `Object.hasOwn` (not `in`) so env values like
 // "constructor" can't hit Object.prototype keys.
@@ -18,9 +19,11 @@ export function isTerminalFeatureEnabled(): boolean {
 
 /**
  * A terminal is a full shell. Refuse to serve it on a non-loopback bind
- * unless a web password is configured — mirrors the warning in
- * `bin/omp-web.js`, but blocking instead of advisory, because this feature
- * is strictly higher-risk than the rest of the API surface.
+ * unless some authentication fronts the app — the env password or stored web
+ * users (cookie/Bearer login; the `proxy.ts` middleware enforces it for every
+ * request). This mirrors the warning in `bin/omp-web.js`, but blocking
+ * instead of advisory, because this feature is strictly higher-risk than the
+ * rest of the API surface.
  *
  * `OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED` is the deliberate way out, for a
  * bind that is trusted but not loopback (LAN, ZeroTier, VPN-only host). It is
@@ -34,6 +37,7 @@ export function isTerminalHostGateSatisfied(): boolean {
   const hostname = process.env.OMP_WEB_HOSTNAME ?? "127.0.0.1";
   if (Object.hasOwn(LOOPBACK_HOSTNAMES, hostname)) return true;
   if (isWebPasswordEnabled()) return true;
+  if (hasStoredWebUsers()) return true;
   return isUnauthenticatedTerminalsAllowed();
 }
 
@@ -52,5 +56,5 @@ export function isTerminalFeatureAvailable(): boolean {
  * Callers use it to warn; nothing branches on it.
  */
 export function isUnauthenticatedTerminalExposure(): boolean {
-  return isTerminalFeatureAvailable() && !isWebPasswordEnabled();
+  return isTerminalFeatureAvailable() && !authEnabled();
 }

@@ -192,31 +192,33 @@ export function invalidateSessionPathCache(sessionId: string): void {
 export function readSessionHeader(filePath: string): SessionHeader | null {
   const fd = openSync(filePath, "r");
   try {
-    const chunks: Buffer[] = [];
+    // omp rewrites the `title` entry to the top of the file when a session is
+    // named, so the `session` header may not be line 1: scan leading lines
+    // until it is found.
     const maxHeaderBytes = 64 * 1024;
     let position = 0;
-    let foundNewline = false;
-
-    while (position < maxHeaderBytes && !foundNewline) {
+    let pending = Buffer.alloc(0);
+    while (position < maxHeaderBytes) {
       const buffer = Buffer.allocUnsafe(Math.min(4096, maxHeaderBytes - position));
       const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
       if (bytesRead === 0) break;
-      const data = buffer.subarray(0, bytesRead);
-      const newlineIndex = data.indexOf(0x0a);
-      chunks.push(newlineIndex === -1 ? data : data.subarray(0, newlineIndex));
       position += bytesRead;
-      foundNewline = newlineIndex !== -1;
+      pending = Buffer.concat([pending, buffer.subarray(0, bytesRead)]);
+      let newlineIndex = pending.indexOf(0x0a);
+      while (newlineIndex !== -1) {
+        const line = pending.subarray(0, newlineIndex).toString("utf8").trim();
+        pending = pending.subarray(newlineIndex + 1);
+        newlineIndex = pending.indexOf(0x0a);
+        if (!line) continue;
+        try {
+          const header = JSON.parse(line) as SessionHeader;
+          if (header.type === "session") return header;
+        } catch {
+          // Unparseable leading junk — keep scanning.
+        }
+      }
     }
-
-    if (!foundNewline && position >= maxHeaderBytes) return null;
-    const firstLine = Buffer.concat(chunks).toString("utf8").trimEnd();
-    if (!firstLine) return null;
-    try {
-      const header = JSON.parse(firstLine) as SessionHeader;
-      return header.type === "session" ? header : null;
-    } catch {
-      return null;
-    }
+    return null;
   } finally {
     closeSync(fd);
   }

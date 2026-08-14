@@ -77,9 +77,11 @@ OMP_WEB_PASSWORD='a-long-random-password' omp-web  # require Basic Auth (usernam
 OMP_WEB_NO_OPEN=1 omp-web         # useful when running as a background service
 ```
 
-Set `OMP_WEB_PASSWORD` to protect the web interface and every API endpoint with HTTP Basic Auth. The username is always `omp`. Leaving the variable unset or empty disables authentication.
+Set `OMP_WEB_PASSWORD` to protect the web interface and every API endpoint with HTTP Basic Auth (username: `omp`). Leaving the variable unset or empty disables authentication.
 
-omp-web can invoke a high-privilege agent. Basic Auth does not encrypt the password in transit, so do not expose plain HTTP to the internet. Use HTTPS through a trusted reverse proxy or a trusted VPN for remote access.
+omp-web also supports named web users with a browser login page (session cookies) and per-user CLI tokens, plus admin/user roles and per-user project visibility. `OMP_WEB_PASSWORD` keeps working as a migration bridge while you set up real users — see [Web authentication and users](./docs/web-users.md) for the login flow, the `omp-web-users.yml` format, tokens, roles, and the first-admin setup path.
+
+omp-web can invoke a high-privilege agent, so when authentication is enabled every request — including `curl` from the same machine — needs a credential; there is no loopback exception. Do not expose plain HTTP to the internet. Use HTTPS through a trusted reverse proxy or a trusted VPN for remote access.
 API requests accept loopback names, IP literals, the selected bind hostname, and exact comma-separated names in `OMP_WEB_ALLOWED_HOSTS`. Configure that variable when a trusted reverse proxy uses a different external hostname.
 
 ## Model roles
@@ -141,13 +143,13 @@ Requests to loopback addresses are never proxied, so a local provider (Ollama, L
 ```bash
 OMP_WEB_TERMINALS=1 omp-web   # enable the Terminal tab (off by default)
 ```
-
 Enabling this turns the web UI into a **full shell** for whoever can reach it —
 the same trust boundary as the agent itself. On a non-loopback bind it refuses
-to activate unless `OMP_WEB_PASSWORD` is also set.
+to activate unless authentication is enabled — `OMP_WEB_PASSWORD` or at least
+one configured web user.
 
 If a non-loopback bind is genuinely trusted — a LAN, a ZeroTier or VPN-only
-interface — and you want terminals there without a password, say so explicitly:
+interface — and you want terminals there without authentication, say so explicitly:
 
 ```bash
 OMP_WEB_TERMINALS=1 OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED=1 \

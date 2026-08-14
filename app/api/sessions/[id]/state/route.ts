@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { requireVisibleSession } from "@/lib/web-session-guard";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
   try {
     const rpc = getRpcSession(id);
     if (rpc?.isAlive()) {

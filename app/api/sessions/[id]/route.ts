@@ -14,6 +14,7 @@ import {
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { requireVisibleSession } from "@/lib/web-session-guard";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 
@@ -24,8 +25,9 @@ export async function GET(
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
-
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
   try {
     const rpc = getRpcSession(id);
     const liveRpc = rpc?.isAlive() ? rpc : undefined;
@@ -61,10 +63,10 @@ export async function GET(
       messageCount: context.messages.length,
       firstMessage: context.messages.find((m) => m.role === "user")
         ? (() => {
-            const msg = context.messages.find((m) => m.role === "user")!;
-            const c = (msg as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-          })()
+          const msg = context.messages.find((m) => m.role === "user")!;
+          const c = (msg as { content: unknown }).content;
+          return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
+        })()
         : "(no messages)",
       parentSessionId,
       transient: !filePath || !existsSync(filePath),
@@ -98,6 +100,8 @@ export async function PATCH(
   }
 
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
   try {
     const { name } = await req.json() as { name?: string };
     if (typeof name !== "string") {
@@ -126,6 +130,8 @@ export async function DELETE(
   }
 
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
@@ -141,7 +147,7 @@ export async function DELETE(
     const dir = dirname(filePath);
     try {
       const files = readdirSync(dir).filter(
-        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
+        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey
       );
       for (const file of files) {
         const childPath = join(dir, file);
