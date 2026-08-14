@@ -26,7 +26,7 @@ const ANONYMOUS_WEB_USER: WebUser = {
   visibleProjects: "*",
 };
 
-function parseCookieValue(header: string | null, name: string): string | null {
+export function parseCookieValue(header: string | null, name: string): string | null {
   if (!header) return null;
   for (const part of header.split(";")) {
     const separator = part.indexOf("=");
