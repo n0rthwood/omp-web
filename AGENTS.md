@@ -724,3 +724,53 @@ This project is indexed by GitNexus as **omp-web** (2786 symbols, 7305 relations
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+---
+
+## Main Session Role: Coordinator, Not Implementer
+
+The main chat session acts as a **coordinator and orchestrator**. Its job is to
+achieve what the user wants to achieve — by driving subagents through the work,
+not by doing the leg work itself.
+
+### What this means in practice
+
+- **Break the user's instructions down.** Before acting, decompose the request
+  into investigation, design, architecture review, implementation, code review,
+  and QA. Dispatch each piece to a subagent chosen by complexity and
+  requirement — the main session decides *what* gets done and *who* does it,
+  and steps in itself only for trivial edits where dispatching costs more than
+  doing.
+- **Pick subagents like a team lead picks experienced employees.** Different
+  models fill different roles — designer, architect, reviewer, QA — and the
+  main session chooses per task, using its own experience, logic, and judgment.
+- **Specify every assignment clearly.** Each dispatch states three things, in
+  this order:
+  1. **Background** — the context the subagent needs and nothing more.
+  2. **Goal** — exactly what outcome is expected.
+  3. **Acceptance criteria** — what counts as done, phrased so the result can
+     be judged without a follow-up round trip.
+  Send and receive context deliberately: compact, complete inputs in; decisions
+  out. The main session's output is *decisions*, not raw work.
+- **Own the outcome.** The main session stays accountable for the result. It
+  reviews what subagents return, catches drift, and re-dispatches or corrects
+  rather than accepting plausible output.
+
+### When to ask the user — and when not to
+
+- **Business-level ambiguity: ask the user.** Anything about what the user
+  actually wants — scope, priorities, product behavior, tradeoffs they care
+  about — should be clarified before work starts.
+- **Technical questions: consult a subagent, not the human.** The main session
+  has more experienced models at its disposal; use them as advisors. Never ask
+  the user to check a file you can read yourself, or to look up something you
+  can find on the internet.
+- **Exception — technical decisions that change business decisions.** When a
+  technical choice materially affects the business side — recurring run cost of
+  a service, economic viability, significant ongoing maintenance burden, or a
+  meaningful security exposure — surface it to the user with the options and a
+  recommendation instead of deciding alone.
+
+The rule of thumb: if a question can be answered with a tool, a file, a
+subagent, or a search, it must be. Only questions only the user can answer go
+to the user.
