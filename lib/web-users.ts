@@ -228,6 +228,63 @@ export function ensureWebSessionSecret(): string {
   return readWebUsersConfig().sessions.secret;
 }
 
+/** Adds a fully-validated stored user. Returns false when the username exists. */
+export function createWebUser(user: StoredWebUser): boolean {
+  const config = readWebUsersConfig();
+  if (config.users.some((candidate) => candidate.username === user.username)) return false;
+  writeWebUsersConfig({ ...config, users: [...config.users, user] });
+  return true;
+}
+
+export type WebUserUpdate = Partial<Pick<StoredWebUser, "role" | "projects">> & {
+  passwordHash?: string;
+};
+
+/** Applies a partial update. Returns the updated user, or null when not found. */
+export function updateWebUser(username: string, update: WebUserUpdate): StoredWebUser | null {
+  const config = readWebUsersConfig();
+  const user = config.users.find((candidate) => candidate.username === username);
+  if (!user) return null;
+  const next: StoredWebUser = {
+    ...user,
+    ...(update.role !== undefined ? { role: update.role } : {}),
+    ...(update.projects !== undefined ? { projects: update.projects } : {}),
+    ...(update.passwordHash !== undefined ? { passwordHash: update.passwordHash } : {}),
+  };
+  writeWebUsersConfig({
+    ...config,
+    users: config.users.map((candidate) => (candidate === user ? next : candidate)),
+  });
+  return next;
+}
+
+/** Removes a file user (and its tokens). Returns false when not found. */
+export function deleteWebUser(username: string): boolean {
+  const config = readWebUsersConfig();
+  if (!config.users.some((candidate) => candidate.username === username)) return false;
+  writeWebUsersConfig({
+    ...config,
+    users: config.users.filter((candidate) => candidate.username !== username),
+  });
+  return true;
+}
+
+/** Removes one named token. Returns false when user or token is missing. */
+export function deleteWebUserToken(username: string, name: string): boolean {
+  const config = readWebUsersConfig();
+  const user = config.users.find((candidate) => candidate.username === username);
+  if (!user || !user.tokens.some((token) => token.name === name)) return false;
+  writeWebUsersConfig({
+    ...config,
+    users: config.users.map((candidate) =>
+      candidate === user
+        ? { ...candidate, tokens: candidate.tokens.filter((token) => token.name !== name) }
+        : candidate,
+    ),
+  });
+  return true;
+}
+
 // --- effective users + migration ----------------------------------------------
 
 export function getEffectiveWebUsers(): EffectiveWebUser[] {
@@ -257,6 +314,26 @@ export function getEffectiveWebUsers(): EffectiveWebUser[] {
 export function authEnabled(): boolean {
   if (isWebPasswordEnabled()) return true;
   return readWebUsersConfig().users.length > 0;
+}
+
+/**
+ * True when the users file itself lists at least one user — i.e. auth exists
+ * beyond the OMP_WEB_PASSWORD bridge (cookie/Bearer login is enforced).
+ */
+export function hasStoredWebUsers(): boolean {
+  return readWebUsersConfig().users.length > 0;
+}
+
+/**
+ * Effective admin count for a candidate user list (used by the last-admin
+ * guard). The env-backed migration admin counts only while it is actually in
+ * effect — the file has no users and `OMP_WEB_PASSWORD` is set — mirroring
+ * `getEffectiveWebUsers`.
+ */
+export function countEffectiveAdmins(users: StoredWebUser[]): number {
+  const admins = users.filter((user) => user.role === "admin").length;
+  if (admins > 0) return admins;
+  return users.length === 0 && isWebPasswordEnabled(process.env.OMP_WEB_PASSWORD) ? 1 : 0;
 }
 
 // --- Bearer tokens -------------------------------------------------------------

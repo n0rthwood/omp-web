@@ -160,6 +160,20 @@ export function revokeWebSession(raw: string): void {
   writeSessions(store);
 }
 
+/** Revokes every session belonging to `username` (account deletion). */
+export function revokeSessionsForUser(username: string): number {
+  const store = readSessions();
+  let revoked = 0;
+  for (const key of Object.keys(store.sessions)) {
+    if (store.sessions[key].username === username) {
+      delete store.sessions[key];
+      revoked++;
+    }
+  }
+  if (revoked > 0) writeSessions(store);
+  return revoked;
+}
+
 export function purgeExpiredWebSessions(): void {
   const store = readSessions();
   const now = Date.now();
