@@ -40,5 +40,6 @@ export async function POST(
     case "exited":
       return NextResponse.json({ error: "Terminal has exited" }, { status: 409 });
   }
-  return NextResponse.json({ resized: true });
+  // 204: nothing reads the body, and a resize fires on every panel drag frame.
+  return new Response(null, { status: 204 });
 }

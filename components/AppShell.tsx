@@ -947,6 +947,25 @@ export function AppShell() {
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
+
+  // A terminal that has just become the active tab must not sit behind a
+  // collapsed panel: xterm cannot measure itself there, and the panel header's
+  // own controls end up outside the viewport. Closing the last tab schedules
+  // `setRightPanelOpen(false)`, which could land *after* a new terminal opened
+  // the panel — observed as a live terminal inside a 1px-wide panel with its
+  // zoom buttons at x=1692 in a 1280px viewport.
+  //
+  // Keyed on the tab id, not on `rightPanelOpen`, so collapsing the panel by
+  // hand afterwards still works: this only fires when a *different* terminal
+  // becomes active.
+  const lastActiveTerminalTabRef = useRef<string | null>(null);
+  useEffect(() => {
+    const terminalTabId = activeFileTab?.kind === "terminal" ? activeFileTab.id : null;
+    if (terminalTabId && terminalTabId !== lastActiveTerminalTabRef.current) {
+      setRightPanelOpen(true);
+    }
+    lastActiveTerminalTabRef.current = terminalTabId;
+  }, [activeFileTab]);
   const windowTitle = activeCwdName ? `${activeCwdName} - omp-web` : "omp-web";
 
   useEffect(() => {

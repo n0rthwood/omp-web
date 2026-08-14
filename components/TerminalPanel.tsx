@@ -136,7 +136,11 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cols, rows }),
-      }).catch(() => {});
+      })
+        // Drained for the same reason as input: an unread body holds its
+        // HTTP/1.1 connection out of the six-per-origin pool.
+        .then((response) => response.arrayBuffer())
+        .catch(() => {});
     };
 
     const refit = (fitAddon: XtermFitAddon) => {
@@ -239,8 +243,12 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
 
       // xterm's onData already emits ANSI-encoded bytes for typing and
       // paste — send the string verbatim, never double-encode.
+      //
       // POSTs are serialized through one queue: parallel fire-and-forget
       // fetches can be delivered out of order, which scrambles fast typing.
+      // Everything typed while a request is in flight coalesces into the next
+      // one, so a burst costs requests proportional to round trips, not to
+      // keystrokes.
       let inputQueue = "";
       let inputSending = false;
       const pumpInput = async () => {
@@ -251,11 +259,16 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
             const chunk = inputQueue;
             inputQueue = "";
             try {
-              await fetch(`/api/terminals/${encodeURIComponent(terminalId)}/input`, {
+              const response = await fetch(`/api/terminals/${encodeURIComponent(terminalId)}/input`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ data: chunk }),
               });
+              // The body must be consumed even though it is empty on success:
+              // an undrained body keeps its HTTP/1.1 connection checked out,
+              // and a browser only gets six per origin — which this app already
+              // spends on long-lived SSE streams.
+              await response.arrayBuffer().catch(() => undefined);
             } catch {
               // Network hiccup — best effort; the next keystroke retries.
             }

@@ -38,5 +38,7 @@ export async function POST(
     case "exited":
       return NextResponse.json({ error: "Terminal has exited" }, { status: 409 });
   }
-  return NextResponse.json({ written: true });
+  // 204, not a JSON body: this is the hottest route in the app — one request
+  // per keystroke — and nothing reads the response. Errors keep their bodies.
+  return new Response(null, { status: 204 });
 }

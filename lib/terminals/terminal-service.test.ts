@@ -158,6 +158,41 @@ test("create -> write -> subscriber observes the echoed marker", async () => {
   closeTerminal(info.id);
 }, 20_000);
 
+test("bulk output is coalesced into far fewer frames than pty chunks", async () => {
+  // Regression guard for the SSE frame explosion: a screenful of output used to
+  // fan out one frame per pty chunk. Batching must not lose or reorder bytes.
+  const info = createTerminal({ cwd: CWD, cols: 80, rows: 24 });
+  const events: TerminalStreamEvent[] = [];
+  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
+
+  expect(writeToTerminal(info.id, "seq 1 4000\n")).toBe("ok");
+  // Wait for the tail marker AND for the frame count to stop growing, rather
+  // than sleeping a guessed interval: the last batch is what is being counted.
+  let previousFrameCount = -1;
+  await waitFor(() => {
+    const frames = events.filter((event) => event.type === "output");
+    const sawTail = frames.some((event) => event.type === "output" && event.data.includes("4000"));
+    const settled = frames.length === previousFrameCount;
+    previousFrameCount = frames.length;
+    return sawTail && settled;
+  });
+
+  const frames = events.filter((event) => event.type === "output");
+  const text = frames.map((event) => (event.type === "output" ? event.data : "")).join("");
+  // 4000 lines of output must not cost 4000 frames. The exact count depends on
+  // how the kernel splits pty reads, so assert the order of magnitude only.
+  expect(frames.length).toBeLessThan(200);
+  // Ordering and completeness survive batching. The sentinels are newline
+  // delimited on both sides: a bare "4000" also matches the echoed command
+  // itself ("seq 1 4000"), which sits at the very start of the stream.
+  expect(text).toContain("\r\n999\r\n");
+  expect(text).toContain("\r\n4000\r\n");
+  expect(text.indexOf("\r\n4000\r\n")).toBeGreaterThan(text.indexOf("\r\n999\r\n"));
+
+  unsubscribe?.();
+  closeTerminal(info.id);
+}, 30_000);
+
 test("a late subscriber receives the replay buffer exactly once, as a replay frame", async () => {
   const info = createTerminal({ cwd: CWD });
   const first: TerminalStreamEvent[] = [];

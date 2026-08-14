@@ -8,6 +8,9 @@ interface TerminalRecord extends TerminalInfo {
   proc: Bun.Subprocess;
   buffer: string;
   listeners: Set<TerminalListener>;
+  /** Output accumulated since the last flush; see `queueOutput`. */
+  pending: string;
+  pendingFlush: Timer | null;
 }
 
 export type TerminalStreamEvent =
@@ -70,7 +73,13 @@ export function createTerminal(options: { cwd: string; cols?: number; rows?: num
     data: (_t, chunk) => {
       const text = decoder.decode(chunk, { stream: true });
       appendToBuffer(record, text);
-      fanout(record, { type: "output", data: text });
+      // Coalesce rather than fan out per pty chunk. A full-screen redraw or a
+      // `cat` of a large file arrives as hundreds of small chunks, and each one
+      // would otherwise become its own SSE frame with its own JSON envelope and
+      // its own xterm write. The first chunk after an idle period flushes on
+      // the next tick, so a single keystroke's echo is never delayed by the
+      // batching window.
+      queueOutput(record, text);
     },
     // NOTE: no pty `exit` callback here on purpose. Verified on Bun 1.3.14
     // (see /tmp/bun-terminal-spike): the pty stream's `exit` callback only
@@ -95,6 +104,8 @@ export function createTerminal(options: { cwd: string; cols?: number; rows?: num
     createdAt: new Date().toISOString(),
     exited: false,
     buffer: "",
+    pending: "",
+    pendingFlush: null,
     listeners: new Set(),
     term,
     proc,
@@ -104,6 +115,9 @@ export function createTerminal(options: { cwd: string; cols?: number; rows?: num
     if (record.exited) return; // already reported — fire the exit event once
     record.exited = true;
     record.exitCode = exitCode;
+    // Batched output first: a shell that prints and immediately exits would
+    // otherwise lose its last frame behind the `exit` event.
+    flushOutput(record);
     fanout(record, { type: "exit", exitCode });
     // Keep the record (and its buffer) around so a client that reconnects
     // right after exit still sees the final output + exit event on
@@ -152,6 +166,10 @@ export function closeTerminal(id: string): void {
   const record = registry().get(id);
   if (!record) return;
   registry().delete(id);
+  // The record is gone from the registry and its listeners are about to be
+  // dropped: a queued flush would fan out to nobody and keep a timer alive.
+  clearTimeout(record.pendingFlush ?? undefined);
+  record.pendingFlush = null;
   try {
     // Spawned via `setsid -c`, so the shell is its own process-group leader —
     // signal the whole group so TUI children (vim, htop, …) die too, not
@@ -178,6 +196,37 @@ function appendToBuffer(record: TerminalRecord, text: string): void {
   if (record.buffer.length > MAX_REPLAY_BUFFER) {
     record.buffer = record.buffer.slice(record.buffer.length - MAX_REPLAY_BUFFER);
   }
+}
+
+/**
+ * Batch pty output into one SSE frame per tick instead of one per pty chunk.
+ *
+ * A vim redraw or a large `cat` arrives as hundreds of small chunks; sending
+ * each as its own frame multiplies the JSON envelope, the SSE framing and the
+ * client-side write. `setTimeout(…, 0)` — not a longer window — keeps a single
+ * keystroke's echo on the same tick it arrived, so interactive latency is
+ * unchanged while a burst collapses into far fewer frames.
+ */
+function queueOutput(record: TerminalRecord, text: string): void {
+  record.pending += text;
+  if (record.pendingFlush !== null) return;
+  record.pendingFlush = setTimeout(() => {
+    record.pendingFlush = null;
+    const data = record.pending;
+    record.pending = "";
+    if (data) fanout(record, { type: "output", data });
+  }, 0);
+}
+
+/** Deliver anything still batched — used before an `exit` frame so no output is lost. */
+function flushOutput(record: TerminalRecord): void {
+  if (record.pendingFlush !== null) {
+    clearTimeout(record.pendingFlush);
+    record.pendingFlush = null;
+  }
+  const data = record.pending;
+  record.pending = "";
+  if (data) fanout(record, { type: "output", data });
 }
 
 function isPositiveFiniteInt(value: unknown): value is number {
