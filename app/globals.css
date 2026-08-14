@@ -59,6 +59,30 @@
   --success: #1f8b4c;
   --danger: #aa5555;
   --warning: #9a7326;
+
+  /* Terminal fallbacks — mirror the `light` derivation in lib/omp-theme.ts,
+     used until the runtime palette for the active theme is applied. */
+  --term-bg: #ffffff;
+  --term-fg: #1a1d23;
+  --term-cursor: #0082b3;
+  --term-cursor-accent: #ffffff;
+  --term-selection-bg: #b8cede;
+  --term-black: #16181c;
+  --term-red: #aa5555;
+  --term-green: #1f8b4c;
+  --term-yellow: #9a7326;
+  --term-blue: #0082b3;
+  --term-magenta: #8a52b3;
+  --term-cyan: #00857f;
+  --term-white: #565961;
+  --term-bright-black: #949aa4;
+  --term-bright-red: #854242;
+  --term-bright-green: #186c3b;
+  --term-bright-yellow: #78591d;
+  --term-bright-blue: #00658b;
+  --term-bright-magenta: #6b408b;
+  --term-bright-cyan: #006762;
+  --term-bright-white: #1a1d23;
 }
 
 html.dark {
@@ -80,6 +104,29 @@ html.dark {
   --success: #00ff88;     /* readoutGreen */
   --danger: #ff4757;      /* alertRed */
   --warning: #ffb347;     /* warningAmber */
+
+  /* titanium terminal palette — mirrors the runtime derivation */
+  --term-bg: #151820;
+  --term-fg: #e8ecf4;
+  --term-cursor: #00b4ff;
+  --term-cursor-accent: #151820;
+  --term-selection-bg: #1f4b6b;
+  --term-black: #0d0f14;
+  --term-red: #ff4757;
+  --term-green: #00ff88;
+  --term-yellow: #ffb347;
+  --term-blue: #00b4ff;
+  --term-magenta: #b06bff;
+  --term-cyan: #00ffd5;
+  --term-white: #b5bcc9;
+  --term-bright-black: #6b7280;
+  --term-bright-red: #ff707c;
+  --term-bright-green: #38ffa2;
+  --term-bright-yellow: #ffc46c;
+  --term-bright-blue: #38c6ff;
+  --term-bright-magenta: #c08bff;
+  --term-bright-cyan: #38ffdd;
+  --term-bright-white: #e8ecf4;
 }
 
 .catppuccin-file-icon {
@@ -186,6 +233,25 @@ body {
      font CDN at build or at runtime, and the terminal-native faces below are
      already what omp users read code in. CJK fallbacks stay last. */
   --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Noto Sans Mono', 'DejaVu Sans Mono', Consolas, 'Liberation Mono', 'PingFang SC', 'Microsoft YaHei', monospace;
+
+  /* Terminal font stack — deliberately NOT --font-mono.
+
+     A terminal draws on a fixed cell grid, so every face in the stack has to
+     have one advance width and no ligatures. --font-mono is tuned for prose
+     code and contains both hazards: 'Fira Code' and 'Cascadia Code' ligate,
+     and 'PingFang SC' / 'Microsoft YaHei' are proportional. Safari resolves
+     `ui-monospace` to SF Mono first and never reaches them, which is why the
+     terminal looked right in Safari and wrong in Chrome — Chrome ignores
+     `ui-monospace` off macOS and walks into the ligature faces.
+
+     Order: Apple system mono, then Windows (Cascadia *Mono*, not Code), then
+     the common Linux faces, then a monospaced CJK face, then generic. Still no
+     webfont: a local-first tool must not fetch a font at build or runtime.
+
+     Kept on ONE line on purpose: xterm passes this string into a canvas
+     `ctx.font` shorthand, and an embedded newline can make that assignment
+     fail silently, leaving the canvas default font behind. */
+  --term-font: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, 'JetBrains Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Ubuntu Mono', 'Noto Sans Mono CJK SC', monospace;
 }
 
 pre, code {

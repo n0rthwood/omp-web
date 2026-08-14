@@ -28,6 +28,82 @@ function mixHex(from: string, to: string, amount: number): string {
   return `#${mixed.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
+interface Hsl {
+  hue: number;
+  saturation: number;
+  lightness: number;
+}
+
+function toHsl(value: string): Hsl | null {
+  const rgb = parseHex(value);
+  if (!rgb) return null;
+  const [red, green, blue] = rgb.map((channel) => channel / 255);
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+  if (delta === 0) return { hue: 0, saturation: 0, lightness };
+  let hue: number;
+  if (max === red) hue = ((green - blue) / delta) % 6;
+  else if (max === green) hue = (blue - red) / delta + 2;
+  else hue = (red - green) / delta + 4;
+  return {
+    hue: ((hue * 60) % 360 + 360) % 360,
+    saturation: delta / (1 - Math.abs(2 * lightness - 1)),
+    lightness,
+  };
+}
+
+function fromHsl({ hue, saturation, lightness }: Hsl): string {
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const second = chroma * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const [red, green, blue] = [
+    [chroma, second, 0],
+    [second, chroma, 0],
+    [0, chroma, second],
+    [0, second, chroma],
+    [second, 0, chroma],
+    [chroma, 0, second],
+  ][Math.floor(hue / 60) % 6];
+  const match = lightness - chroma / 2;
+  const toHex = (channel: number) =>
+    Math.round(Math.min(1, Math.max(0, channel + match)) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+}
+
+/** Terminal colours below the floor are muddy; above the ceiling they are neon. */
+const TERMINAL_SATURATION = { min: 0.45, max: 0.85 } as const;
+/** Below this the source is treated as intentionally achromatic (monochrome themes). */
+const ACHROMATIC_SATURATION = 0.08;
+
+/**
+ * Mint one terminal colour slot. omp themes carry semantic colours (error,
+ * success, warning, accent) rather than the six hues a terminal needs, so
+ * blue/magenta/cyan are minted from the accent at canonical terminal hues while
+ * inheriting its brightness — the theme's character — and every slot's
+ * saturation is clamped into a usable band.
+ *
+ * Both bounds come from measured failures. Without the floor, the `light`
+ * theme's own low-saturation roles produced a grey-blue `#5a6a80` and a
+ * grey-green `#537c53`; without the ceiling, a vivid accent landed magenta on
+ * pure `#ff00ff`. Re-hueing by a *delta* rather than to a fixed hue was a third
+ * failure: a teal accent turned "cyan" into green, because the result depended
+ * on wherever the accent happened to sit.
+ *
+ * An achromatic source stays achromatic: a monochrome theme is a deliberate
+ * choice, and colourising its terminal would override it.
+ */
+function terminalSlot(value: string, hue?: number): string {
+  const hsl = toHsl(value);
+  if (!hsl) return value;
+  if (hsl.saturation < ACHROMATIC_SATURATION) return value;
+  return fromHsl({
+    hue: hue ?? hsl.hue,
+    saturation: Math.min(TERMINAL_SATURATION.max, Math.max(TERMINAL_SATURATION.min, hsl.saturation)),
+    lightness: hsl.lightness,
+  });
+}
+
 function relativeLuminance(value: string): number | null {
   const rgb = parseHex(value);
   if (!rgb) return null;
@@ -82,6 +158,47 @@ export async function getWebThemePalette(name: string): Promise<WebThemePalette>
   const dim = ensureContrast(rawDim, text, [pageBg, panelBg], 5);
   const accent = firstColor(colors.accent, colors.borderAccent, text);
 
+  // Terminal palette. A terminal needs six distinguishable hues plus two
+  // neutrals, in normal and bright variants; omp themes carry semantic roles
+  // instead. red/green/yellow keep the theme's own error/success/warning hues,
+  // which carry meaning a user already reads elsewhere in omp, while
+  // blue/magenta/cyan are minted at canonical terminal hues.
+  //
+  // `accent` is used only for brightness and saturation here, never for the
+  // blue *hue*: plenty of omp themes have a warm accent, and anchoring blue to
+  // it produced an orange "blue" (#fab387 on dark-catppuccin, #fe8019 on
+  // dark-gruvbox — measured).
+  //
+  // Legibility is forced toward black or white, never toward `--text`: mixing a
+  // hue toward a neutral text colour desaturates it, which collapsed red,
+  // green, blue, magenta and cyan into five near-identical muds on the light
+  // theme (#aa5555 / #537c53 / #557878 / #5b5a80 / #567b5f — measured).
+  const termBg = pageBg;
+  const contrastTarget = colorScheme === "dark" ? "#ffffff" : "#000000";
+  const legible = (color: string) => ensureContrast(color, contrastTarget, [termBg], 4.5);
+  const brighten = (color: string) =>
+    colorScheme === "dark" ? mixHex(color, "#ffffff", 0.22) : mixHex(color, "#000000", 0.22);
+  // A theme whose semantic roles are grey but whose accent is not (light-
+  // monochrome) would otherwise get three indistinguishable greys for
+  // red/green/yellow — unreadable for a `git diff` — while its blue/magenta/
+  // cyan came out coloured. In that case mint the slot at its canonical hue
+  // from the accent instead. A theme that is achromatic throughout keeps grey.
+  const accentIsChromatic = (toHsl(accent)?.saturation ?? 0) >= ACHROMATIC_SATURATION;
+  const semanticSlot = (value: string, canonicalHue: number) => {
+    const slot = terminalSlot(value);
+    if (!accentIsChromatic) return slot;
+    const isGrey = (toHsl(slot)?.saturation ?? 0) < ACHROMATIC_SATURATION;
+    return isGrey ? terminalSlot(accent, canonicalHue) : slot;
+  };
+  const red = legible(semanticSlot(firstColor(colors.error, colors.toolDiffRemoved, "#dc2626"), 0));
+  const green = legible(semanticSlot(firstColor(colors.success, colors.toolDiffAdded, "#16a34a"), 130));
+  const yellow = legible(semanticSlot(firstColor(colors.warning, colors.syntaxNumber, "#d97706"), 45));
+  const blue = legible(terminalSlot(accent, 215));
+  const magenta = legible(terminalSlot(accent, 300));
+  const cyan = legible(terminalSlot(accent, 187));
+  const black = colorScheme === "dark" ? mixHex(termBg, "#000000", 0.35) : mixHex(text, "#000000", 0.15);
+  const white = mixHex(text, termBg, 0.25);
+
   return {
     name,
     colorScheme,
@@ -106,6 +223,27 @@ export async function getWebThemePalette(name: string): Promise<WebThemePalette>
       "--omp-md-heading": firstColor(colors.mdHeading, accent),
       "--omp-md-link": firstColor(colors.mdLink, accent),
       "--omp-md-code": firstColor(colors.mdCode, colors.syntaxString, accent),
+      "--term-bg": termBg,
+      "--term-fg": text,
+      "--term-cursor": accent,
+      "--term-cursor-accent": termBg,
+      "--term-selection-bg": mixHex(selectedBg, accent, 0.35),
+      "--term-black": black,
+      "--term-red": red,
+      "--term-green": green,
+      "--term-yellow": yellow,
+      "--term-blue": blue,
+      "--term-magenta": magenta,
+      "--term-cyan": cyan,
+      "--term-white": white,
+      "--term-bright-black": dim,
+      "--term-bright-red": brighten(red),
+      "--term-bright-green": brighten(green),
+      "--term-bright-yellow": brighten(yellow),
+      "--term-bright-blue": brighten(blue),
+      "--term-bright-magenta": brighten(magenta),
+      "--term-bright-cyan": brighten(cyan),
+      "--term-bright-white": text,
     },
   };
 }

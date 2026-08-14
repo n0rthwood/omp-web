@@ -26,3 +26,29 @@ export function saveTerminalTabs(cwd: string, tabs: PersistedTerminalTabs): void
     else window.localStorage.setItem(STORAGE_PREFIX + cwd, JSON.stringify(tabs));
   } catch { /* storage unavailable/full — persistence is best-effort */ }
 }
+
+const FONT_SIZE_KEY = "omp-web-terminal-font-size";
+export const TERMINAL_FONT_SIZE_RANGE = { min: 8, max: 22 } as const;
+
+/**
+ * Phones get a smaller default: at 13px a 390px viewport fits only 48 columns,
+ * which wraps ordinary prompts and `ls` output.
+ */
+export function defaultTerminalFontSize(isMobile: boolean): number {
+  return isMobile ? 11 : 12;
+}
+
+export function loadTerminalFontSize(isMobile: boolean): number {
+  const fallback = defaultTerminalFontSize(isMobile);
+  if (typeof window === "undefined") return fallback;
+  const parsed = Number.parseInt(window.localStorage.getItem(FONT_SIZE_KEY) ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(TERMINAL_FONT_SIZE_RANGE.max, Math.max(TERMINAL_FONT_SIZE_RANGE.min, parsed));
+}
+
+export function saveTerminalFontSize(size: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(FONT_SIZE_KEY, String(size));
+  } catch { /* storage unavailable/full — persistence is best-effort */ }
+}

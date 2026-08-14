@@ -408,6 +408,40 @@ hooks/
   uses — with a browser-backed `ExtensionUIContext` layered on top. Do not
   reimplement the action set; a mismatch shows up as extensions silently doing
   nothing.
+- **A browser session runs *inside* the server, so restarting the server kills
+  the turn.** `bash` tool commands are children of the Next.js process. Any
+  `pm2 restart|stop|reload|delete omp-web`, `kill`, or rebuild-and-restart issued
+  from a session opened in the browser signals its own host: pm2's default stop
+  signal is **SIGINT**, `next` exits **130**, the `cleanup` handler at
+  `lib/rpc-manager.ts:1362` destroys every wrapper, and *all* live sessions —
+  not just the one that ran the command — get
+  `{"type":"custom","customType":"session_exit","data":{"reason":"sigint"}}`
+  followed by an assistant message with `stopReason:"aborted"`. In the UI this
+  looks like the agent randomly stopping mid tool call. TUI sessions are
+  separate processes and are immune, which is the tell.
+- **Restart one instance from the *other* instance, or from a TUI/ssh shell.**
+  Two pm2 apps serve this repo: `omp-web` (port 5010, repo root) and
+  `omp-web-dev` (port 5020, `.worktrees/perf`, `OMP_WEB_TERMINALS=1`). They are
+  separate OS processes with separate `globalThis.__ompSessions`, so a session
+  driven from 5020 can safely `pm2 restart omp-web` — only 5010's live turns
+  abort. Two rules when doing that:
+  - **Never pass a bare `--update-env` across instances.** It bakes the *calling*
+    process's environment into the target, and the two differ: 5020 carries
+    `OMP_WEB_HOSTNAME=0.0.0.0`, `OMP_WEB_TERMINALS=1` and a dev
+    `OMP_WEB_ALLOWED_HOSTS`, while 5010 carries `PORT=5010` and the public
+    allow-list. A cross `--update-env` silently gives the public instance the
+    dev allow-list (→ `403 Untrusted API request` on `omp.joysort.cn`) and
+    enables terminals on it. Prefix each var explicitly, or omit the flag —
+    both apps' auth env is already in `~/.pm2/dump.pm2`.
+  - `pm2 restart all`, `pm2 update`, `pm2 kill` and `pm2 resurrect` still hit
+    *both* apps (plus `omp-tunnel`, `agent-canvas`); they are suicide from
+    either UI.
+- **Two instances share `~/.omp/agent`.** Each process holds its own
+  `AuthStorage` SQLite handle on `agent.db` and its own session writers, so
+  never open the same session id in both UIs — two AgentSessions appending to
+  one `.jsonl` interleave entries. `invalidateOmpRuntime()` is also
+  process-local: a credential or `models.yml` change made in one instance is
+  invisible to the other until it restarts.
 
 ### One runtime, many requests (`lib/omp-runtime.ts`)
 omp's CLI builds `Settings` + `AuthStorage` + `ModelRegistry` once per process.

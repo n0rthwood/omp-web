@@ -83,6 +83,8 @@ export const enLocale: LocalePlugin = {
     "files.showPanel": "Show file panel",
     "files.noneOpen": "No file open",
     "files.newTerminal": "New terminal",
+    "terminal.fontSmaller": "Smaller terminal text",
+    "terminal.fontLarger": "Larger terminal text",
     "layout.resizeSidebar": "Resize sidebar",
     "layout.resizeFilePanel": "Resize file panel",
     "layout.resizeHint": "Drag to resize. Double-click or press Enter to reset.",

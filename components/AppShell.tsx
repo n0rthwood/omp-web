@@ -22,7 +22,14 @@ import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
-import { loadTerminalTabs, saveTerminalTabs } from "@/lib/terminal-tabs";
+import {
+  defaultTerminalFontSize,
+  loadTerminalFontSize,
+  loadTerminalTabs,
+  saveTerminalFontSize,
+  saveTerminalTabs,
+  TERMINAL_FONT_SIZE_RANGE,
+} from "@/lib/terminal-tabs";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
   claimExtensionAttentionNotification,
@@ -289,6 +296,25 @@ export function AppShell() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
+  }, []);
+
+  // Terminal font size lives here, not in TerminalPanel: the zoom control sits
+  // in the panel's tab bar, and every terminal tab shares one size. Read from
+  // storage after mount so the server render stays deterministic.
+  const [terminalFontSize, setTerminalFontSize] = useState(() => defaultTerminalFontSize(false));
+  useEffect(() => {
+    setTerminalFontSize(loadTerminalFontSize(isMobile));
+  }, [isMobile]);
+
+  const adjustTerminalFontSize = useCallback((step: number) => {
+    setTerminalFontSize((current) => {
+      const next = Math.min(
+        TERMINAL_FONT_SIZE_RANGE.max,
+        Math.max(TERMINAL_FONT_SIZE_RANGE.min, current + step),
+      );
+      if (next !== current) saveTerminalFontSize(next);
+      return next;
+    });
   }, []);
 
 
@@ -1910,6 +1936,31 @@ export function AppShell() {
             />
           </div>
 
+          {activeFileTab?.kind === "terminal" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: 8, flexShrink: 0 }}>
+              {([["−", -1, "terminal.fontSmaller"], ["+", 1, "terminal.fontLarger"]] as const).map(
+                ([glyph, step, labelKey]) => (
+                  <button
+                    key={labelKey}
+                    onClick={() => adjustTerminalFontSize(step)}
+                    title={`${translate(labelKey)} (${terminalFontSize}px)`}
+                    aria-label={translate(labelKey)}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 22, height: 22, padding: 0,
+                      background: "transparent", border: "none", borderRadius: 4,
+                      color: "var(--text-dim)", cursor: "pointer",
+                      fontSize: 13, lineHeight: 1, fontFamily: "var(--font-mono)",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
+                  >
+                    {glyph}
+                  </button>
+                ),
+              )}
+            </div>
+          )}
         </div>
 
         {/* File content */}
@@ -1918,6 +1969,7 @@ export function AppShell() {
             <TerminalPanel
               terminalId={activeFileTab.terminalId}
               onExit={() => handleTerminalExit(activeFileTab.terminalId!)}
+              fontSize={terminalFontSize}
             />
           ) : activeFileTab?.filePath ? (
             <FileViewer
