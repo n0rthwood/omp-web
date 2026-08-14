@@ -34,17 +34,36 @@ export async function resolveSessionCwd(sessionId: string): Promise<string | nul
 }
 
 /**
+ * True when a session file exists for the id (or a live wrapper holds it),
+ * independent of whether its cwd could be read.
+ */
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  if (getRpcSession(sessionId)?.isAlive()) return true;
+  const filePath = await resolveSessionPath(sessionId);
+  return filePath !== null;
+}
+
+/**
  * Returns the blocking Response when the session's cwd lies outside the
  * requester's visible projects, 401 when auth is enabled but no valid
  * credential is present (middleware normally rejects those earlier), and
  * null when the request may proceed. Unknown sessions return null so the
  * route's own not-found handling applies unchanged.
+ *
+ * Fail-closed: an existing session whose cwd cannot be read is treated as
+ * not visible for non-admins — never pass-through on missing metadata.
  */
 export async function requireVisibleSession(req: Request, sessionId: string): Promise<Response | null> {
   const user = await getWebUserOrSynthetic(req);
   if (!user) return visibilityError(401, "Authentication required");
   const cwd = await resolveSessionCwd(sessionId);
-  if (cwd === null) return null;
+  if (cwd === null) {
+    if (user.role === "admin" || user.visibleProjects === "*") return null;
+    if (await sessionExists(sessionId)) {
+      return visibilityError(404, "Session not visible for this user");
+    }
+    return null;
+  }
   if (!isPathVisible(user, cwd)) {
     return visibilityError(404, "Session not visible for this user");
   }
