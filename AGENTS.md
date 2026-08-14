@@ -545,6 +545,28 @@ resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
   own session leader, so closing a terminal signals the **negative pid**
   (process group) — otherwise TUI children (vim, htop, …) orphan.
 
+### Terminal tab — client side
+- The **launcher belongs in the fixed top-right cluster**, next to the file-panel
+  toggle, never in the panel's own tab bar. `#file-panel` collapses to
+  `width: 0; overflow: hidden`, which clips anything inside it out of the
+  layout, and the toggle is `position: fixed; z-index: 300` over that same
+  corner — an in-panel button there is covered pixel-for-pixel and swallows the
+  click (#3).
+- Scrollback arrives as its own `replay` frame, live output as `output`
+  (`subscribeTerminal`). The client suppresses input **only** while a `replay`
+  frame is parsing, and **only** for escape-prefixed data — those are xterm's
+  answers to DA/OSC queries left in the scrollback by a previous vim/htop,
+  which bash would otherwise execute. Widening either half of that rule breaks
+  typing: arming on any first frame made a fresh terminal permanently
+  read-only, and dropping all data ate the first command after a reattach (#4).
+  A 1 s timer disarms the gate regardless, so a write callback that never fires
+  cannot wedge the terminal.
+- Never `fit()` or POST a resize while the container is unmeasurable
+  (`offsetWidth`/`offsetHeight` of 0). A restored terminal can mount inside the
+  still-collapsed panel, and a degenerate fit is propagated straight to the pty
+  — an 11-column shell with a wrapped prompt. The `ResizeObserver` re-fits (and
+  claims focus) once the panel actually has a box.
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

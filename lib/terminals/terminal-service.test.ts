@@ -158,7 +158,7 @@ test("create -> write -> subscriber observes the echoed marker", async () => {
   closeTerminal(info.id);
 }, 20_000);
 
-test("a late subscriber receives the replay buffer exactly once, synchronously", async () => {
+test("a late subscriber receives the replay buffer exactly once, as a replay frame", async () => {
   const info = createTerminal({ cwd: CWD });
   const first: TerminalStreamEvent[] = [];
   const unsubscribe = subscribeTerminal(info.id, (event) => first.push(event));
@@ -169,10 +169,30 @@ test("a late subscriber receives the replay buffer exactly once, synchronously",
 
   const replayed: TerminalStreamEvent[] = [];
   subscribeTerminal(info.id, (event) => replayed.push(event));
-  // The buffer is delivered synchronously on subscribe — no waiting, and
-  // exactly one output frame carries the marker (no double replay).
-  expect(replayed.some((event) => event.type === "output" && event.data.includes("REPLAY_MARKER_91c2"))).toBe(true);
-  expect(replayed.filter((event) => event.type === "output").length).toBe(1);
+  // The buffer is delivered synchronously on subscribe — no waiting — as a
+  // single `replay` frame. The client gates input while parsing that frame, so
+  // scrollback must never arrive labelled as live `output`: that is what left a
+  // freshly created terminal unable to accept typing (issue #4).
+  expect(replayed.some((event) => event.type === "replay" && event.data.includes("REPLAY_MARKER_91c2"))).toBe(true);
+  expect(replayed.filter((event) => event.type === "replay").length).toBe(1);
+  expect(replayed.some((event) => event.type === "output")).toBe(false);
+
+  unsubscribe?.();
+  closeTerminal(info.id);
+}, 20_000);
+
+test("a first subscriber to a fresh terminal gets live output, never a replay frame", async () => {
+  // Regression guard for issue #4: the client only suppresses input while a
+  // `replay` frame is parsing, so a terminal with no scrollback must not emit
+  // one — otherwise its first keystrokes are dropped.
+  const info = createTerminal({ cwd: CWD });
+  const events: TerminalStreamEvent[] = [];
+  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
+  writeToTerminal(info.id, "echo FRESH_MARKER_4d17\n");
+  await waitFor(() =>
+    events.some((event) => event.type === "output" && event.data.includes("FRESH_MARKER_4d17"))
+  );
+  expect(events.some((event) => event.type === "replay")).toBe(false);
 
   unsubscribe?.();
   closeTerminal(info.id);

@@ -354,7 +354,14 @@ export function AppShell() {
             }));
           return additions.length > 0 ? [...prev, ...additions] : prev;
         });
-        if (activeId) setActiveFileTabId((cur) => (cur ? cur : `terminal-${activeId}`));
+        // A terminal that was the active tab before the reload is restored as
+        // the active tab — and the panel is reopened with it. Leaving the panel
+        // collapsed hid a live shell behind a zero-width container, where
+        // xterm cannot measure itself.
+        if (activeId) {
+          setActiveFileTabId((cur) => (cur ? cur : `terminal-${activeId}`));
+          setRightPanelOpen(true);
+        }
       })
       .catch(() => {});
 

@@ -4,6 +4,11 @@ import "@xterm/xterm/css/xterm.css";
 
 import { useEffect, useRef } from "react";
 
+// Type-only: the runtime values are imported dynamically inside the effect,
+// because xterm touches `document` at module scope and would break SSR.
+import type { FitAddon as XtermFitAddon } from "@xterm/addon-fit";
+import type { Terminal as XtermTerminal } from "@xterm/xterm";
+
 interface Props {
   terminalId: string;
   /** Invoked once when the shell process exits; the panel stays mounted so the final output remains readable. */
@@ -34,16 +39,29 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
     if (!container) return;
 
     let disposed = false;
-    let term: import("@xterm/xterm").Terminal | null = null;
+    let term: XtermTerminal | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let eventSource: EventSource | null = null;
     let dataSubscription: { dispose(): void } | null = null;
+    let cancelUnsuppressTimer: (() => void) | null = null;
     let lastCols = 0;
     let lastRows = 0;
+
+    // The panel this lives in is always mounted and collapses to `width: 0`,
+    // so the container is regularly unmeasurable. Fitting then yields a
+    // degenerate geometry and — worse — pushes it to the pty, which reflows the
+    // shell to ~11 columns and wrecks any running TUI. Only ever fit a
+    // container that has a real box; the ResizeObserver re-fits when the panel
+    // expands.
+    const isMeasurable = () => {
+      const element = containerRef.current;
+      return Boolean(element && element.offsetWidth > 0 && element.offsetHeight > 0);
+    };
 
     const sendResize = () => {
       if (!term) return;
       const { cols, rows } = term;
+      if (cols < 2 || rows < 2) return;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
@@ -52,6 +70,14 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cols, rows }),
       }).catch(() => {});
+    };
+
+    const refit = (fitAddon: XtermFitAddon) => {
+      if (!isMeasurable()) return;
+      try {
+        fitAddon.fit();
+      } catch { /* container measured but not renderable yet */ }
+      sendResize();
     };
 
     void (async () => {
@@ -76,16 +102,24 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(containerRef.current);
-      try {
-        fitAddon.fit();
-      } catch { /* container not measurable yet */ }
-      sendResize();
+      refit(fitAddon);
+      // Opening a terminal must leave the keyboard in it: otherwise the
+      // launcher button keeps focus, the first thing typed goes nowhere, and on
+      // a phone the soft keyboard never comes up until the surface is tapped.
+      // A restored terminal can mount while the panel is still collapsed, so
+      // focus is claimed only once the surface is actually on screen — the
+      // observer below takes care of that case.
+      let focused = false;
+      const focusWhenVisible = () => {
+        if (focused || !isMeasurable()) return;
+        focused = true;
+        term?.focus();
+      };
+      focusWhenVisible();
 
       resizeObserver = new ResizeObserver(() => {
-        try {
-          fitAddon.fit();
-        } catch { /* container not measurable */ }
-        sendResize();
+        refit(fitAddon);
+        focusWhenVisible();
       });
       resizeObserver.observe(containerRef.current);
 
@@ -116,15 +150,35 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
           inputSending = false;
         }
       };
-      // The first output frame is the server's replay buffer. It can contain
-      // terminal-query sequences (DA / OSC color queries emitted by vim, htop,
-      // … in the previous session); a fresh xterm answers them via onData,
-      // and piping those answers to the shell makes bash execute garbage.
-      // Suppress input until the replay chunk has finished parsing — xterm's
-      // write callback runs after the parser (and thus its responses) fired.
-      let replayDone = false;
+      // Scrollback replayed on reattach can contain terminal-query sequences
+      // (DA / OSC colour queries emitted by a vim/htop from the previous
+      // session). A fresh xterm answers them through `onData`, and piping those
+      // answers to the shell makes bash execute garbage — so those answers are
+      // dropped while a `replay` frame is being parsed. xterm's write callback
+      // runs after the parser, and therefore after the answers.
+      //
+      // Two deliberate narrowings, each a bug this used to cause:
+      // - Only a `replay` frame arms it, never live output. A freshly created
+      //   terminal has no scrollback to protect against, and arming on the
+      //   first frame of any kind left it unable to accept typing at all (#4).
+      // - Only escape-prefixed data is dropped. Query answers are always
+      //   escape sequences, while anything a user can type in that window is
+      //   overwhelmingly printable, and dropping all of it silently ate the
+      //   first command typed into a reattached terminal.
+      // A timer disarms it regardless, so a write callback that never fires
+      // cannot wedge the terminal read-only.
+      let inputSuppressed = false;
+      // `window.setTimeout` (not the ambient overload) so the handle is a
+      // number in this browser-only component.
+      let unsuppressTimer: number | undefined;
+      const allowInput = () => {
+        inputSuppressed = false;
+        clearTimeout(unsuppressTimer);
+        unsuppressTimer = undefined;
+      };
+      cancelUnsuppressTimer = () => clearTimeout(unsuppressTimer);
       dataSubscription = term.onData((data) => {
-        if (!replayDone) return;
+        if (inputSuppressed && data.startsWith("\x1b")) return;
         inputQueue += data;
         void pumpInput();
       });
@@ -137,16 +191,12 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
             data?: unknown;
             exitCode?: unknown;
           };
-          if (frame.type === "output" && typeof frame.data === "string") {
-            if (replayDone) {
-              term?.write(frame.data);
-            } else {
-              // Replay chunk: keep input suppressed until xterm has finished
-              // parsing it — its write callback runs after parser responses.
-              term?.write(frame.data, () => {
-                replayDone = true;
-              });
-            }
+          if (frame.type === "replay" && typeof frame.data === "string") {
+            inputSuppressed = true;
+            unsuppressTimer = window.setTimeout(allowInput, 1000);
+            term?.write(frame.data, allowInput);
+          } else if (frame.type === "output" && typeof frame.data === "string") {
+            term?.write(frame.data);
           } else if (frame.type === "exit") {
             const exitCode = typeof frame.exitCode === "number" ? frame.exitCode : null;
             onExitRef.current?.(exitCode);
@@ -162,6 +212,7 @@ export function TerminalPanel({ terminalId, onExit }: Props) {
     return () => {
       disposed = true;
       dataSubscription?.dispose();
+      cancelUnsuppressTimer?.();
       resizeObserver?.disconnect();
       eventSource?.close();
       term?.dispose();

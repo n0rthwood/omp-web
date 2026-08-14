@@ -11,7 +11,10 @@ interface TerminalRecord extends TerminalInfo {
 }
 
 export type TerminalStreamEvent =
+  /** Live pty output. */
   | { type: "output"; data: string }
+  /** Buffered scrollback, sent once per subscribe, before any live output. */
+  | { type: "replay"; data: string }
   | { type: "exit"; exitCode: number | null };
 
 type TerminalListener = (event: TerminalStreamEvent) => void;
@@ -132,7 +135,14 @@ export function subscribeTerminal(id: string, listener: TerminalListener): (() =
   if (!record) return undefined;
   // Replay is delivered synchronously here — routes must NOT re-send the
   // buffer themselves or every connect doubles the scrollback.
-  if (record.buffer) listener({ type: "output", data: record.buffer });
+  //
+  // It is a `replay` frame, not an `output` frame, on purpose: only scrollback
+  // can contain terminal-query sequences left by a previous vim/htop, and the
+  // client must suppress xterm's answers to those until it has parsed them.
+  // When the two were indistinguishable the client had to gate input on every
+  // first frame, which left a freshly created terminal — one with no
+  // scrollback at all — permanently unable to accept typing (issue #4).
+  if (record.buffer) listener({ type: "replay", data: record.buffer });
   if (record.exited) listener({ type: "exit", exitCode: record.exitCode ?? null });
   record.listeners.add(listener);
   return () => record.listeners.delete(listener);
