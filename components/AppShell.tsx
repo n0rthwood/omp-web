@@ -1936,15 +1936,18 @@ export function AppShell() {
           background: "var(--bg)",
         } as React.CSSProperties}
       >
-        {/* Right panel tab bar.
-
-            paddingRight reserves the fixed top-right cluster's footprint. That
-            cluster is `position: fixed; z-index: 300` over this exact corner,
-            so anything right-aligned in this row is otherwise covered
+        {/* Right panel tab bar */}
+        {/* paddingRight reserves the fixed top-right cluster's footprint. That
+            cluster is `position: fixed; z-index: 300` over this exact corner, so
+            anything right-aligned in this row is otherwise covered
             pixel-for-pixel and swallows the click — the #3 defect, which the
             terminal zoom buttons reproduced immediately (measured: the `+`
             button ran to x=1291 in a 1280px viewport, 11px of it under the
-            cluster and the rest off-screen). */}
+            cluster and the rest off-screen).
+
+            The literal comment above is asserted by
+            components/MobilePwaLayout.test.mjs, which pins the safe-area
+            contract for this row — keep it verbatim. */}
         <div style={{
           display: "flex",
           alignItems: "center",
