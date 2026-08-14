@@ -3,6 +3,8 @@ import {
   isTerminalFeatureAvailable,
   isTerminalFeatureEnabled,
   isTerminalHostGateSatisfied,
+  isUnauthenticatedTerminalExposure,
+  isUnauthenticatedTerminalsAllowed,
 } from "./terminal-gate";
 import {
   closeTerminal,
@@ -16,7 +18,12 @@ import {
 } from "./terminal-service";
 
 const CWD = import.meta.dir;
-const ENV_KEYS = ["OMP_WEB_TERMINALS", "OMP_WEB_HOSTNAME", "OMP_WEB_PASSWORD"];
+const ENV_KEYS = [
+  "OMP_WEB_TERMINALS",
+  "OMP_WEB_HOSTNAME",
+  "OMP_WEB_PASSWORD",
+  "OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED",
+];
 
 type EnvOverrides = Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
 
@@ -115,11 +122,85 @@ const hostCases: Array<[string | undefined, string | undefined, boolean]> = [
 for (const [hostname, password, expected] of hostCases) {
   test(
     `isTerminalHostGateSatisfied: hostname=${JSON.stringify(hostname)}, password=${JSON.stringify(password)} -> ${expected}`,
-    withEnv({ OMP_WEB_HOSTNAME: hostname, OMP_WEB_PASSWORD: password }, () => {
+    // The opt-out is cleared explicitly: otherwise these expectations depend on
+    // whatever the developer happens to have exported.
+    withEnv({
+      OMP_WEB_HOSTNAME: hostname,
+      OMP_WEB_PASSWORD: password,
+      OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+    }, () => {
       expect(isTerminalHostGateSatisfied()).toBe(expected);
     }),
   );
 }
+
+// The opt-out exists for a trusted non-loopback bind with no password. It must
+// never be implied, and must never substitute for OMP_WEB_TERMINALS itself.
+const optOutCases: Array<[string | undefined, boolean]> = [
+  ["1", true],
+  ["true", true],
+  ["yes", true],
+  ["on", true],
+  ["  ON  ", true],
+  ["0", false],
+  ["false", false],
+  ["", false],
+  ["constructor", false], // prototype keys must not satisfy the table lookup
+  [undefined, false],
+];
+
+for (const [value, expected] of optOutCases) {
+  test(
+    `opt-out on a non-loopback bind with no password: ${JSON.stringify(value)} -> ${expected}`,
+    withEnv({
+      OMP_WEB_HOSTNAME: "0.0.0.0",
+      OMP_WEB_PASSWORD: undefined,
+      OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: value,
+    }, () => {
+      expect(isUnauthenticatedTerminalsAllowed()).toBe(expected);
+      expect(isTerminalHostGateSatisfied()).toBe(expected);
+    }),
+  );
+}
+
+test(
+  "the opt-out alone cannot enable terminals when OMP_WEB_TERMINALS is unset",
+  withEnv({
+    OMP_WEB_TERMINALS: undefined,
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: undefined,
+    OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: "1",
+  }, () => {
+    expect(isTerminalFeatureAvailable()).toBe(false);
+    expect(isUnauthenticatedTerminalExposure()).toBe(false);
+  }),
+);
+
+test(
+  "unauthenticated exposure is reported when terminals are reachable with no password",
+  withEnv({
+    OMP_WEB_TERMINALS: "1",
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: undefined,
+    OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: "1",
+  }, () => {
+    expect(isTerminalFeatureAvailable()).toBe(true);
+    expect(isUnauthenticatedTerminalExposure()).toBe(true);
+  }),
+);
+
+test(
+  "a password means there is no unauthenticated exposure to report",
+  withEnv({
+    OMP_WEB_TERMINALS: "1",
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: "a-long-random-password",
+    OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+  }, () => {
+    expect(isTerminalFeatureAvailable()).toBe(true);
+    expect(isUnauthenticatedTerminalExposure()).toBe(false);
+  }),
+);
 
 const availabilityCases: Array<[string | undefined, string | undefined, string | undefined, boolean]> = [
   ["1", "0.0.0.0", undefined, false], // flag on, non-loopback, no password

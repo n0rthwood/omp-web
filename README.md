@@ -146,6 +146,18 @@ Enabling this turns the web UI into a **full shell** for whoever can reach it �
 the same trust boundary as the agent itself. On a non-loopback bind it refuses
 to activate unless `OMP_WEB_PASSWORD` is also set.
 
+If a non-loopback bind is genuinely trusted — a LAN, a ZeroTier or VPN-only
+interface — and you want terminals there without a password, say so explicitly:
+
+```bash
+OMP_WEB_TERMINALS=1 OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED=1 \
+  OMP_WEB_HOSTNAME=0.0.0.0 omp-web
+```
+
+That serves an interactive shell, as your user, to anyone who can reach the
+port, and the server prints a warning at startup while it is active. Never
+combine it with a public hostname or a port forward.
+
 ## Screenshots
 
 **Session browsing + file explorer** — projects and past sessions on the left, the project's real file tree underneath, ready to preview or attach to a message.
