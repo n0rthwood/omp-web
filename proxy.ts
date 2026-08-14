@@ -73,9 +73,11 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL(`/login?next=${next}`, request.nextUrl), 302);
   }
 
-  // 5. Authorization: user role may not touch admin-only surfaces.
+  // 5. Authorization: user role may not touch admin-only surfaces. Skipped
+  //    entirely when auth is disabled — a no-auth install has no roles.
   if (
-    user?.role !== "admin"
+    authEnabled()
+    && user?.role !== "admin"
     && ADMIN_ONLY_API_PREFIXES.some(
       (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
     )
