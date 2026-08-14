@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { parseThinkingLevel as parseOmpThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { randomUUID } from "crypto";
 import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
+import { isAdmin, isPathVisible } from "@/lib/web-visibility";
 // omp owns the selector grammar (including abbreviations like "med"); reuse its
 // parser so the browser and the CLI accept exactly the same values.
 function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
@@ -57,6 +59,26 @@ export async function POST(req: Request) {
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; [key: string]: unknown };
+
+    // Visibility gate (issue #7): the allowed-roots check above authorizes
+    // paths that already have sessions anywhere in the process; a restricted
+    // web user may still only start sessions inside their visible projects.
+    // Runs before startRpcSession so nothing is spawned for a hidden cwd.
+    const user = await getWebUserOrSynthetic(req);
+    if (!user) {
+      return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    }
+    if (!isAdmin(user)) {
+      let canonicalCwd = cwd;
+      try {
+        canonicalCwd = realpathSync(cwd);
+      } catch {
+        // existsSync passed above; fall through with the path as given.
+      }
+      if (!isPathVisible(user, canonicalCwd)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+    }
     if ((provider && !modelId) || (!provider && modelId)) {
       throw new Error("provider and modelId must be provided together");
     }
