@@ -3,6 +3,23 @@ import { existsSync } from "fs";
 import { addWorktree, listWorktrees, removeWorktree, resolveProject } from "@/lib/worktree";
 import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { getWebUserOrSynthetic, type WebUser } from "@/lib/web-auth-context";
+import { isAdmin, isPathVisible } from "@/lib/web-visibility";
+
+/** Resolve the caller's identity. The middleware gate normally rejects
+ *  unauthenticated traffic before routes run; this is defense in depth. */
+async function resolveUserOr401(req: Request): Promise<{ user: WebUser } | { response: NextResponse }> {
+  const user = await getWebUserOrSynthetic(req);
+  if (!user) {
+    return { response: NextResponse.json({ error: "Authentication required" }, { status: 401 }) };
+  }
+  return { user };
+}
+
+/** 404 (not 403) so hidden project paths cannot be probed for existence. */
+function notVisibleResponse(): NextResponse {
+  return NextResponse.json({ error: "Not visible for this user" }, { status: 404 });
+}
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
  *  allowed dirs may be inspected or mutated through this endpoint. */
@@ -19,11 +36,20 @@ export async function GET(req: Request) {
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
+  const identity = await resolveUserOr401(req);
+  if ("response" in identity) return identity.response;
+  const { user } = identity;
 
   try {
     const cwd = new URL(req.url).searchParams.get("cwd");
     if (!cwd) {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
+    }
+    // UI-level visibility (issue #7): non-admins may only inspect projects
+    // beneath their visible roots; checked before the allow-list so hidden
+    // paths cannot be probed.
+    if (!isAdmin(user) && !isPathVisible(user, cwd)) {
+      return notVisibleResponse();
     }
     const denied = await checkCwdAllowed(cwd);
     if (denied) return denied;
@@ -41,12 +67,17 @@ export async function GET(req: Request) {
     // Every listed path is a git-verified worktree of this project; allow the
     // file explorer to browse them even before they have any session (the
     // in-memory allowlist from addWorktree does not survive server restarts).
-    for (const w of worktrees) allowFileRoot(w.path);
+    // For user roles only worktrees beneath a visible root are listed and
+    // allow-listed — hidden ones are never surfaced nor widened.
+    const visibleWorktrees = isAdmin(user)
+      ? worktrees
+      : worktrees.filter((w) => isPathVisible(user, w.path));
+    for (const w of visibleWorktrees) allowFileRoot(w.path);
     return NextResponse.json({
       projectRoot: project.projectRoot,
       isGit,
       isTopLevel: project.isTopLevel,
-      worktrees,
+      worktrees: visibleWorktrees,
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -61,6 +92,9 @@ export async function POST(req: Request) {
   if (!hasJsonContentType(req)) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
+  const identity = await resolveUserOr401(req);
+  if ("response" in identity) return identity.response;
+  const { user } = identity;
 
   try {
     const body = await req.json() as { cwd?: string; branch?: string };
@@ -69,6 +103,11 @@ export async function POST(req: Request) {
     }
     if (!body.branch || typeof body.branch !== "string") {
       return NextResponse.json({ error: "branch is required" }, { status: 400 });
+    }
+    // Worktree management is allowed inside visible projects (user decision,
+    // issue #7); hidden cwds are rejected before any git mutation.
+    if (!isAdmin(user) && !isPathVisible(user, body.cwd)) {
+      return notVisibleResponse();
     }
     const denied = await checkCwdAllowed(body.cwd);
     if (denied) return denied;
@@ -92,6 +131,9 @@ export async function DELETE(req: Request) {
   if (!hasJsonContentType(req)) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
+  const identity = await resolveUserOr401(req);
+  if ("response" in identity) return identity.response;
+  const { user } = identity;
 
   try {
     const body = await req.json() as { cwd?: string; path?: string; force?: boolean };
@@ -100,6 +142,10 @@ export async function DELETE(req: Request) {
     }
     if (!body.path || typeof body.path !== "string") {
       return NextResponse.json({ error: "path is required" }, { status: 400 });
+    }
+    // Same visibility decision as POST: management allowed in visible projects.
+    if (!isAdmin(user) && !isPathVisible(user, body.cwd)) {
+      return notVisibleResponse();
     }
     const denied = await checkCwdAllowed(body.cwd);
     if (denied) return denied;

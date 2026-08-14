@@ -21,6 +21,8 @@ import {
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
+import { getWebUserOrSynthetic, type WebUser } from "@/lib/web-auth-context";
+import { isAdmin, isPathVisible, visibleRootsForUser } from "@/lib/web-visibility";
 import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
@@ -80,11 +82,13 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
+async function getUploadDirectory(
+  segments: string[],
+  allowedRoots: Set<string>,
+): Promise<
   { directory: string } | { response: NextResponse }
 > {
   const directory = filePathFromSegments(segments);
-  const allowedRoots = await getAllowedFileRoots();
   if (!isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
@@ -117,6 +121,21 @@ async function getUploadDirectory(segments: string[]): Promise<
   return { directory: realDirectory };
 }
 
+/** Resolve the caller and intersect the process-wide allowed roots with
+ *  their visibility (admins and auth-disabled installs keep every root).
+ *  Per-request only — the shared getAllowedFileRoots() cache is never
+ *  mutated or narrowed for other users. */
+async function resolveRequestRoots(
+  request: Request,
+): Promise<{ user: WebUser; roots: Set<string> } | { response: NextResponse }> {
+  const user = await getWebUserOrSynthetic(request);
+  if (!user) {
+    return { response: NextResponse.json({ error: "Authentication required" }, { status: 401 }) };
+  }
+  const roots = new Set(visibleRootsForUser(user, await getAllowedFileRoots()));
+  return { user, roots };
+}
+
 function parseUploadFileNames(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
   return value;
@@ -129,10 +148,12 @@ export async function POST(
   if (!isApiRequestAllowed(request)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
+  const resolved = await resolveRequestRoots(request);
+  if ("response" in resolved) return resolved.response;
 
   try {
     const { path: segments } = await params;
-    const uploadDirectory = await getUploadDirectory(segments);
+    const uploadDirectory = await getUploadDirectory(segments, resolved.roots);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
@@ -425,12 +446,17 @@ export async function GET(
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
 
-    const allowedRoots = await getAllowedFileRoots();
+    const resolved = await resolveRequestRoots(request);
+    if ("response" in resolved) return resolved.response;
+    const { user, roots: allowedRoots } = resolved;
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
+    // Session-referenced files stay visible only inside the user's projects —
+    // the reference shortcut must not bypass the visibility filter.
     const allowedBySessionReference =
       !allowedByRoot &&
       type !== "list" &&
-      await isFilePathReferencedBySession(filePath, sessionId);
+      (await isFilePathReferencedBySession(filePath, sessionId)) &&
+      (isAdmin(user) || isPathVisible(user, filePath));
     if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
