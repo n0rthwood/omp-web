@@ -51,7 +51,7 @@ While the variable is set, the implicit user `omp` is an admin and can also sign
 3. Create your real admin user (role `admin`).
 4. Log out, log back in as the new admin, and remove `OMP_WEB_PASSWORD` from the environment.
 
-The env-backed `omp` identity exists only while the file store has no users *and* the variable is set, so once your first file-based user exists the env password is purely an extra Basic Auth credential you can drop. While it is set, unauthenticated API requests still receive a `WWW-Authenticate: Basic` challenge.
+The env-backed `omp` identity exists while `OMP_WEB_PASSWORD` is set (and no file user claims the name `omp`), so the env password is always an extra admin/Basic-Auth credential until you remove the variable. This also guarantees the first file user you create can never lock out every admin. While the variable is set, unauthenticated API requests still receive a `WWW-Authenticate: Basic` challenge.
 
 ## The users file: `omp-web-users.yml`
 

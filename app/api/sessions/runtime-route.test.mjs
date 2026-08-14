@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createJiti } from "jiti";
 
@@ -25,6 +27,10 @@ async function withAuthDisabled(fn) {
   const saved = {};
   for (const key of keys) saved[key] = process.env[key];
   for (const key of keys) delete process.env[key];
+  // Point the users store at a path that cannot exist: the developer machine
+  // may have a real ~/.omp/agent/omp-web-users.yml (any deployment does once
+  // the first user is created), and it must not flip auth back on.
+  process.env.OMP_WEB_USERS_FILE = join(tmpdir(), `omp-runtime-route-absent-${process.pid}.yml`);
   globalThis.__ompWebUsersCache = undefined;
   try {
     return await fn();

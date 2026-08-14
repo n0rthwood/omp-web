@@ -280,16 +280,31 @@ test("last admin cannot be demoted or deleted (409)", async (t) => {
   assert.equal(deleted.status, 409);
   assert.equal(users.readWebUsersConfig().users.length, 1, "solo survives");
 
-  // The env-backed migration admin does NOT rescue a non-empty users file.
+  // The env-backed migration admin DOES rescue a non-empty users file while
+  // OMP_WEB_PASSWORD is set: demoting/deleting the last file admin is allowed
+  // because the bridge admin keeps admin access available.
   process.env.OMP_WEB_PASSWORD = "env-migration-pass";
   globalThis.__ompWebUsersCache = undefined;
   const demotedWithEnv = await detail.PATCH(
     apiRequest("/solo", { method: "PATCH", cookie: solo, body: { role: "user" } }),
     params({ username: "solo" }),
   );
-  assert.equal(demotedWithEnv.status, 409, "env admin only counts while the file is empty");
+  assert.equal(demotedWithEnv.status, 200, "env bridge admin counts while the variable is set");
   delete process.env.OMP_WEB_PASSWORD;
   globalThis.__ompWebUsersCache = undefined;
+  // Restore solo as admin for the remainder of the test.
+  users.writeWebUsersConfig({
+    users: [
+      {
+        username: "solo",
+        role: "admin",
+        passwordHash: users.hashWebPassword("solo-pass-1"),
+        projects: "*",
+        tokens: [],
+      },
+    ],
+    sessions: { secret: "", ttlDays: 30 },
+  });
 
   // With a second admin, demote and delete both succeed.
   const created = await list.POST(

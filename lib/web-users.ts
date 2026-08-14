@@ -292,14 +292,18 @@ export function getEffectiveWebUsers(): EffectiveWebUser[] {
     ...user,
     envBacked: false,
   }));
-  if (users.length > 0) return users;
 
   const envPassword = process.env.OMP_WEB_PASSWORD;
   if (!isWebPasswordEnabled(envPassword)) return users;
 
-  // Migration bridge: while the file has no users, expose the legacy Basic
-  // Auth identity as a synthetic admin. Never persisted.
+  // Migration bridge: while OMP_WEB_PASSWORD is set, the legacy Basic Auth
+  // identity stays available as a synthetic admin — even after file users
+  // exist — so creating the first file user can never lock out every admin.
+  // It retires when the operator removes the env var, and yields to a file
+  // user that claims the same name. Never persisted.
+  if (users.some((user) => user.username === ENV_MIGRATION_USERNAME)) return users;
   return [
+    ...users,
     {
       username: ENV_MIGRATION_USERNAME,
       role: "admin",
@@ -326,14 +330,17 @@ export function hasStoredWebUsers(): boolean {
 
 /**
  * Effective admin count for a candidate user list (used by the last-admin
- * guard). The env-backed migration admin counts only while it is actually in
- * effect — the file has no users and `OMP_WEB_PASSWORD` is set — mirroring
- * `getEffectiveWebUsers`.
+ * guard). The env-backed migration admin counts whenever it would be in
+ * effect: `OMP_WEB_PASSWORD` set and no file user claims its name —
+ * mirroring `getEffectiveWebUsers`.
  */
 export function countEffectiveAdmins(users: StoredWebUser[]): number {
   const admins = users.filter((user) => user.role === "admin").length;
   if (admins > 0) return admins;
-  return users.length === 0 && isWebPasswordEnabled(process.env.OMP_WEB_PASSWORD) ? 1 : 0;
+  const bridgeInEffect =
+    isWebPasswordEnabled(process.env.OMP_WEB_PASSWORD)
+    && !users.some((user) => user.username === ENV_MIGRATION_USERNAME);
+  return bridgeInEffect ? 1 : 0;
 }
 
 // --- Bearer tokens -------------------------------------------------------------
