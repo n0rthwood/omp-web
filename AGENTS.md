@@ -600,6 +600,50 @@ resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
   still-collapsed panel, and a degenerate fit is propagated straight to the pty
   — an 11-column shell with a wrapped prompt. The `ResizeObserver` re-fits (and
   claims focus) once the panel actually has a box.
+- Anything right-aligned in the panel header must reserve the fixed cluster's
+  footprint (`paddingRight` of 72px with the launcher present, 36px without).
+  The zoom buttons reproduced #3 the moment they were added: the `+` ran to
+  x=1291 in a 1280px viewport. A terminal tab becoming active also force-opens
+  the panel, keyed on the tab id so collapsing it by hand still works —
+  otherwise closing the last tab schedules `setRightPanelOpen(false)` which can
+  land *after* a new terminal opened it, leaving a live shell in a 1px panel.
+- Controls outside the terminal steal focus. Changing the font size hands focus
+  back, or the next keystroke goes nowhere.
+
+### Terminal tab — rendering and fonts
+- Install a **renderer addon**. With only `@xterm/addon-fit`, xterm uses the DOM
+  renderer: one styled `<span>` run per row per frame, subpixel-positioned. That
+  is why Chrome's cell grid looked uneven where Safari's looked fine. WebGL
+  first, `@xterm/addon-canvas` on failure and on `onContextLoss`.
+- The terminal uses `--term-font`, **never `--font-mono`**. The UI stack contains
+  ligature faces (`Fira Code`, `Cascadia Code`) and proportional ones
+  (`PingFang SC`, `Microsoft YaHei`), all fatal to a fixed cell grid. Safari
+  resolves `ui-monospace` to SF Mono first and never reaches them; Chrome
+  ignores `ui-monospace` off macOS and walks straight in. Keep `--term-font` on
+  one line: xterm feeds it to a canvas `ctx.font` shorthand, where an embedded
+  newline makes the assignment fail silently.
+- All 16 ANSI colours come from the active omp theme via `getWebThemePalette`.
+  Three derivations were measured and rejected: forcing contrast toward
+  `--text` desaturates hues into near-identical muds on light themes; rotating
+  hue by a delta turns a teal accent's "cyan" green; and anchoring blue to the
+  accent yields an orange blue on warm themes (catppuccin, gruvbox). What works:
+  keep the theme's error/success/warning hues, mint blue/magenta/cyan at
+  canonical hues from the accent, clamp saturation to `[0.45, 0.85]`, and force
+  legibility toward black/white.
+- Screenshots of xterm's canvas come back **blank** in headless Chromium, and a
+  WebGL back buffer cannot be read back without `preserveDrawingBuffer`. Verify
+  rendering by sampling the canvas text layer's pixels with `getImageData`, not
+  by screenshotting.
+
+### Never benchmark against `next dev`
+`next dev --webpack` costs ~800ms per API request on this machine; a production
+build of the same commit costs ~2-3ms. That is a ~240x difference and it is not
+route-specific — `/api/home` and `/api/terminals/status` measure the same. Any
+latency claim must come from a production build. Build one without disturbing
+the working tree's `.next/` by using a git worktree with `node_modules`
+symlinked (`git worktree add .worktrees/perf <ref>`), then `next start` there.
+Two `next dev` servers in one directory also fight over `.next/dev` and one
+exits — which looks exactly like a server crashing for no reason.
 
 ## omp Session File Format
 
