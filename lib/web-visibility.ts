@@ -36,12 +36,21 @@ export function isPathVisible(user: WebUser, absPath: string): boolean {
   return user.visibleProjects.some((root) => isWithin(path, normalizePath(root)));
 }
 
-/** Keep sessions whose `projectRoot ?? cwd` is visible to the user. */
+/**
+ * Keep sessions whose `cwd` (or its grouped `projectRoot`) is visible to the
+ * user — per the issue spec, either counts: worktree sessions carry the main
+ * repo's `projectRoot` while their `cwd` is the worktree itself, and both are
+ * legitimate visibility anchors.
+ */
 export function filterVisibleSessions<S extends { cwd: string; projectRoot?: string }>(
   user: WebUser,
   sessions: S[],
 ): S[] {
-  return sessions.filter((session) => isPathVisible(user, session.projectRoot ?? session.cwd));
+  return sessions.filter(
+    (session) =>
+      isPathVisible(user, session.cwd)
+      || (session.projectRoot !== undefined && isPathVisible(user, session.projectRoot)),
+  );
 }
 
 /**
