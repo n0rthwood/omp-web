@@ -149,7 +149,7 @@ export interface AgentSessionLike {
   readonly autoRetryEnabled: boolean;
   readonly model: ModelLike | undefined;
   readonly modelRegistry: {
-    find: (selector: string) => ModelLike | undefined;
+    find: (provider: string, modelId: string) => ModelLike | undefined;
     getAll: () => ModelLike[];
     getAvailable: () => ModelLike[];
     refresh: (strategy?: string) => Promise<unknown>;

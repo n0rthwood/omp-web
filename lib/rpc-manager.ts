@@ -726,10 +726,10 @@ export class AgentSessionWrapper {
       case "set_model": {
         const { provider, modelId, role } = command as { provider: string; modelId: string; role?: string };
         const selector = `${provider}/${modelId}`;
-        let model = this.inner.modelRegistry.find(selector);
+        let model = this.inner.modelRegistry.find(provider, modelId);
         if (!model) {
           await this.inner.modelRegistry.refresh("offline");
-          model = this.inner.modelRegistry.find(selector);
+          model = this.inner.modelRegistry.find(provider, modelId);
         }
         if (!model) throw new Error(`Model not found: ${selector}`);
         // omp records the role a model change came from, so the transcript and
