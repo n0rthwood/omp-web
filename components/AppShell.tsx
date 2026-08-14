@@ -1903,26 +1903,6 @@ export function AppShell() {
             />
           </div>
 
-          {terminalsEnabled && activeCwd && (
-            <button
-              onClick={handleNewTerminal}
-              title="New Terminal"
-              aria-label="New Terminal"
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, marginRight: 8, flexShrink: 0,
-                background: "transparent",
-                border: "none", borderRadius: 4,
-                color: "var(--text-dim)",
-                cursor: "pointer", padding: 0,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
-            >
-              <TerminalIcon size={13} />
-            </button>
-          )}
-
         </div>
 
         {/* File content */}
@@ -1955,28 +1935,58 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-       aria-controls="file-panel"
-       aria-expanded={rightPanelOpen}
-       title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-       aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-      style={{
-        position: "fixed", top: "env(safe-area-inset-top)", right: "env(safe-area-inset-right)", zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: 36, height: 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color 0.12s",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
+    {/*
+      Fixed top-right cluster — the terminal launcher lives here, not in the
+      panel header. Inside the panel it was unreachable (issue #3): the panel
+      is `width: 0; overflow: hidden` when closed, which clipped the button
+      away, and the toggle below is `position: fixed; z-index: 300` over the
+      same corner, so even with the panel open a click hit the toggle instead.
+    */}
+    <div style={{
+      position: "fixed", top: "env(safe-area-inset-top)", right: "env(safe-area-inset-right)", zIndex: 300,
+      display: "flex", alignItems: "stretch",
+      background: "var(--bg-panel)",
+      borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
+    }}>
+      {terminalsEnabled && activeCwd && (
+        <button
+          onClick={handleNewTerminal}
+          title={translate("files.newTerminal")}
+          aria-label={translate("files.newTerminal")}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            width: 36, height: 36, padding: 0,
+            background: "transparent", border: "none", borderRight: "1px solid var(--border)",
+            color: "var(--text-muted)",
+            cursor: "pointer", transition: "color 0.12s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          <TerminalIcon size={16} />
+        </button>
+      )}
+      <button
+        onClick={() => setRightPanelOpen((v) => !v)}
+        aria-controls="file-panel"
+        aria-expanded={rightPanelOpen}
+        title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+        aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 36, height: 36, padding: 0,
+          background: "transparent", border: "none",
+          color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer", transition: "color 0.12s",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
+      </button>
+    </div>
     {settingsConfigOpen && (
       <SettingsConfig
         cwd={projectTrustCwd}
