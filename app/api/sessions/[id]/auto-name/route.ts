@@ -2,12 +2,15 @@ import { NextResponse } from "next/server";
 import { generateSessionTitle } from "@/lib/session-title";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { requireVisibleSession } from "@/lib/web-session-guard";
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
 
   try {
     const filePath = await resolveSessionPath(id);

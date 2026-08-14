@@ -15,6 +15,28 @@ const jiti = createJiti(import.meta.url, {
 const { GET: getSessionDetail } = await jiti.import("./[id]/route.ts");
 const { GET: getSessionState } = await jiti.import("./[id]/state/route.ts");
 
+/**
+ * Run `fn` with web auth disabled: an ambient OMP_WEB_PASSWORD or users file
+ * (developer shell) must not make the forged no-credential requests 401 —
+ * these routes resolve the synthetic `__anonymous` admin when auth is off.
+ */
+async function withAuthDisabled(fn) {
+  const keys = ["OMP_WEB_PASSWORD", "OMP_WEB_USERS_FILE", "OMP_WEB_SESSIONS_FILE"];
+  const saved = {};
+  for (const key of keys) saved[key] = process.env[key];
+  for (const key of keys) delete process.env[key];
+  globalThis.__ompWebUsersCache = undefined;
+  try {
+    return await fn();
+  } finally {
+    for (const key of keys) {
+      if (saved[key] === undefined) continue;
+      process.env[key] = saved[key];
+    }
+    globalThis.__ompWebUsersCache = undefined;
+  }
+}
+
 test("session listing merges live registry snapshots and honors force refresh", () => {
   assert.match(listRoute, /searchParams\.get\("force"\) === "1"/);
   assert.match(listRoute, /listAllSessions\(\{ force \}\)/);
@@ -73,23 +95,25 @@ test("live detail and state routes work without a persisted JSONL file", async (
     globalThis.__ompSessions = previousRegistry;
   });
 
-  const routeContext = { params: Promise.resolve({ id }) };
-  const detailResponse = await getSessionDetail(
-    new Request(`http://localhost/api/sessions/${id}`, { headers: { host: "localhost" } }),
-    routeContext,
-  );
-  const stateResponse = await getSessionState(
-    new Request(`http://localhost/api/sessions/${id}/state`, { headers: { host: "localhost" } }),
-    routeContext,
-  );
-  const detail = await detailResponse.json();
+  await withAuthDisabled(async () => {
+    const routeContext = { params: Promise.resolve({ id }) };
+    const detailResponse = await getSessionDetail(
+      new Request(`http://localhost/api/sessions/${id}`, { headers: { host: "localhost" } }),
+      routeContext,
+    );
+    const stateResponse = await getSessionState(
+      new Request(`http://localhost/api/sessions/${id}/state`, { headers: { host: "localhost" } }),
+      routeContext,
+    );
+    const detail = await detailResponse.json();
 
-  assert.equal(detailResponse.status, 200);
-  assert.equal(detail.info.transient, true);
-  assert.deepEqual(detail.context.messages.map((message) => message.content), ["hello live"]);
-  assert.equal(stateResponse.status, 200);
-  assert.deepEqual(await stateResponse.json(), {
-    running: true,
-    state: { isStreaming: true },
+    assert.equal(detailResponse.status, 200);
+    assert.equal(detail.info.transient, true);
+    assert.deepEqual(detail.context.messages.map((message) => message.content), ["hello live"]);
+    assert.equal(stateResponse.status, 200);
+    assert.deepEqual(await stateResponse.json(), {
+      running: true,
+      state: { isStreaming: true },
+    });
   });
 });
