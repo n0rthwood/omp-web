@@ -1,4 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   isTerminalFeatureAvailable,
   isTerminalFeatureEnabled,
@@ -23,6 +26,7 @@ const ENV_KEYS = [
   "OMP_WEB_HOSTNAME",
   "OMP_WEB_PASSWORD",
   "OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED",
+  "OMP_WEB_USERS_FILE",
 ];
 
 type EnvOverrides = Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
@@ -80,6 +84,39 @@ afterAll(() => {
   for (const info of listTerminals(CWD)) closeTerminal(info.id);
 });
 
+/**
+ * Minimal users store YAML for the gate tests: the gate only counts stored
+ * users, so a non-empty placeholder password hash parses fine and keeps the
+ * fixtures independent of the real `~/.omp/agent/omp-web-users.yml`.
+ */
+function writeUsersYaml(path: string, usernames: string[]): string {
+  mkdirSync(dirname(path), { recursive: true });
+  const users = usernames
+    .map((username) =>
+      `  - username: ${username}\n    role: user\n    passwordHash: "placeholder"\n    projects: "*"\n    tokens: []`
+    )
+    .join("\n");
+  writeFileSync(
+    path,
+    `users:\n${usernames.length > 0 ? `${users}\n` : ""}sessions:\n  secret: ""\n  ttlDays: 30\n`,
+  );
+  return path;
+}
+
+const usersFileWithUser = writeUsersYaml(
+  join(mkdtempSync(join(tmpdir(), "terminal-gate-users-")), "omp-web-users.yml"),
+  ["alice"],
+);
+const usersFileEmpty = writeUsersYaml(
+  join(mkdtempSync(join(tmpdir(), "terminal-gate-users-")), "omp-web-users.yml"),
+  [],
+);
+
+afterAll(() => {
+  rmSync(dirname(usersFileWithUser), { recursive: true, force: true });
+  rmSync(dirname(usersFileEmpty), { recursive: true, force: true });
+});
+
 // --- terminal-gate.ts ---
 
 const flagCases: Array<[string | undefined, boolean]> = [
@@ -128,6 +165,7 @@ for (const [hostname, password, expected] of hostCases) {
       OMP_WEB_HOSTNAME: hostname,
       OMP_WEB_PASSWORD: password,
       OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+      OMP_WEB_USERS_FILE: usersFileEmpty,
     }, () => {
       expect(isTerminalHostGateSatisfied()).toBe(expected);
     }),
@@ -156,6 +194,7 @@ for (const [value, expected] of optOutCases) {
       OMP_WEB_HOSTNAME: "0.0.0.0",
       OMP_WEB_PASSWORD: undefined,
       OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: value,
+      OMP_WEB_USERS_FILE: usersFileEmpty,
     }, () => {
       expect(isUnauthenticatedTerminalsAllowed()).toBe(expected);
       expect(isTerminalHostGateSatisfied()).toBe(expected);
@@ -170,6 +209,7 @@ test(
     OMP_WEB_HOSTNAME: "0.0.0.0",
     OMP_WEB_PASSWORD: undefined,
     OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: "1",
+    OMP_WEB_USERS_FILE: usersFileEmpty,
   }, () => {
     expect(isTerminalFeatureAvailable()).toBe(false);
     expect(isUnauthenticatedTerminalExposure()).toBe(false);
@@ -183,6 +223,7 @@ test(
     OMP_WEB_HOSTNAME: "0.0.0.0",
     OMP_WEB_PASSWORD: undefined,
     OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: "1",
+    OMP_WEB_USERS_FILE: usersFileEmpty,
   }, () => {
     expect(isTerminalFeatureAvailable()).toBe(true);
     expect(isUnauthenticatedTerminalExposure()).toBe(true);
@@ -196,9 +237,43 @@ test(
     OMP_WEB_HOSTNAME: "0.0.0.0",
     OMP_WEB_PASSWORD: "a-long-random-password",
     OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+    OMP_WEB_USERS_FILE: usersFileEmpty,
   }, () => {
     expect(isTerminalFeatureAvailable()).toBe(true);
     expect(isUnauthenticatedTerminalExposure()).toBe(false);
+  }),
+);
+
+// Stored web users (cookie/Bearer auth) also count as "a terminal is not
+// served unauthenticated": the proxy login gate fronts the whole app, so the
+// feature may run on a public bind even without the env-password bridge.
+test(
+  "stored web users satisfy the host gate on a public bind without a password",
+  withEnv({
+    OMP_WEB_TERMINALS: "1",
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: undefined,
+    OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+    OMP_WEB_USERS_FILE: usersFileWithUser,
+  }, () => {
+    expect(isTerminalHostGateSatisfied()).toBe(true);
+    expect(isTerminalFeatureAvailable()).toBe(true);
+    // Login is required, so this is not an unauthenticated exposure.
+    expect(isUnauthenticatedTerminalExposure()).toBe(false);
+  }),
+);
+
+test(
+  "an empty users file does not satisfy the host gate by itself",
+  withEnv({
+    OMP_WEB_TERMINALS: "1",
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: undefined,
+    OMP_WEB_TERMINALS_ALLOW_UNAUTHENTICATED: undefined,
+    OMP_WEB_USERS_FILE: usersFileEmpty,
+  }, () => {
+    expect(isTerminalHostGateSatisfied()).toBe(false);
+    expect(isTerminalFeatureAvailable()).toBe(false);
   }),
 );
 
@@ -212,7 +287,12 @@ const availabilityCases: Array<[string | undefined, string | undefined, string |
 for (const [flag, hostname, password, expected] of availabilityCases) {
   test(
     `isTerminalFeatureAvailable: flag=${JSON.stringify(flag)}, hostname=${JSON.stringify(hostname)}, password=${JSON.stringify(password ? "…" : password)} -> ${expected}`,
-    withEnv({ OMP_WEB_TERMINALS: flag, OMP_WEB_HOSTNAME: hostname, OMP_WEB_PASSWORD: password }, () => {
+    withEnv({
+      OMP_WEB_TERMINALS: flag,
+      OMP_WEB_HOSTNAME: hostname,
+      OMP_WEB_PASSWORD: password,
+      OMP_WEB_USERS_FILE: usersFileEmpty,
+    }, () => {
       expect(isTerminalFeatureAvailable()).toBe(expected);
     }),
   );
