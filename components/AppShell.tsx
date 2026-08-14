@@ -1917,13 +1917,22 @@ export function AppShell() {
           background: "var(--bg)",
         } as React.CSSProperties}
       >
-        {/* Right panel tab bar */}
+        {/* Right panel tab bar.
+
+            paddingRight reserves the fixed top-right cluster's footprint. That
+            cluster is `position: fixed; z-index: 300` over this exact corner,
+            so anything right-aligned in this row is otherwise covered
+            pixel-for-pixel and swallows the click — the #3 defect, which the
+            terminal zoom buttons reproduced immediately (measured: the `+`
+            button ran to x=1291 in a 1280px viewport, 11px of it under the
+            cluster and the rest off-screen). */}
         <div style={{
           display: "flex",
           alignItems: "center",
           flexShrink: 0,
           height: "calc(36px + env(safe-area-inset-top))",
           paddingTop: "env(safe-area-inset-top)",
+          paddingRight: `calc(env(safe-area-inset-right) + ${terminalsEnabled && activeCwd ? 72 : 36}px)`,
           background: "var(--bg-panel)",
           borderBottom: "1px solid var(--border)",
         }}>

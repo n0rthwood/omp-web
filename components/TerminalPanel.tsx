@@ -82,6 +82,10 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
     if (!term) return;
     term.options.fontSize = fontSize;
     refitRef.current?.();
+    // The zoom buttons live outside the terminal, so clicking one moves focus
+    // to the button and the next keystroke goes nowhere. Hand focus back: the
+    // user just operated the terminal's own control.
+    term.focus();
   }, [fontSize]);
 
   useEffect(() => {
