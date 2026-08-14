@@ -34,7 +34,7 @@ interface SettingsConfigProps {
 
 const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean; requiresAdmin?: boolean }> = [
   { id: "models", label: "Models", icon: "model", requiresAdmin: true },
-  { id: "themes", label: "Themes", icon: "theme" },
+  { id: "themes", label: "Themes", icon: "theme", requiresAdmin: true },
   { id: "skills", label: "Skills", icon: "skill", requiresCwd: true, requiresAdmin: true },
   { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
   { id: "mcp", label: "MCP", icon: "mcp", requiresAdmin: true },
@@ -264,7 +264,11 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
     try {
-      await fetch("/api/auth/web-logout", { method: "POST" });
+      await fetch("/api/auth/web-logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
     } catch {
       // Proceed to /login regardless — the cookie is cleared or already dead.
     }
@@ -367,7 +371,9 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
           </div>
         </aside>
         <main className={styles.content}>
-          {query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : renderGenericSettings()}
+          {visibleCoreSections.length === 0 ? (
+            <div className={styles.empty}>No settings are available for this user.</div>
+          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : renderGenericSettings()}
         </main>
       </div>
     </div>

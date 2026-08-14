@@ -8,19 +8,21 @@ import {
   resolveBashOutputPath,
 } from "@/lib/bash-output";
 import { isBashOutputPathReferencedBySession } from "@/lib/session-file-references";
-
+import { requireVisibleSession } from "@/lib/web-session-guard";
 // GET /api/agent/[id]/bash-output?path=<absPath>
 // Reads a bash output temp file referenced by this session. Inline display is
 // size-limited; download responses stream the file without buffering it.
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
   let path: string | null = null;
   let download = false;
   try {
-    const url = new URL(_req.url);
+    const url = new URL(req.url);
     path = url.searchParams.get("path");
     download = url.searchParams.get("download") === "1";
   } catch {

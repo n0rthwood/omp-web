@@ -66,8 +66,12 @@ export async function getWebUserFromRequest(request: Request): Promise<WebUser |
       if (user) return toSafeWebUser(user);
     } else if (isValidBasicAuthorization(authorization)) {
       // 3. Legacy Basic auth — the OMP_WEB_PASSWORD migration bridge. Valid
-      // credentials map to the implicit env-backed admin.
-      return { username: OMP_WEB_AUTH_USERNAME, role: "admin", visibleProjects: "*" };
+      // credentials map to the implicit env-backed admin only while that
+      // admin is actually in effect (no file user claims the "omp" name).
+      const bridgeAdmin = getEffectiveWebUsers().find(
+        (u) => u.username === OMP_WEB_AUTH_USERNAME && u.envBacked,
+      );
+      if (bridgeAdmin) return toSafeWebUser(bridgeAdmin);
     }
   }
 

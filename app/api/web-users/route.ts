@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType } from "@/lib/request-security";
 import {
+  countEffectiveAdmins,
   createWebUser,
   getEffectiveWebUsers,
   hashWebPassword,
   isValidWebUsername,
+  readWebUsersConfig,
   type EffectiveWebUser,
 } from "@/lib/web-users";
 import { jsonError, parseProjects, parseRole, readJsonBody, requireAdminApi } from "./_guard";
@@ -54,6 +56,23 @@ export async function POST(req: Request) {
   const parsedProjects = parseProjects(projects);
   if (!parsedProjects.ok) {
     return jsonError(400, "projects must be \"*\" or an array of absolute paths");
+  }
+
+  // Creating a non-admin named "omp" while the env bridge is active would
+  // suppress the synthetic admin and leave zero effective admins (a lockout).
+  // Enforce the same invariant as PATCH/DELETE before persisting.
+  const usersAfterCreate = [
+    ...readWebUsersConfig().users,
+    {
+      username,
+      role: parsedRole,
+      passwordHash: hashWebPassword(password),
+      projects: parsedProjects.projects,
+      tokens: [],
+    },
+  ];
+  if (countEffectiveAdmins(usersAfterCreate) === 0) {
+    return jsonError(409, "Cannot remove the last admin");
   }
 
   const created = createWebUser({

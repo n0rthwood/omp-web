@@ -64,14 +64,21 @@ export async function GET(req: Request) {
     } catch {
       isGit = false;
     }
-    // Every listed path is a git-verified worktree of this project; allow the
-    // file explorer to browse them even before they have any session (the
-    // in-memory allowlist from addWorktree does not survive server restarts).
-    // For user roles only worktrees beneath a visible root are listed and
-    // allow-listed — hidden ones are never surfaced nor widened.
+    // Normal worktree checkouts live at <projectRoot>-worktrees/<branch>,
+    // outside a typical assigned root like <projectRoot> itself. Those are
+    // visible when the owning project root is; a worktree deliberately placed
+    // elsewhere stays visible only if its own path is.
+    const standardWorktreesDir = `${project.projectRoot}-worktrees/`;
     const visibleWorktrees = isAdmin(user)
       ? worktrees
-      : worktrees.filter((w) => isPathVisible(user, w.path));
+      : worktrees.filter(
+          (w) =>
+            isPathVisible(user, w.path)
+            || (
+              isPathVisible(user, project.projectRoot)
+              && w.path.startsWith(standardWorktreesDir)
+            ),
+        );
     for (const w of visibleWorktrees) allowFileRoot(w.path);
     return NextResponse.json({
       projectRoot: project.projectRoot,
@@ -146,6 +153,15 @@ export async function DELETE(req: Request) {
     // Same visibility decision as POST: management allowed in visible projects.
     if (!isAdmin(user) && !isPathVisible(user, body.cwd)) {
       return notVisibleResponse();
+    }
+    // The removal target itself must also be visible — otherwise a user could
+    // remove a worktree deliberately omitted from their GET list by supplying
+    // its path directly (including force: true).
+    if (!isAdmin(user)) {
+      const project = await resolveProject(body.cwd);
+      const targetVisible =
+        isPathVisible(user, body.path) || isPathVisible(user, project.projectRoot);
+      if (!targetVisible) return notVisibleResponse();
     }
     const denied = await checkCwdAllowed(body.cwd);
     if (denied) return denied;

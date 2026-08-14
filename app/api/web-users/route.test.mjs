@@ -508,3 +508,30 @@ test("unknown users and unknown tokens return 404", async (t) => {
     assert.equal(resolved.status, 404, `${label} must be 404`);
   }
 });
+
+test("POST rejects creating a non-admin 'omp' while the env bridge is the only admin", async (t) => {
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { users } = await loadLibs();
+  const { list } = await loadRoutes();
+
+  // No file users; OMP_WEB_PASSWORD provides the env-backed admin.
+  users.writeWebUsersConfig({ users: [], sessions: { secret: "", ttlDays: 30 } });
+  process.env.OMP_WEB_PASSWORD = "env-migration-pass";
+  globalThis.__ompWebUsersCache = undefined;
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD;
+    globalThis.__ompWebUsersCache = undefined;
+  });
+
+  const admin = await loginAs("omp");
+  const res = await list.POST(
+    apiRequest("", {
+      method: "POST",
+      cookie: admin,
+      body: { username: "omp", password: "file-pass-1", role: "user", projects: "*" },
+    }),
+  );
+  assert.equal(res.status, 409, "would suppress the only admin");
+  assert.deepEqual(await res.json(), { error: "Cannot remove the last admin" });
+});

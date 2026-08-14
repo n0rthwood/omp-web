@@ -1,8 +1,7 @@
 import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
 import { isApiRequestAllowed } from "@/lib/request-security";
-
-export const dynamic = "force-dynamic";
+import { requireVisibleSession } from "@/lib/web-session-guard";
 
 const OMITTED_EVENT_TYPES = new Set(["turn_start", "turn_end", "tool_execution_update"]);
 
@@ -26,6 +25,8 @@ export async function GET(
   if (!isApiRequestAllowed(req)) {
     return new Response("Untrusted API request", { status: 403 });
   }
+  const blocked = await requireVisibleSession(req, id);
+  if (blocked) return blocked;
 
 
   // Fast path: already-running session
