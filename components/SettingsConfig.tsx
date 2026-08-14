@@ -6,6 +6,8 @@ import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { SearchableSelect } from "./SearchableSelect";
 import { refreshOmpTheme, useTheme } from "@/hooks/useTheme";
+import { useWebUser } from "@/hooks/useWebUser";
+import { WebUsersConfig } from "./WebUsersConfig";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type {
   McpConfigResponse,
@@ -19,7 +21,7 @@ import type {
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
 
-type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | `settings:${string}`;
+type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | "users" | `settings:${string}`;
 
 interface SettingsConfigProps {
   cwd?: string | null;
@@ -30,17 +32,18 @@ interface SettingsConfigProps {
   onReloaded?: () => void;
 }
 
-const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean }> = [
-  { id: "models", label: "Models", icon: "model" },
+const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean; requiresAdmin?: boolean }> = [
+  { id: "models", label: "Models", icon: "model", requiresAdmin: true },
   { id: "themes", label: "Themes", icon: "theme" },
-  { id: "skills", label: "Skills", icon: "skill", requiresCwd: true },
-  { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true },
-  { id: "mcp", label: "MCP", icon: "mcp" },
+  { id: "skills", label: "Skills", icon: "skill", requiresCwd: true, requiresAdmin: true },
+  { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
+  { id: "mcp", label: "MCP", icon: "mcp", requiresAdmin: true },
+  { id: "users", label: "Users", icon: "user", requiresAdmin: true },
 ];
 
 const ICON_PATHS: Record<string, React.ReactNode> = {
   model: <><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9zM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m16 0h3M1 15h3m16 0h3"/></>,
-  theme: <><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z"/></>,
+  user: <><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></>,
   skill: <><path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></>,
   plugin: <><path d="M8 3v5m8-5v5M6 8h12v5a6 6 0 0 1-12 0V8Zm6 11v3"/></>,
   mcp: <><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 7.5 11 16m5-8.5L13 16M8 6h8"/></>,
@@ -190,7 +193,12 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [needsReload, setNeedsReload] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const { theme, toggleTheme } = useTheme();
+  const { user: webUser } = useWebUser();
+  // Fail closed: admin-only sections stay hidden until web-me confirms the role.
+  const isAdminUser = webUser?.role === "admin";
+  const visibleCoreSections = CORE_SECTIONS.filter((item) => !item.requiresAdmin || isAdminUser);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -208,7 +216,14 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     }
   }, [cwd]);
 
-  useEffect(() => { void loadSettings(); }, [loadSettings]);
+  useEffect(() => {
+    if (!isAdminUser) {
+      // /api/settings is admin-only; non-admins use the Themes section only.
+      setLoading(false);
+      return;
+    }
+    void loadSettings();
+  }, [isAdminUser, loadSettings]);
 
   const saveSetting = useCallback(async (field: SettingsField, value: SettingsValue) => {
     setSaving((current) => new Set(current).add(field.path));
@@ -233,7 +248,12 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
 
   const values = useMemo(() => new Map(settings?.fields.map((field) => [field.path, field.value]) ?? []), [settings?.fields]);
   const visibleFields = useMemo(() => settings?.fields.filter((field) => conditionVisible(field, values)) ?? [], [settings?.fields, values]);
-  const activeTab = section.startsWith("settings:") ? section.slice("settings:".length) : null;
+  // Fall back to the first visible section when the requested one is admin-gated
+  // (e.g. the default "models" section opened by a user-role account).
+  const activeSection: SettingsSection = visibleCoreSections.some((item) => item.id === section) || (isAdminUser && section.startsWith("settings:"))
+    ? section
+    : visibleCoreSections[0]?.id ?? "themes";
+  const activeTab = activeSection.startsWith("settings:") ? activeSection.slice("settings:".length) : null;
   const filteredFields = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (normalized) return visibleFields.filter((field) => `${field.label} ${field.description} ${field.path} ${field.group ?? ""}`.toLowerCase().includes(normalized));
@@ -241,6 +261,15 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     return visibleFields.filter((field) => field.tab === activeTab && !(activeTab === "appearance" && field.group === "Theme"));
   }, [activeTab, query, visibleFields]);
 
+  const handleLogout = useCallback(async () => {
+    setLoggingOut(true);
+    try {
+      await fetch("/api/auth/web-logout", { method: "POST" });
+    } catch {
+      // Proceed to /login regardless — the cookie is cleared or already dead.
+    }
+    window.location.assign("/login");
+  }, []);
   const close = useCallback(() => { onModelsChanged?.(); onClose(); }, [onClose, onModelsChanged]);
   const reloadActiveSession = useCallback(async () => {
     if (!sessionId) return;
@@ -319,17 +348,26 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
       <div className={styles.window} role="dialog" aria-modal="true" aria-label="Settings">
         <aside className={styles.sidebar}>
           <div className={styles.brand}><div className={styles.eyebrow}>omp /settings</div><h1 className={styles.title}>Settings</h1><code className={styles.context} title={cwd ?? "Global configuration"}>{cwd ?? "Global configuration"}</code></div>
-          <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => setQuery(event.target.value)} /></div>
+          {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => setQuery(event.target.value)} /></div>}
           <nav className={styles.nav}>
             <div className={styles.navLabel}>Configuration</div>
-            {CORE_SECTIONS.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && section === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => { setQuery(""); setSection(item.id); }}><SettingsIcon kind={item.icon}/><span>{item.label}</span></button>)}
-            <div className={styles.navLabel}>OMP settings</div>
-            {settings?.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => { setQuery(""); setSection(`settings:${tab.id}`); }}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
+            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => { setQuery(""); setSection(item.id); }}><SettingsIcon kind={item.icon}/><span>{item.label}</span></button>)}
+            {isAdminUser && settings && (<>
+              <div className={styles.navLabel}>OMP settings</div>
+              {settings.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => { setQuery(""); setSection(`settings:${tab.id}`); }}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
+            </>)}
           </nav>
-          <div className={styles.closeRail}><button type="button" className={styles.closeButton} onClick={close}><span>Close settings</span><span aria-hidden="true">×</span></button></div>
+          <div className={styles.closeRail}>
+            {webUser && webUser.username !== "__anonymous" && (
+              <button type="button" className={styles.closeButton} style={{ marginBottom: 6 }} disabled={loggingOut} onClick={() => void handleLogout()}>
+                <span>{loggingOut ? "Logging out…" : `Log out ${webUser.username}`}</span>
+              </button>
+            )}
+            <button type="button" className={styles.closeButton} onClick={close}><span>Close settings</span><span aria-hidden="true">×</span></button>
+          </div>
         </aside>
         <main className={styles.content}>
-          {query.trim() ? renderGenericSettings() : section === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : section === "themes" ? renderThemeSection() : section === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : section === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : section === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : renderGenericSettings()}
+          {query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : renderGenericSettings()}
         </main>
       </div>
     </div>
