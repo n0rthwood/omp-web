@@ -45,16 +45,8 @@ live there.
 The GitHub parent of this fork is `ddallabenetta/omp-web`. Pull from it when you
 want its fixes; never push to it.
 
-⚠️ **Name collision — read this before running `gh`.** `~/.local/bin/gh` is a
-Python "open GitHub in a browser" script and shadows the real GitHub CLI on
-`PATH`. Verify before use:
-
-```bash
-gh --version            # must print "gh version 2.x" — NOT an argparse error
-```
-
-If it errors, call `/usr/bin/gh` explicitly (the real CLI, authenticated as
-`n0rthwood` with `repo` scope). `gh repo set-default` is already pointed at
+The real `gh` CLI (v2.87.3) is at `/usr/bin/gh`, authenticated as `n0rthwood`
+with `repo` scope. `gh repo set-default` is already pointed at
 `n0rthwood/omp-web`; otherwise pass `--repo n0rthwood/omp-web` every time.
 
 ---
