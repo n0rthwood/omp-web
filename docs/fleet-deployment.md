@@ -9,15 +9,16 @@ API and proxy design, see [fleet.md](./fleet.md).
 | IP | Hostname | Role | Branch | Port | Bind |
 | --- | --- | --- | --- | --- | --- |
 | 172.30.3.123 | (gateway) | `omp-web.service`, existing install | — | 5010 | — |
-| 172.30.3.250 | joysort-ai-server | remote | `feature/omp2-fleet-gateway` | 5010 | `0.0.0.0` |
-| 172.30.3.24 | joysort24 | remote | `feature/omp2-fleet-gateway` | 5010 | `0.0.0.0` |
-| 172.30.3.109 | joysort109 | remote | `feature/omp2-fleet-gateway` | 5010 | `0.0.0.0` |
-| 172.30.3.202 | gpu-dev | remote | `feature/omp2-fleet-gateway` | 5010 | `0.0.0.0` |
-| 172.30.3.39 | joysort39 | remote | `feature/omp2-fleet-gateway` | 5010 | `0.0.0.0` |
+| 172.30.3.250 | joysort-ai-server | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.24 | joysort24 | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.109 | joysort109 | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.202 | gpu-dev | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.39 | joysort39 | remote | `main` | 5010 | `0.0.0.0` |
 
 Every remote runs as a `systemd --user omp-web.service` unit, checked out from
-`~/omp/ompweb` on that host, built from the fork's `feature/omp2-fleet-gateway`
-branch.
+`~/omp/ompweb` on that host, built from `main`. The fleet feature was developed
+on `feature/omp2-fleet-gateway`, which merged into `main` and was then deleted;
+hosts provisioned during that window were repointed to `main`.
 
 **Never restart, stop, or reconfigure `omp-web.service` on 172.30.3.123** from
 a session running on it — it hosts the session itself.
@@ -173,7 +174,7 @@ differ:
 paths per trap #1):
 
 ```
-cd ~/omp/ompweb && git pull && ~/.bun/bin/bun install && PATH=$HOME/.bun/bin:$PATH bun run build && systemctl --user restart omp-web
+cd ~/omp/ompweb && git fetch origin && git checkout main && git pull && ~/.bun/bin/bun install && PATH=$HOME/.bun/bin:$PATH bun run build && systemctl --user restart omp-web
 ```
 
 **Tail logs:**
@@ -219,7 +220,6 @@ Then, on the new host:
 ```
 git clone git@github.com:n0rthwood/omp-web.git ~/omp/ompweb
 cd ~/omp/ompweb
-git checkout feature/omp2-fleet-gateway
 ~/.bun/bin/bun install
 PATH=$HOME/.bun/bin:$PATH bun run build
 
