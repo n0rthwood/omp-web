@@ -680,6 +680,17 @@ looks catastrophically broken. `package.json`'s `test` script therefore names
 the source directories explicitly and `eslint.config.mjs` ignores
 `.worktrees/**` — keep both in step when adding a top-level directory.
 
+**`.next` in the repo root belongs to the running production service.**
+`omp-web.service` has `/home/joysort/omp/ompweb` as its `WorkingDirectory` and
+serves assets out of that `.next`. `rm -rf .next`, `next build`, or `bun run
+dev` there does not visibly disturb the running process — it keeps rendering
+HTML from its in-memory module graph — but that HTML names content-hashed
+chunks from the build you just destroyed. Next's JS chunk hashes are **not**
+reproducible across builds from identical source (CSS hashes are; the
+`webpack-*` and `main-app-*` runtime chunks are not), so the originals cannot
+be recreated and every browser page load fails on its assets until the service
+restarts. This happened on 2026-08-15. Build in a worktree, always.
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

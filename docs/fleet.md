@@ -1,5 +1,9 @@
 # The fleet gateway in omp-web
 
+For the concrete deployed fleet — the five-host topology, systemd units,
+per-host env layout, and day-2 operations (redeploy, rotate a password, add a
+sixth host) — see the operator runbook: [fleet-deployment.md](./fleet-deployment.md).
+
 ## What it is
 
 One omp-web instance can act as a gateway to the omp-web instances on other
@@ -173,4 +177,9 @@ logged into.
   you maintain by hand; nothing detects machines, and a session is never moved
   or copied between machines. `/api/health` (authenticated, no side effects) is
   the probe for checking a remote's versions and verifying its stored
-  credential in one round trip.
+  credential in one round trip — `ompWebVersion` (this build's own
+  `package.json` version) and `ompVersion` (the `@oh-my-pi/pi-coding-agent`
+  **SDK** version that build was compiled against). `ompVersion` is not the
+  standalone `omp` CLI binary that may also be installed on that host: omp-web
+  embeds the SDK in-process and never shells out to the CLI, so the two can
+  differ and that is expected, not drift.
