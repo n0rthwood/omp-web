@@ -3,6 +3,7 @@
 import "@xterm/xterm/css/xterm.css";
 
 import { useEffect, useRef } from "react";
+import { apiPath } from "@/lib/api-path";
 
 // Type-only: the runtime values are imported dynamically inside the effect,
 // because xterm touches `document` at module scope and would break SSR.
@@ -132,7 +133,7 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
-      void fetch(`/api/terminals/${encodeURIComponent(terminalId)}/resize`, {
+      void fetch(apiPath(`/api/terminals/${encodeURIComponent(terminalId)}/resize`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cols, rows }),
@@ -259,7 +260,7 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
             const chunk = inputQueue;
             inputQueue = "";
             try {
-              const response = await fetch(`/api/terminals/${encodeURIComponent(terminalId)}/input`, {
+              const response = await fetch(apiPath(`/api/terminals/${encodeURIComponent(terminalId)}/input`), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ data: chunk }),
@@ -310,7 +311,7 @@ export function TerminalPanel({ terminalId, onExit, fontSize }: Props) {
         void pumpInput();
       });
 
-      eventSource = new EventSource(`/api/terminals/${encodeURIComponent(terminalId)}/events`);
+      eventSource = new EventSource(apiPath(`/api/terminals/${encodeURIComponent(terminalId)}/events`));
       eventSource.onmessage = (event) => {
         try {
           const frame = JSON.parse(event.data) as {

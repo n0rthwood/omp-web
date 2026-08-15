@@ -1,3 +1,5 @@
+import { machineStorageKey } from "./api-path";
+
 const STORAGE_PREFIX = "omp-web-terminal-tabs:";
 
 export interface PersistedTerminalTabs {
@@ -8,7 +10,8 @@ export interface PersistedTerminalTabs {
 export function loadTerminalTabs(cwd: string): PersistedTerminalTabs {
   if (typeof window === "undefined") return { ids: [], activeId: null };
   try {
-    const raw = window.localStorage.getItem(STORAGE_PREFIX + cwd);
+    const key = machineStorageKey(STORAGE_PREFIX + cwd);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return { ids: [], activeId: null };
     const parsed = JSON.parse(raw) as Partial<PersistedTerminalTabs>;
     const ids = Array.isArray(parsed.ids) ? parsed.ids.filter((v): v is string => typeof v === "string") : [];
@@ -22,8 +25,9 @@ export function loadTerminalTabs(cwd: string): PersistedTerminalTabs {
 export function saveTerminalTabs(cwd: string, tabs: PersistedTerminalTabs): void {
   if (typeof window === "undefined") return;
   try {
-    if (tabs.ids.length === 0) window.localStorage.removeItem(STORAGE_PREFIX + cwd);
-    else window.localStorage.setItem(STORAGE_PREFIX + cwd, JSON.stringify(tabs));
+    const key = machineStorageKey(STORAGE_PREFIX + cwd);
+    if (tabs.ids.length === 0) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify(tabs));
   } catch { /* storage unavailable/full — persistence is best-effort */ }
 }
 

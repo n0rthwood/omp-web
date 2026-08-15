@@ -8,7 +8,9 @@ import { SearchableSelect } from "./SearchableSelect";
 import { refreshOmpTheme, useTheme } from "@/hooks/useTheme";
 import { useWebUser } from "@/hooks/useWebUser";
 import { WebUsersConfig } from "./WebUsersConfig";
+import { MachinesConfig } from "./MachinesConfig";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { apiPath } from "@/lib/api-path";
 import type {
   McpConfigResponse,
   McpScopeConfig,
@@ -21,7 +23,7 @@ import type {
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
 
-type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | "users" | `settings:${string}`;
+type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | `settings:${string}`;
 
 interface SettingsConfigProps {
   cwd?: string | null;
@@ -39,6 +41,7 @@ const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; r
   { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
   { id: "mcp", label: "MCP", icon: "mcp", requiresAdmin: true },
   { id: "users", label: "Users", icon: "user", requiresAdmin: true },
+  { id: "machines", label: "Machines", icon: "machine", requiresAdmin: true },
 ];
 
 const ICON_PATHS: Record<string, React.ReactNode> = {
@@ -47,6 +50,7 @@ const ICON_PATHS: Record<string, React.ReactNode> = {
   skill: <><path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></>,
   plugin: <><path d="M8 3v5m8-5v5M6 8h12v5a6 6 0 0 1-12 0V8Zm6 11v3"/></>,
   mcp: <><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 7.5 11 16m5-8.5L13 16M8 6h8"/></>,
+  machine: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h.01M7 15h.01M11 9h6M11 15h6"/></>,
   appearance: <><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></>,
   interaction: <><path d="M4 5h16v11H9l-5 4V5Z"/><path d="M8 9h8m-8 3h5"/></>,
   context: <><path d="M5 3h11l3 3v15H5z"/><path d="M15 3v4h4M8 11h8m-8 4h8"/></>,
@@ -205,7 +209,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     setLoadError(null);
     try {
       const suffix = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-      const response = await fetch(`/api/settings${suffix}`, { cache: "no-store" });
+      const response = await fetch(apiPath(`/api/settings${suffix}`), { cache: "no-store" });
       const data = await response.json() as SettingsResponse & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       setSettings(data);
@@ -229,7 +233,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     setSaving((current) => new Set(current).add(field.path));
     setSaveErrors((current) => { const next = { ...current }; delete next[field.path]; return next; });
     try {
-      const response = await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: field.path, value }) });
+      const response = await fetch(apiPath("/api/settings"), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: field.path, value }) });
       const result = await response.json() as { value?: SettingsValue; error?: string };
       if (!response.ok || result.error) throw new Error(result.error ?? `HTTP ${response.status}`);
       setSettings((current) => current ? { ...current, fields: current.fields.map((item) => item.path === field.path ? { ...item, value: result.value ?? value, configured: true } : item) } : current);
@@ -264,6 +268,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
     try {
+      // Local-only route: web-logout always targets this gateway, never a remote machine.
       await fetch("/api/auth/web-logout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -373,7 +378,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
         <main className={styles.content}>
           {visibleCoreSections.length === 0 ? (
             <div className={styles.empty}>No settings are available for this user.</div>
-          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : renderGenericSettings()}
+          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
         </main>
       </div>
     </div>
@@ -393,7 +398,7 @@ function McpSettings({ cwd, sessionId, onReloaded }: { cwd?: string | null; sess
   const load = useCallback(async () => {
     try {
       const suffix = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-      const response = await fetch(`/api/mcp${suffix}`, { cache: "no-store" });
+      const response = await fetch(apiPath(`/api/mcp${suffix}`), { cache: "no-store" });
       const result = await response.json() as McpConfigResponse & { error?: string };
       if (!response.ok || result.error) throw new Error(result.error ?? `HTTP ${response.status}`);
       setData(result);
@@ -431,7 +436,7 @@ function McpSettings({ cwd, sessionId, onReloaded }: { cwd?: string | null; sess
     try {
       const servers = commitDraft();
       const suffix = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-      const response = await fetch(`/api/mcp${suffix}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope, servers }) });
+      const response = await fetch(apiPath(`/api/mcp${suffix}`), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope, servers }) });
       const result = await response.json() as { error?: string };
       if (!response.ok || result.error) throw new Error(result.error ?? `HTTP ${response.status}`);
       await load();
@@ -447,7 +452,7 @@ function McpSettings({ cwd, sessionId, onReloaded }: { cwd?: string | null; sess
     setError(null);
     try {
       const suffix = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-      const response = await fetch(`/api/mcp${suffix}`, {
+      const response = await fetch(apiPath(`/api/mcp${suffix}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scope, name: entry.name, enabled: !entry.enabled }),

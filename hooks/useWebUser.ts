@@ -22,6 +22,7 @@ let cached: WebMeSnapshot | null = null;
 let inflight: Promise<WebMeSnapshot> | null = null;
 
 async function fetchWebMe(): Promise<WebMeSnapshot> {
+  // Local-only: /api/auth/web-me is the gateway's own identity, never proxied.
   const response = await fetch("/api/auth/web-me", { cache: "no-store" });
   const result = (await response.json().catch(() => ({}))) as Partial<WebMeSnapshot> & { error?: string };
   if (!response.ok || result.error) throw new Error(result.error ?? `HTTP ${response.status}`);

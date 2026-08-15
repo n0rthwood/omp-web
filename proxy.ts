@@ -26,6 +26,7 @@ const ADMIN_ONLY_API_PREFIXES = [
   "/api/updates",
   "/api/models-config",
   "/api/git",
+  "/api/machines",
   "/api/web-users",
 ];
 

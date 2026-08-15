@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
+import { apiPath, machineStorageKey } from "@/lib/api-path";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -10,6 +11,7 @@ import { useWebUser } from "@/hooks/useWebUser";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
+import { MachineSwitcher } from "./MachineSwitcher";
 
 declare global {
   interface Window {
@@ -98,6 +100,7 @@ interface Props {
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
+  onOpenMachinesSettings: () => void;
 }
 
 interface WorktreeEntry {
@@ -131,7 +134,7 @@ function normalizeProjectKey(project: string): string {
 function loadRemovedProjects(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(REMOVED_PROJECTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY));
     if (!raw) return new Set();
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed)
@@ -145,8 +148,8 @@ function loadRemovedProjects(): Set<string> {
 function saveRemovedProjects(projects: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
-    if (projects.size === 0) window.localStorage.removeItem(REMOVED_PROJECTS_STORAGE_KEY);
-    else window.localStorage.setItem(REMOVED_PROJECTS_STORAGE_KEY, JSON.stringify([...projects]));
+    if (projects.size === 0) window.localStorage.removeItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY));
+    else window.localStorage.setItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY), JSON.stringify([...projects]));
   } catch {
     // Ignore storage quota and privacy-mode errors.
   }
@@ -158,7 +161,7 @@ function saveRemovedProjects(projects: Set<string>): void {
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(machineStorageKey(UNREAD_SESSIONS_STORAGE_KEY));
     if (!raw) return new Set();
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
@@ -171,8 +174,8 @@ function loadUnreadSessionIds(): Set<string> {
 function saveUnreadSessionIds(ids: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
-    if (ids.size === 0) window.localStorage.removeItem(UNREAD_SESSIONS_STORAGE_KEY);
-    else window.localStorage.setItem(UNREAD_SESSIONS_STORAGE_KEY, JSON.stringify([...ids]));
+    if (ids.size === 0) window.localStorage.removeItem(machineStorageKey(UNREAD_SESSIONS_STORAGE_KEY));
+    else window.localStorage.setItem(machineStorageKey(UNREAD_SESSIONS_STORAGE_KEY), JSON.stringify([...ids]));
   } catch {
     // ignore storage quota / privacy-mode errors
   }
@@ -180,7 +183,7 @@ function saveUnreadSessionIds(ids: Set<string>): void {
 function loadCollapsedProjects(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY));
     if (!raw) return new Set();
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed)
@@ -194,8 +197,8 @@ function loadCollapsedProjects(): Set<string> {
 function saveCollapsedProjects(projects: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
-    if (projects.size === 0) window.localStorage.removeItem(COLLAPSED_PROJECTS_STORAGE_KEY);
-    else window.localStorage.setItem(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...projects]));
+    if (projects.size === 0) window.localStorage.removeItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY));
+    else window.localStorage.setItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY), JSON.stringify([...projects]));
   } catch {
     // Ignore storage quota and privacy-mode errors.
   }
@@ -445,7 +448,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
   const { t } = useI18n();
   const { user: webUser } = useWebUser();
   // The custom-cwd picker adds arbitrary project roots; user-role accounts are
@@ -504,7 +507,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const loadSessions = useCallback(async (showLoading = false, force = false) => {
     try {
       if (showLoading) setLoading(true);
-      const res = await fetch(force ? "/api/sessions?force=1" : "/api/sessions", {
+      const res = await fetch(apiPath(force ? "/api/sessions?force=1" : "/api/sessions"), {
         cache: "no-store",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -576,7 +579,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       controller?.abort();
       controller = current;
       try {
-        const res = await fetch("/api/agent/running", {
+        const res = await fetch(apiPath("/api/agent/running"), {
           cache: "no-store",
           signal: current.signal,
         });
@@ -654,7 +657,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [explorerRefreshKey]);
 
   useEffect(() => {
-    fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
+    fetch(apiPath("/api/home")).then((r) => r.json()).then((d: { home?: string }) => {
       if (d.home) setHomeDir(d.home);
     }).catch(() => {});
   }, []);
@@ -701,7 +704,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       return;
     }
     let cancelled = false;
-    fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
+    fetch(apiPath(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`))
       .then((r) => r.json())
       .then((d: { projectRoot?: string; isGit?: boolean; isTopLevel?: boolean; worktrees?: WorktreeEntry[]; error?: string }) => {
         if (cancelled) return;
@@ -755,7 +758,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     setCustomPathValidating(true);
     setCustomPathError(null);
     try {
-      const res = await fetch("/api/cwd/validate", {
+      const res = await fetch(apiPath("/api/cwd/validate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: path }),
@@ -794,7 +797,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
+      const res = await fetch(apiPath("/api/worktrees"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: worktreeState.projectRoot, branch }),
@@ -829,7 +832,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
+      const res = await fetch(apiPath("/api/worktrees"), {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: worktreeState.projectRoot, path, force }),
@@ -1088,6 +1091,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
             </button>
           </div>
         </div>
+        <MachineSwitcher onManageMachines={onOpenMachinesSettings} />
 
       </div>
 
@@ -2127,7 +2131,7 @@ function SessionItem({
     // a skill-invoked session stays a no-op instead of persisting raw XML.)
     if (renameValue === title || name === (session.name ?? "")) return;
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      await fetch(apiPath(`/api/sessions/${encodeURIComponent(session.id)}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
@@ -2143,7 +2147,7 @@ function SessionItem({
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      await fetch(apiPath(`/api/sessions/${encodeURIComponent(session.id)}`), { method: "DELETE" });
       onDeleted?.(session.id);
     } catch {
       setDeleting(false);

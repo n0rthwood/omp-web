@@ -33,6 +33,7 @@ function parseProjectsText(text: string): string[] | "*" | null {
   return lines;
 }
 
+// Local-only: /api/web-users is gateway-local administration, never proxied.
 function userUrl(username: string, suffix = ""): string {
   return `/api/web-users/${encodeURIComponent(username)}${suffix}`;
 }

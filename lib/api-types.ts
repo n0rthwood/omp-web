@@ -204,3 +204,47 @@ export interface TerminalInfo {
   exited: boolean;
   exitCode?: number;
 }
+
+/** How the gateway authenticates to a remote omp-web machine. */
+export type MachineAuthMode = "bearer" | "basic" | "none";
+
+/**
+ * A fleet machine as the browser may see it — the API-safe projection of the
+ * stored machine record. Never carries the credential or static header values.
+ */
+export interface SafeMachine {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authMode: MachineAuthMode;
+  hasCredential: boolean;
+  headerNames: string[];
+  createdAt: string;
+  updatedAt: string;
+  isLocal: boolean;
+}
+
+/** Health probe response (also served by every machine's `/api/health`). */
+export interface MachineHealth {
+  ok: boolean;
+  ompWebVersion: string | null;
+  ompVersion: string | null;
+  hostname: string | null;
+  terminalsEnabled: boolean;
+  user: { username: string; role: "admin" | "user" } | null;
+}
+
+/** Outcome code for a failed machine probe (POST /api/machines/test). */
+export type MachineTestCode = "machine_unauthorized" | "machine_unreachable" | "machine_error";
+
+/**
+ * Response of POST /api/machines/test. A failed probe is still HTTP 200 with
+ * `ok: false` and a `code`. Never carries a credential in either direction.
+ */
+export interface MachineTestResult {
+  ok: boolean;
+  code?: MachineTestCode;
+  status?: number;
+  error?: string;
+  health?: MachineHealth;
+}

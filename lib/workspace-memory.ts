@@ -13,7 +13,14 @@
  * Stored in localStorage; best-effort (silently ignored when unavailable).
  */
 
+import { machineStorageKey } from "./api-path";
+
 const STORAGE_KEY = "pi-web:last-open-by-workspace";
+
+/** Resolved per call: the current machine may change without a module reload. */
+function storageKey(): string {
+  return machineStorageKey(STORAGE_KEY);
+}
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -31,7 +38,7 @@ function getBrowserStorage(): StorageLike | null {
 }
 
 function readMap(storage: StorageLike): Record<string, string | undefined> {
-  const raw = storage.getItem(STORAGE_KEY);
+  const raw = storage.getItem(storageKey());
   if (!raw) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -66,7 +73,7 @@ export function setLastOpenSession(
   try {
     const map = readMap(storage);
     map[workspaceKey] = sessionId;
-    storage.setItem(STORAGE_KEY, JSON.stringify(map));
+    storage.setItem(storageKey(), JSON.stringify(map));
   } catch {
     // storage unavailable — memory is best-effort
   }
@@ -82,8 +89,8 @@ export function clearLastOpen(
     if (!(workspaceKey in map)) return;
     delete map[workspaceKey];
     // Keep the store clean: drop the key entirely when nothing is remembered.
-    if (Object.keys(map).length === 0) storage.removeItem(STORAGE_KEY);
-    else storage.setItem(STORAGE_KEY, JSON.stringify(map));
+    if (Object.keys(map).length === 0) storage.removeItem(storageKey());
+    else storage.setItem(storageKey(), JSON.stringify(map));
   } catch {
     // ignore
   }

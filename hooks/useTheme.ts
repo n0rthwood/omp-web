@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { apiPath } from "@/lib/api-path";
 import type { WebThemeConfig } from "@/lib/settings-api";
 
 export type ThemePreference = "light" | "dark" | "auto";
@@ -149,7 +150,7 @@ function nextPreference(preference: ThemePreference): ThemePreference {
 export async function refreshOmpTheme(cwd?: string | null): Promise<void> {
   const requestId = ++themeRequestId;
   const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-  const response = await fetch(`/api/theme${query}`, { cache: "no-store" });
+  const response = await fetch(apiPath(`/api/theme${query}`), { cache: "no-store" });
   if (!response.ok) throw new Error(`Theme request failed (${response.status})`);
   const nextConfig = await response.json() as WebThemeConfig;
   if (requestId !== themeRequestId) return;

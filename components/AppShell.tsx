@@ -38,6 +38,8 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { getInitialNavigation } from "@/lib/initial-navigation";
+import { apiPath } from "@/lib/api-path";
+import { MachineProvider, useMachines } from "@/lib/machine-context";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
   getDefaultRightPanelWidth,
@@ -76,7 +78,7 @@ interface TerminalInfoClient {
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
 
-export function AppShell() {
+function AppShellBody() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
@@ -113,6 +115,7 @@ export function AppShell() {
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines">("models");
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -296,7 +299,7 @@ export function AppShell() {
 
   useEffect(() => {
     let cancelled = false;
-    void fetch("/api/terminals/status")
+    void fetch(apiPath("/api/terminals/status"))
       .then(async (response) => {
         if (!response.ok) return;
         const body = await response.json().catch(() => ({})) as { enabled?: unknown };
@@ -357,7 +360,7 @@ export function AppShell() {
     const persisted = loadTerminalTabs(activeCwd);
     if (persisted.ids.length === 0) return;
 
-    void fetch(`/api/terminals?cwd=${encodeURIComponent(activeCwd)}`)
+    void fetch(apiPath(`/api/terminals?cwd=${encodeURIComponent(activeCwd)}`))
       .then(async (response) => {
         if (!response.ok) return [];
         return await response.json().catch(() => []) as TerminalInfoClient[];
@@ -452,7 +455,7 @@ export function AppShell() {
     setInitialCwdStatus("validating");
     setInitialCwdError(null);
 
-    void fetch("/api/cwd/validate", {
+    void fetch(apiPath("/api/cwd/validate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cwd: requestedCwd }),
@@ -487,7 +490,7 @@ export function AppShell() {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
     if (!lastOpenSessionId) return;
-    void fetch("/api/sessions")
+    void fetch(apiPath("/api/sessions"))
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         if (token !== workspaceRestoreTokenRef.current) return; // stale switch
@@ -629,7 +632,7 @@ export function AppShell() {
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
   const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions", { cache: "no-store" })
+    void fetch(apiPath("/api/sessions"), { cache: "no-store" })
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
@@ -723,7 +726,7 @@ export function AppShell() {
     setAutoNameStatus({ kind: "naming" });
 
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
+      const response = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`), {
         method: "POST",
       });
       const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string };
@@ -835,7 +838,7 @@ export function AppShell() {
     // what lets a reload reattach to the live process.
     const closing = fileTabs.find((t) => t.id === tabId);
     if (closing?.kind === "terminal" && closing.terminalId) {
-      void fetch(`/api/terminals/${encodeURIComponent(closing.terminalId)}`, { method: "DELETE" })
+      void fetch(apiPath(`/api/terminals/${encodeURIComponent(closing.terminalId)}`), { method: "DELETE" })
         .catch(() => {});
     }
     setFileTabs((prev) => {
@@ -852,7 +855,7 @@ export function AppShell() {
 
   const handleNewTerminal = useCallback(() => {
     if (!activeCwd) return;
-    void fetch("/api/terminals", {
+    void fetch(apiPath("/api/terminals"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cwd: activeCwd }),
@@ -894,7 +897,7 @@ export function AppShell() {
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
     window.open(
-      `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
+      apiPath(`/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`),
       "_blank",
       "noopener,noreferrer",
     );
@@ -915,7 +918,7 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
-    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
+    fetch(apiPath(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`), {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -935,7 +938,7 @@ export function AppShell() {
     setProjectTrustBusy(true);
     setProjectTrustError(null);
     try {
-      const response = await fetch("/api/project-trust", {
+      const response = await fetch(apiPath("/api/project-trust"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),
@@ -1007,13 +1010,14 @@ export function AppShell() {
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
         onBackgroundTaskDone={handleBackgroundTaskDone}
+        onOpenMachinesSettings={() => { setSettingsInitialSection("machines"); setSettingsConfigOpen(true); }}
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpUpdateIndicator />
       </div>
       <div style={{ padding: "8px", flexShrink: 0 }}>
         <button
-          onClick={() => setSettingsConfigOpen(true)}
+          onClick={() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }}
           title={translate("common.settings")}
           style={{
             width: "100%", height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
@@ -2089,6 +2093,7 @@ export function AppShell() {
       <SettingsConfig
         cwd={projectTrustCwd}
         sessionId={selectedSession?.id ?? null}
+        initialSection={settingsInitialSection}
         onClose={() => setSettingsConfigOpen(false)}
         onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onReloaded={() => setSessionKey((key) => key + 1)}
@@ -2107,4 +2112,23 @@ export function AppShell() {
     )}
     </>
   );
+}
+
+/**
+ * Fleet wrapper. MachineProvider stays OUTSIDE the key so it survives a
+ * machine switch (machine list, loading state); AppShellBody carries
+ * `key={machineId}` so the whole app subtree — sessions, files, terminals —
+ * remounts on switch and no state leaks across machines.
+ */
+export function AppShell() {
+  return (
+    <MachineProvider>
+      <AppShellMachineKey />
+    </MachineProvider>
+  );
+}
+
+function AppShellMachineKey() {
+  const { machineId } = useMachines();
+  return <AppShellBody key={machineId} />;
 }

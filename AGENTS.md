@@ -330,6 +330,10 @@ app/api/
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
   home/route.ts                   GET user home directory
+  health/route.ts                GET machine health probe — versions, terminals, authed user
+  machines/route.ts              GET/POST fleet machine registry (admin-only; safe fields only)
+  machines/[machineId]/route.ts  PATCH/DELETE one machine (`token: null` clears the credential)
+  machines/[machineId]/[...path]/route.ts catch-all proxy → that machine's /api/...
   model-roles/route.ts            GET/PUT omp's modelRoles record
   models/route.ts                 GET { models, modelList, defaultModel, roles }
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
@@ -343,9 +347,14 @@ app/api/
 
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
+  api-path.ts         fleet URL seam: /api/x → /api/machines/<id>/api/x + storage-key namespacing
   draft-store.ts       local draft persistence helpers
   file-access.ts       allowed file roots for /api/files and worktrees
   file-paths.ts        client/server path encoding helpers
+  machine-context.tsx MachineProvider — current machine from ?machine=, remounts subtree on switch
+  machines/machine-store.ts   fleet registry (~/.omp/agent/omp-web-machines.json, mode 0600)
+  machines/proxy-allowlist.ts route-template + method allow-list deciding what the proxy forwards
+  machines/remote-request.ts  proxy transport — streaming both ways, header filters, machine credential
   markdown.ts          shared markdown helpers
   model-roles.ts       omp's model roles, read/written for the browser
   model-scope.ts       enabledModels resolution shared by UI and startup
@@ -557,6 +566,33 @@ never proxies loopback — which is what local providers need. It ignores
 `EnvHttpProxyAgent` path only exists for a dev server run on Node, because Bun
 resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
 `fetch` and `install` does not exist.
+
+### Fleet gateway (machines)
+- URL shape is a pure prefix insert: `/api/x` → `/api/machines/<id>/api/x`.
+  Every client API URL must go through `apiPath()` (`lib/api-path.ts`); local-only
+  surfaces (`web-me`, `web-login`, `web-logout`, `web-users`, `machines`, `updates`)
+  keep bare `/api/...` and are never routed through it. Switching machines remounts
+  the app subtree (keyed by machine id) and `machineStorageKey()` namespaces
+  path/session-id storage keys — absolute paths and terminal ids must never cross
+  machines. Full operator doc: `docs/fleet.md`.
+- The proxy is allow-listed by route template **and** method
+  (`lib/machines/proxy-allowlist.ts`): a new `app/api` route is **not** proxied
+  until a row is added there. `/api/machines/**`, `/api/web-users/**`,
+  web-login/logout and `POST /api/updates` are denied outright (no fleet-in-fleet
+  recursion, no remote user management, no remote self-update).
+- The proxy (`lib/machines/remote-request.ts`) forwards only `accept`,
+  `content-type`, `range` plus `accept-encoding: identity` and the machine's own
+  credential — never the caller's `cookie`/`authorization`/`host`. It streams
+  both ways (`duplex: "half"`, response body passed through), and composes the
+  caller's `signal` into the upstream fetch — without that, a client disconnect
+  leaks SSE subscriptions and `fs.watch` handles on the remote. A 10s timeout
+  bounds connect+headers only; streaming bodies have no total deadline.
+- Machine secrets live only in `~/.omp/agent/omp-web-machines.json` (0600,
+  `OMP_WEB_MACHINES_FILE` override); every API response is the `SafeMachine`
+  projection (`hasCredential`, header names) — the browser never sees a token.
+  `/api/machines` is admin-only (`ADMIN_ONLY_API_PREFIXES` in `proxy.ts`); the
+  fleet is single-user by design. Use `GET /api/health` as the fleet probe —
+  never `GET /api/agent/[id]/events`, which *starts* a session.
 
 ### Terminal tab — Bun.Terminal, not node-pty
 - node-pty is dead on Bun (`onData` never fires — verified, see `HANDOFF.md`).

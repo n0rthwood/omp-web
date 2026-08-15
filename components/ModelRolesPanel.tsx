@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { ModelRoleAssignment, ModelRoleScope } from "@/lib/api-types";
+import { apiPath } from "@/lib/api-path";
 import {
   formatModelRoleSelector,
   getModelRoleThinkingLevel,
@@ -67,8 +68,8 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
     try {
       const query = `?cwd=${encodeURIComponent(cwd)}`;
       const [rolesRes, modelsRes] = await Promise.all([
-        fetch(`/api/model-roles${query}`, signal ? { signal } : undefined),
-        fetch(`/api/models${query}`, signal ? { signal } : undefined),
+        fetch(apiPath(`/api/model-roles${query}`), signal ? { signal } : undefined),
+        fetch(apiPath(`/api/models${query}`), signal ? { signal } : undefined),
       ]);
       if (!rolesRes.ok) throw new Error(`HTTP ${rolesRes.status}`);
       const rolesData = await rolesRes.json() as { roles?: ModelRoleAssignment[]; error?: string };
@@ -97,7 +98,7 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
     setPendingRole(role);
     setError(null);
     try {
-      const res = await fetch("/api/model-roles", {
+      const res = await fetch(apiPath("/api/model-roles"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd, role, selector, scope }),
