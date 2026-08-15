@@ -273,9 +273,12 @@ const LOCAL_MACHINE: SafeMachine = {
   isLocal: true,
 };
 
-/** The synthetic local machine, always first in listings. */
+/** The synthetic local machine, always first in listings. Its display name
+ *  comes from `OMP_WEB_MACHINE_NAME` so a fleet operator can name each
+ *  instance after its host instead of the generic default. */
 export function getLocalSafeMachine(): SafeMachine {
-  return { ...LOCAL_MACHINE };
+  const name = process.env.OMP_WEB_MACHINE_NAME?.trim();
+  return { ...LOCAL_MACHINE, ...(name ? { name } : {}) };
 }
 
 export function toSafeMachine(machine: StoredMachine): SafeMachine {

@@ -353,6 +353,13 @@ terminal host gate on a non-loopback bind.
   `cut -d= -f1` for env key names, `jq 'del(.machines[].token)'` for the
   registry, status-code-only curls. A printed secret must be rotated.
 
+**Hardware layer** (matters for anything touching GPUs or reboots): 123 and
+202 are **LXC containers** — 123 runs on host 24, 202 runs on host 39 — and
+both use the *host's* NVIDIA driver; never install or update drivers inside
+them, and their `nvidia-mount` unit failures are host-managed noise. 24, 39
+and 109 are physical hosts; 109 runs no containers. Rebooting 24 or 39 takes
+their guest (123 / 202) down with them.
+
 ## File Map
 
 ```

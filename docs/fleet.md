@@ -29,7 +29,9 @@ namespaced per machine by `machineStorageKey()` (`k` → `m:<id>:k`).
 The registry lives in `~/.omp/agent/omp-web-machines.json` (override with
 `OMP_WEB_MACHINES_FILE`), written `0600` through the atomic-replace helper. The
 synthetic machine `local` — this instance itself — is always first in listings
-and can be neither modified nor deleted.
+and can be neither modified nor deleted; its display name defaults to "This
+machine" and can be set per instance with `OMP_WEB_MACHINE_NAME` (useful when
+one host runs more than one instance, or to name it after the host).
 
 ## Adding a machine
 
