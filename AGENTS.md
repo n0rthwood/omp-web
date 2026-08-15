@@ -308,6 +308,51 @@ AgentSession in-process.
 
 ---
 
+## Deployment Topology — where this repo runs
+
+This repo is deployed as a **fleet**: one gateway plus five remote omp-web
+instances, all `systemd --user` units, all serving port 5010. Full operator
+runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
+
+| Host | IP | Unit | Notes |
+|---|---|---|---|
+| gateway (this box) | 172.30.3.123 | `omp-web.service` | port 5010, repo root checkout, authenticated, terminals on. PM2 is retired for omp-web but still runs `agent-canvas` + `omp-tunnel` here — `pm2 kill`/`restart all` remains destructive |
+| gateway dev instance | 172.30.3.123 | `omp-web-dev.service` | port 5020, deliberately unauthenticated, no terminals |
+| joysort-ai-server | 172.30.3.250 | `omp-web.service` | remote, `~/omp/ompweb`, `main` |
+| joysort24 | 172.30.3.24 | `omp-web.service` | remote |
+| joysort109 | 172.30.3.109 | `omp-web.service` | remote |
+| gpu-dev | 172.30.3.202 | `omp-web.service` | remote; also runs 7 unrelated pm2 apps — never touch its pm2 |
+| joysort39 | 172.30.3.39 | `omp-web.service` | remote |
+
+The gateway reaches each remote through the fleet proxy
+(`/api/machines/<id>/api/*`), registered in `~/.omp/agent/omp-web-machines.json`
+(0600) as `authMode:"basic"`, username `omp`. Remotes bind `0.0.0.0:5010` with
+`OMP_WEB_PASSWORD` set — mandatory for both the gateway's Basic auth and the
+terminal host gate on a non-loopback bind.
+
+- **Env files** (all mode 600): gateway `~/omp/ops/env/5010.env` and `5020.env`;
+  each remote `~/omp/ops/env/5010.env` with exactly three keys
+  (`OMP_WEB_HOSTNAME`, `OMP_WEB_PASSWORD`, `OMP_WEB_TERMINALS=1`). The
+  gateway mirrors each remote's password at `~/omp/ops/env/fleet/<IP>.env` —
+  the operator's copy. Values are double-quoted: systemd strips the quotes, a
+  naive `sed` does not (use `sed 's/^"//; s/"$//'` or read
+  `/proc/<pid>/environ`).
+- **Provider keys live only in `~/.omp/agent/.env` on each host**
+  (`pi-utils/src/env.ts` parses it at module init; process env wins over it).
+  Duplicating a key into a systemd env file silently overrides the rotation
+  point. Non-interactive SSH lacks `~/.bun/bin` and `~/.local/bin` on PATH on
+  most fleet hosts — absolute paths always; the units carry explicit
+  `Environment=PATH=`.
+- **Redeploy a remote**:
+  `cd ~/omp/ompweb && git fetch origin && git checkout main && git pull && ~/.bun/bin/bun install && PATH=$HOME/.bun/bin:$PATH bun run build && systemctl --user restart omp-web`
+  (`bun run build` needs that PATH export: the script calls bare `bun`.)
+- **Never restart a remote's omp-web while an agent session is running on it**
+  through the gateway — same in-process-session rule as above. One host at a
+  time when rolling out.
+- Secrets in tool output are persistent and browsable via this very UI:
+  `cut -d= -f1` for env key names, `jq 'del(.machines[].token)'` for the
+  registry, status-code-only curls. A printed secret must be rotated.
+
 ## File Map
 
 ```
@@ -411,32 +456,23 @@ hooks/
   nothing.
 - **A browser session runs *inside* the server, so restarting the server kills
   the turn.** `bash` tool commands are children of the Next.js process. Any
-  `pm2 restart|stop|reload|delete omp-web`, `kill`, or rebuild-and-restart issued
-  from a session opened in the browser signals its own host: pm2's default stop
-  signal is **SIGINT**, `next` exits **130**, the `cleanup` handler at
-  `lib/rpc-manager.ts:1362` destroys every wrapper, and *all* live sessions —
-  not just the one that ran the command — get
-  `{"type":"custom","customType":"session_exit","data":{"reason":"sigint"}}`
-  followed by an assistant message with `stopReason:"aborted"`. In the UI this
-  looks like the agent randomly stopping mid tool call. TUI sessions are
-  separate processes and are immune, which is the tell.
-- **Restart one instance from the *other* instance, or from a TUI/ssh shell.**
-  Two pm2 apps serve this repo: `omp-web` (port 5010, repo root) and
-  `omp-web-dev` (port 5020, `.worktrees/perf`, `OMP_WEB_TERMINALS=1`). They are
-  separate OS processes with separate `globalThis.__ompSessions`, so a session
-  driven from 5020 can safely `pm2 restart omp-web` — only 5010's live turns
-  abort. Two rules when doing that:
-  - **Never pass a bare `--update-env` across instances.** It bakes the *calling*
-    process's environment into the target, and the two differ: 5020 carries
-    `OMP_WEB_HOSTNAME=0.0.0.0`, `OMP_WEB_TERMINALS=1` and a dev
-    `OMP_WEB_ALLOWED_HOSTS`, while 5010 carries `PORT=5010` and the public
-    allow-list. A cross `--update-env` silently gives the public instance the
-    dev allow-list (→ `403 Untrusted API request` on `omp.joysort.cn`) and
-    enables terminals on it. Prefix each var explicitly, or omit the flag —
-    both apps' auth env is already in `~/.pm2/dump.pm2`.
-  - `pm2 restart all`, `pm2 update`, `pm2 kill` and `pm2 resurrect` still hit
-    *both* apps (plus `omp-tunnel`, `agent-canvas`); they are suicide from
-    either UI.
+  `systemctl --user restart|stop omp-web` (or `kill`, or rebuild-and-restart)
+  issued from a session opened in the browser signals its own host: the unit's
+  `KillSignal=SIGTERM` reaches `next`, the `cleanup` handler at
+  `lib/rpc-manager.ts` destroys every wrapper, and *all* live sessions — not
+  just the one that ran the command — get
+  `{"type":"custom","customType":"session_exit",...}` followed by an assistant
+  message with `stopReason:"aborted"`. In the UI this looks like the agent
+  randomly stopping mid tool call. TUI sessions are separate processes and are
+  immune, which is the tell.
+- **Restarting the gateway from *inside* the gateway, safely:**
+  `systemd-run --user --on-active=150 --unit=omp-web-recover-once systemctl
+  --user restart omp-web.service` schedules a transient timer owned by systemd,
+  outside the agent's control group, so it survives the very restart it
+  triggers — a backgrounded `sleep && systemctl restart` does not. Warn the
+  user first: the turn aborts and the session resumes on the new process.
+  Alternatively restart 5010 from the dev instance on 5020, from a TUI, or from
+  an ssh shell — separate process, separate `globalThis.__ompSessions`.
 - **Two instances share `~/.omp/agent`.** Each process holds its own
   `AuthStorage` SQLite handle on `agent.db` and its own session writers, so
   never open the same session id in both UIs — two AgentSessions appending to
