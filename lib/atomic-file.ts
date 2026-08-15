@@ -1,6 +1,6 @@
-import { randomUUID } from "crypto";
-import { renameSync, unlinkSync, writeFileSync } from "fs";
-import { basename, dirname, join } from "path";
+import { randomUUID } from "node:crypto";
+import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 /**
  * Replace a file atomically without exposing credentials through default
