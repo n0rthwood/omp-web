@@ -32,9 +32,6 @@ const PASSTHROUGH_RESPONSE_HEADERS: Record<string, true> = {
 /** Bound on connect+headers for the upstream fetch; cleared once headers arrive, so streaming bodies are never cut off. */
 const UPSTREAM_HEADER_TIMEOUT_MS = 10_000;
 
-/** Cap on reading a rejected (401/403) upstream body — a hostile remote must not be able to OOM the gateway. */
-const REJECTED_BODY_READ_LIMIT = 16 * 1024;
-
 function errorResponse(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -89,35 +86,6 @@ function buildUpstreamResponse(upstream: Response): Response {
 }
 
 /**
- * A rejected (401/403) remote: pass its status through, plus the JSON body when
- * it is small and parseable (the remote's own error message), plus the
- * `machine_unauthorized` hint. Anything unreadable gets the fixed body.
- */
-async function buildRejectedResponse(upstream: Response): Promise<Response> {
-  const lengthHeader = upstream.headers.get("content-length");
-  const length = lengthHeader === null ? Number.NaN : Number(lengthHeader);
-  if (!Number.isFinite(length) || length <= 0 || length > REJECTED_BODY_READ_LIMIT) {
-    return errorResponse(upstream.status, {
-      error: "Machine rejected the stored credential",
-      code: "machine_unauthorized",
-    });
-  }
-  try {
-    const parsed: unknown = JSON.parse(await upstream.text());
-    if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
-    return new Response(
-      JSON.stringify({ ...parsed, code: "machine_unauthorized" }),
-      { status: upstream.status, headers: { "Content-Type": "application/json", ...NO_STORE } },
-    );
-  } catch {
-    return errorResponse(upstream.status, {
-      error: "Machine rejected the stored credential",
-      code: "machine_unauthorized",
-    });
-  }
-}
-
-/**
  * Proxy `request` to `machine`. `remotePathname` is the path on the remote
  * (e.g. `/api/sessions`), already 404/403-checked by the caller.
  */
@@ -162,10 +130,6 @@ export async function proxyToMachine(
     });
   } finally {
     clearTimeout(timer);
-  }
-
-  if (upstream.status === 401 || upstream.status === 403) {
-    return buildRejectedResponse(upstream);
   }
 
   return buildUpstreamResponse(upstream);
