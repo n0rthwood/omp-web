@@ -9,6 +9,7 @@ import {
   type StoredMachine,
 } from "@/lib/machines/machine-store";
 import { authHeader } from "@/lib/machines/remote-request";
+import { FLEET_CONFIGURATION_DENIED_MESSAGE, isFleetConfigurationAllowed } from "@/lib/machines/fleet-gate";
 import { jsonError, readJsonBody, requireAdminApi } from "../../web-users/_guard";
 
 export const dynamic = "force-dynamic";
@@ -23,15 +24,33 @@ const AUTH_MODES: Record<string, MachineAuthMode> = {
 
 const PROBE_TIMEOUT_MS = 10_000;
 
-/** Cap on reading a non-200 upstream body — a hostile remote must not be able to OOM the gateway. */
-const ERROR_BODY_READ_LIMIT = 16 * 1024;
+/** Cap on any upstream body this route reads — a hostile remote must not be able
+ *  to OOM a process that also hosts live agent sessions. Content-Length is not a
+ *  usable gate: omp-web answers chunked, so the header is absent. */
+const BODY_READ_LIMIT = 16 * 1024;
+
+async function readCappedText(upstream: Response): Promise<string> {
+  if (!upstream.body) return "";
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let read = 0;
+  try {
+    while (read < BODY_READ_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      read += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  return text.slice(0, BODY_READ_LIMIT);
+}
 
 async function upstreamError(upstream: Response, fallback: string): Promise<string> {
-  const lengthHeader = upstream.headers.get("content-length");
-  const length = lengthHeader === null ? Number.NaN : Number(lengthHeader);
-  if (!Number.isFinite(length) || length <= 0 || length > ERROR_BODY_READ_LIMIT) return fallback;
   try {
-    const parsed: unknown = JSON.parse(await upstream.text());
+    const parsed: unknown = JSON.parse(await readCappedText(upstream));
     if (typeof parsed === "object" && parsed !== null && "error" in parsed && typeof parsed.error === "string") {
       return parsed.error;
     }
@@ -57,6 +76,7 @@ function probeFailure(
 export async function POST(req: Request) {
   const denied = await requireAdminApi(req);
   if (denied) return denied;
+  if (!isFleetConfigurationAllowed()) return jsonError(403, FLEET_CONFIGURATION_DENIED_MESSAGE);
   if (!hasJsonContentType(req)) {
     return jsonError(415, "Content-Type must be application/json");
   }
@@ -97,6 +117,16 @@ export async function POST(req: Request) {
   const stored = typeof id === "string" ? getMachine(id) : null;
   if (typeof id === "string" && !stored) return jsonError(404, "Unknown machine");
 
+  // ...but only against the origin that credential was stored for. Otherwise
+  // this route would deliver a stored token to any origin the caller names,
+  // which turns a write-only secret into a readable one.
+  if (stored && !token && stored.baseUrl !== origin) {
+    return jsonError(
+      400,
+      "Re-enter the credential when probing a different base URL than the one stored for this machine",
+    );
+  }
+
   const effectiveToken = typeof token === "string" && token ? token : stored?.token;
   const effectiveUsername = typeof username === "string" && username ? username : stored?.username;
   const effectiveHeaders = headers === undefined
@@ -120,8 +150,15 @@ export async function POST(req: Request) {
   };
 
   const outbound = new Headers({ accept: "application/json", "accept-encoding": "identity" });
-  for (const [name, value] of Object.entries({ ...authHeader(draft), ...draft.headers })) {
-    outbound.set(name, value);
+  try {
+    for (const [name, value] of Object.entries({ ...authHeader(draft), ...draft.headers })) {
+      outbound.set(name, value);
+    }
+  } catch {
+    // A credential or static header carrying a control character. The store
+    // rejects these on save; a hand-edited file or an untrusted draft can
+    // still reach here, and it is a bad request, not a crash.
+    return jsonError(400, "A credential or static header contains characters that cannot be sent");
   }
 
   let upstream: Response;
@@ -148,9 +185,12 @@ export async function POST(req: Request) {
     return probeFailure("machine_error", error, upstream.status);
   }
 
+  // Same cap as the error path: /api/health is tiny, and a hostile or merely
+  // broken remote must not be able to OOM a process that also hosts live
+  // agent sessions.
   let parsedHealth: unknown;
   try {
-    parsedHealth = await upstream.json();
+    parsedHealth = JSON.parse(await readCappedText(upstream));
   } catch {
     return probeFailure("machine_error", "Unexpected /api/health response", upstream.status);
   }

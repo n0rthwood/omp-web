@@ -116,16 +116,16 @@ export async function proxyToMachine(
       redirect: "manual",
       signal: AbortSignal.any([request.signal, connectTimeout.signal]),
     } as RequestInit);
-  } catch (error) {
+  } catch {
     if (request.signal.aborted) {
       return errorResponse(499, { error: "Client disconnected" });
     }
-    // Timeout, DNS failure, refused connection, TLS or network error: Bun
-    // surfaces these as several error types, and none of them are actionable
-    // beyond "this machine did not answer".
+    // Timeout, DNS failure, refused connection, TLS or network error. The
+    // platform's message is deliberately not relayed: repeated over a
+    // caller-chosen baseUrl it distinguishes closed from filtered from open
+    // ports. Diagnose a machine with the pre-save probe instead.
     return errorResponse(502, {
       error: `Machine unreachable: ${machine.id}`,
-      detail: error instanceof Error ? error.message : String(error),
       code: "machine_unreachable",
     });
   } finally {

@@ -1,15 +1,10 @@
+import { isLoopbackBind } from "../bind-host";
 import { isWebPasswordEnabled } from "../web-auth";
 import { authEnabled, hasStoredWebUsers } from "../web-users";
 
-// Static membership tables — `Object.hasOwn` (not `in`) so env values like
+// Static membership table — `Object.hasOwn` (not `in`) so env values like
 // "constructor" can't hit Object.prototype keys.
 const TRUE_VALUES: Record<string, true> = { "1": true, "true": true, "yes": true, "on": true };
-const LOOPBACK_HOSTNAMES: Record<string, true> = {
-  "127.0.0.1": true,
-  "localhost": true,
-  "::1": true,
-  "[::1]": true,
-};
 
 /** Off unless explicitly enabled with `OMP_WEB_TERMINALS=1` (or true/yes/on). */
 export function isTerminalFeatureEnabled(): boolean {
@@ -34,8 +29,7 @@ export function isTerminalFeatureEnabled(): boolean {
  * feature* from requiring it.
  */
 export function isTerminalHostGateSatisfied(): boolean {
-  const hostname = process.env.OMP_WEB_HOSTNAME ?? "127.0.0.1";
-  if (Object.hasOwn(LOOPBACK_HOSTNAMES, hostname)) return true;
+  if (isLoopbackBind()) return true;
   if (isWebPasswordEnabled()) return true;
   if (hasStoredWebUsers()) return true;
   return isUnauthenticatedTerminalsAllowed();

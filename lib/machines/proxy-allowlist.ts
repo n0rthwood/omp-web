@@ -100,6 +100,17 @@ function matchesTemplate(template: string, segments: string[]): boolean {
 export function isProxyablePath(method: string, pathname: string): boolean {
   const path = normalize(pathname);
   const upperMethod = method.toUpperCase();
+  const segments = path.split("/").slice(1);
+
+  // Authorize the path that will actually be requested. `fetch` resolves the
+  // URL with the WHATWG parser, which strips "." and ".." segments, so a table
+  // match on the unresolved string would authorize one route and request
+  // another: "/api/files/../../api/web-users" matches the files wildcard here
+  // and arrives at the remote as "/api/web-users". Empty segments are refused
+  // for the same reason — they are not a path this gateway can reason about.
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    return false;
+  }
 
   if (Object.hasOwn(DENIED_EXACT_METHOD, `${upperMethod} ${path}`)) return false;
   if (Object.hasOwn(DENIED_EXACT, path)) return false;
@@ -109,7 +120,6 @@ export function isProxyablePath(method: string, pathname: string): boolean {
     return false;
   }
 
-  const segments = path.split("/").slice(1);
   return ALLOWED_ROUTES.some(
     (rule) => rule.methods.includes(upperMethod) && matchesTemplate(rule.template, segments),
   );

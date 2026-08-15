@@ -9,6 +9,7 @@ import {
   type MachineAuthMode,
   type MachinePatch,
 } from "@/lib/machines/machine-store";
+import { FLEET_CONFIGURATION_DENIED_MESSAGE, isFleetConfigurationAllowed } from "@/lib/machines/fleet-gate";
 import { jsonError, readJsonBody, requireAdminApi } from "../../web-users/_guard";
 
 export const dynamic = "force-dynamic";
@@ -30,6 +31,7 @@ interface RouteContext {
 export async function PATCH(req: Request, context: RouteContext) {
   const denied = await requireAdminApi(req);
   if (denied) return denied;
+  if (!isFleetConfigurationAllowed()) return jsonError(403, FLEET_CONFIGURATION_DENIED_MESSAGE);
   if (!hasJsonContentType(req)) {
     return jsonError(415, "Content-Type must be application/json");
   }

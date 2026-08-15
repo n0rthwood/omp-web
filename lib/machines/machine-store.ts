@@ -72,6 +72,8 @@ export function getMachinesFilePath(): string {
 /** 1..39 chars, lowercase alnum and inner hyphens — never a leading or trailing one. */
 const MACHINE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
+/** Visible ASCII plus tab and space — what a header value may legally carry. */
+const HEADER_VALUE_RE = /^[\t\x20-\x7e]*$/;
 const FORBIDDEN_HEADER_NAMES: Record<string, true> = {
   "host": true,
   "authorization": true,
@@ -120,15 +122,26 @@ function validateHeaders(headers: Record<string, string>): void {
     if (Object.hasOwn(FORBIDDEN_HEADER_NAMES, name)) {
       throw new MachineValidationError("headers", `header not allowed: ${name}`);
     }
-    if (typeof headers[rawName] !== "string") {
+    const value = headers[rawName];
+    if (typeof value !== "string") {
       throw new MachineValidationError("headers", "header values must be strings");
+    }
+    // Rejected here rather than at use time: a stray newline from a paste
+    // otherwise throws inside every proxied fetch, turning one bad character
+    // into a permanently broken machine instead of a 400 on save.
+    if (!HEADER_VALUE_RE.test(value)) {
+      throw new MachineValidationError("headers", `invalid header value for ${name}`);
     }
   }
 }
 
 function validateCredential(authMode: MachineAuthMode, token: string | undefined | null): void {
-  if ((authMode === "bearer" || authMode === "basic") && (typeof token !== "string" || token.length === 0)) {
+  if (authMode === "none") return;
+  if (typeof token !== "string" || token.length === 0) {
     throw new MachineValidationError("token", `token is required when authMode is "${authMode}"`);
+  }
+  if (!HEADER_VALUE_RE.test(token)) {
+    throw new MachineValidationError("token", "token contains characters that cannot be sent in a header");
   }
 }
 
@@ -349,6 +362,15 @@ export function updateMachine(id: string, patch: MachinePatch): StoredMachine | 
   if (patch.baseUrl !== undefined) {
     if (typeof patch.baseUrl !== "string") throw new MachineValidationError("baseUrl", "baseUrl must be a string");
     next.baseUrl = normalizeBaseUrl(patch.baseUrl);
+    // A credential is bound to the origin it was issued for. Silently carrying
+    // it to a new origin would let anyone who can PATCH deliver the stored
+    // secret to a host of their choosing.
+    if (next.baseUrl !== machine.baseUrl && patch.token === undefined && machine.token) {
+      throw new MachineValidationError(
+        "token",
+        "re-enter the credential when changing the base URL",
+      );
+    }
   }
   if (patch.authMode !== undefined) {
     if (typeof patch.authMode !== "string" || !isMachineAuthMode(patch.authMode)) {
@@ -376,6 +398,12 @@ export function updateMachine(id: string, patch: MachinePatch): StoredMachine | 
       throw new MachineValidationError("username", "username must be a string");
     }
     next.username = patch.username;
+  }
+  // Switching authentication off retires the secret rather than parking it on
+  // disk, where `hasCredential: false` would misreport what the file holds.
+  if (next.authMode === "none") {
+    delete next.token;
+    delete next.username;
   }
   validateCredential(next.authMode, next.token);
 
