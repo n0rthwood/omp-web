@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SafeMachine } from "@/lib/api-types";
-import { LOCAL_MACHINE_ID, setCurrentMachineId } from "@/lib/api-path";
+import { LOCAL_MACHINE_ID, appUrl, setCurrentMachineId } from "@/lib/api-path";
 
 export const localMachine: SafeMachine = {
   id: LOCAL_MACHINE_ID,
@@ -91,13 +91,8 @@ export function MachineProvider(props: { children: React.ReactNode }): React.Rea
       return prev === next ? prev : next;
     });
     // Same router.replace mechanism AppShell uses for ?session=; a session id
-    // from another machine is meaningless, so ?session= is cleared on switch.
-    const params = new URLSearchParams(window.location.search);
-    const search = new URLSearchParams();
-    if (next !== LOCAL_MACHINE_ID) search.set("machine", next);
-    params.delete("session");
-    for (const [k, v] of params) if (k !== "machine") search.set(k, v);
-    router.replace(search.size ? `?${search.toString()}` : "/", { scroll: false });
+    // from another machine is meaningless, so it is dropped on switch.
+    router.replace(appUrl({}, next), { scroll: false });
   }, [router]);
 
   // Keep the seam in sync if ?machine= is changed out-of-band (back/forward,

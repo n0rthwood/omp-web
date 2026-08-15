@@ -38,7 +38,7 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { getInitialNavigation } from "@/lib/initial-navigation";
-import { apiPath } from "@/lib/api-path";
+import { apiPath, appUrl } from "@/lib/api-path";
 import { MachineProvider, useMachines } from "@/lib/machine-context";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
@@ -514,7 +514,7 @@ function AppShellBody() {
         setSelectedSession(s);
         setSessionKey((k) => k + 1);
         if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+          router.replace(appUrl({ session: s.id }), { scroll: false });
         }
       })
       .catch(() => {
@@ -567,7 +567,7 @@ function AppShellBody() {
     // Restore the workspace we switched to: its last open session, or keep
     // the default welcome page when none is remembered.
     restoreWorkspaceContext(newProject);
-    router.replace("/", { scroll: false });
+    router.replace(appUrl({}), { scroll: false });
   }, [router, selectedSession, invalidateWorkspaceRestore, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
@@ -604,7 +604,7 @@ function AppShellBody() {
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.replace(appUrl({ session: session.id }), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, router, isMobile, selectedSession]);
 
@@ -618,7 +618,7 @@ function AppShellBody() {
     setSystemPrompt(null);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace("/", { scroll: false });
+    router.replace(appUrl({}), { scroll: false });
   }, [invalidateWorkspaceRestore, router, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
@@ -653,7 +653,7 @@ function AppShellBody() {
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    router.replace(appUrl({ session: session.id }), { scroll: false });
   }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const deliverSessionNotification = useCallback(({
@@ -769,7 +769,7 @@ function AppShellBody() {
       transient: false,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
+    router.replace(appUrl({ session: newSessionId }), { scroll: false });
   }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const handleInitialRestoreDone = useCallback(() => {
@@ -788,7 +788,7 @@ function AppShellBody() {
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
+      router.replace(appUrl({}), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, selectedSession, router]);
 
