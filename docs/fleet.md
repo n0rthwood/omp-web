@@ -39,12 +39,19 @@ and can be neither modified nor deleted.
 | `token` | for `bearer`/`basic` | the Bearer token, or the Basic password |
 | `username` | `basic` only | defaults to `"omp"` |
 | `headers` | no | extra static headers; `host`, `authorization`, `cookie`, `content-length`, `connection`, `transfer-encoding` are rejected |
-| `id` | no | slug `^[a-z0-9][a-z0-9-]{0,38}$`, never `local`; derived from `name` if omitted |
+| `id` | no | slug `^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$` — 1–39 chars, no leading or trailing hyphen, never `local`; derived from `name` if omitted |
 
 Machines are managed with `PATCH /api/machines/<id>` (send `token: null` to
 clear the credential; omit `token` to keep it) and `DELETE /api/machines/<id>`
 (204). Responses only ever contain the safe projection — `id`, `name`,
 `baseUrl`, `authMode`, `hasCredential`, `headerNames`, timestamps, `isLocal`.
+
+`POST /api/machines/test` probes a machine *before* it is saved: send the same
+body plus an optional `id` (meaning "reuse that machine's stored credential, I
+did not retype it"). It answers `200 {ok: true, health}` or
+`200 {ok: false, code, error}` — a failed probe is a successful API call, not an
+HTTP error. The browser never dials a remote directly: it is cross-origin (the
+remote's origin check refuses it) and it would put the credential in the page.
 
 ### Minting the credential
 
@@ -85,6 +92,11 @@ that remote authenticates:
   `ADMIN_ONLY_API_PREFIXES` in `proxy.ts`. Per-user visibility (#7) cannot be
   projected onto another machine's absolute paths, so multi-user fleet access is
   out of scope, deliberately.
+- **Never configure machines on an unauthenticated gateway.** `machines.json`
+  holds credentials to *other* hosts, so an open gateway on a reachable
+  interface hands out lateral access to every machine in the registry. Give the
+  gateway a password or a user store (issue #7) before adding a machine, or
+  keep it bound to loopback.
 
 ## The remote's own rules still apply
 

@@ -42,7 +42,7 @@
     "start:lan": "bun --bun next start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test app components hooks lib public",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {

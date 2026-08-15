@@ -673,6 +673,13 @@ symlinked (`git worktree add .worktrees/perf <ref>`), then `next start` there.
 Two `next dev` servers in one directory also fight over `.next/dev` and one
 exits — which looks exactly like a server crashing for no reason.
 
+A live `.worktrees/*` checkout is also a second copy of every test and source
+file. `bun test` with no arguments and `eslint .` both collect it, so the suite
+doubles, the copies fail on the symlinked `node_modules`, and the working tree
+looks catastrophically broken. `package.json`'s `test` script therefore names
+the source directories explicitly and `eslint.config.mjs` ignores
+`.worktrees/**` — keep both in step when adding a top-level directory.
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
