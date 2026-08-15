@@ -92,11 +92,25 @@ that remote authenticates:
   `ADMIN_ONLY_API_PREFIXES` in `proxy.ts`. Per-user visibility (#7) cannot be
   projected onto another machine's absolute paths, so multi-user fleet access is
   out of scope, deliberately.
-- **Never configure machines on an unauthenticated gateway.** `machines.json`
-  holds credentials to *other* hosts, so an open gateway on a reachable
-  interface hands out lateral access to every machine in the registry. Give the
-  gateway a password or a user store (issue #7) before adding a machine, or
-  keep it bound to loopback.
+- **An unauthenticated gateway cannot be given machines.** `machines.json` holds
+  credentials to *other* hosts, so an open gateway on a reachable interface
+  would hand out lateral access to the whole registry. Adding, editing and
+  probing a machine therefore require either a loopback bind or real
+  authentication (`lib/machines/fleet-gate.ts`); without one you get
+  `403` telling you to set `OMP_WEB_PASSWORD` or create a web user. Listing the
+  registry and using machines already in it keep working, so tightening the
+  bind never breaks a running fleet.
+- **`baseUrl` is dialed exactly as given.** Nothing blocks loopback, RFC1918 or
+  link-local addresses, and the name is resolved fresh on every request, so a
+  machine's address can change under you if its DNS does. An admin already has
+  a shell on the gateway through an agent session, so this grants them nothing
+  new — but the registry is not a sandbox, and it should not be treated as one.
+- **A stored credential is bound to the origin it was saved for.** Changing a
+  machine's `baseUrl`, or probing a different one with `id`, requires
+  re-entering the credential. Otherwise "write-only" would be cosmetic: anyone
+  with an admin session could aim the stored secret at a host of their choosing
+  and read it off the wire. Switching a machine to `authMode: "none"` deletes
+  the stored credential rather than parking it on disk.
 
 ## The remote's own rules still apply
 
@@ -119,6 +133,13 @@ The proxy is allow-listed by route template **and** method
 a row in a hardcoded table derived from `app/api`. Anything not in the table is
 denied with `403 Proxy path not allowed` — including new routes, until they are
 added to the table.
+
+A path containing an empty, `.` or `..` segment is refused outright, in any
+spelling (`%2E%2E` included). `fetch` resolves the URL before sending it, so
+without that rule the table would authorize one route — `/api/files/*` accepts
+any tail — while the remote received another: `/api/files/../../api/web-users`
+arrives as `/api/web-users`. Authorize the path that will actually be
+requested, never the one that was typed.
 
 Four surfaces are denied outright, on purpose:
 
