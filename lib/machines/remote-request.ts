@@ -152,14 +152,14 @@ export async function proxyToMachine(
     if (request.signal.aborted) {
       return errorResponse(499, { error: "Client disconnected" });
     }
-    if (connectTimeout.signal.aborted || error instanceof TypeError) {
-      // Timeout, DNS failure, refused connection, network error.
-      return errorResponse(502, {
-        error: `Machine unreachable: ${machine.id}`,
-        code: "machine_unreachable",
-      });
-    }
-    return errorResponse(502, { error: "Proxy request failed", code: "machine_unreachable" });
+    // Timeout, DNS failure, refused connection, TLS or network error: Bun
+    // surfaces these as several error types, and none of them are actionable
+    // beyond "this machine did not answer".
+    return errorResponse(502, {
+      error: `Machine unreachable: ${machine.id}`,
+      detail: error instanceof Error ? error.message : String(error),
+      code: "machine_unreachable",
+    });
   } finally {
     clearTimeout(timer);
   }

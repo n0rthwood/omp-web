@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { NextResponse } from "next/server";
 import packageJson from "../../../package.json";
@@ -12,20 +13,42 @@ export const dynamic = "force-dynamic";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
-/** `null` on any resolution/read failure — health must never 500 over versions. */
+/**
+ * The SDK version, or `null` on any failure — health must never 500 over it.
+ *
+ * `createRequire` works unbundled, but the built Next server rewrites module
+ * resolution, so the directory walk is the path that actually answers in
+ * production: from this chunk's directory up to the filesystem root, looking
+ * for the installed manifest.
+ */
 function readOmpVersion(): string | null {
+  const candidates: string[] = [];
   try {
-    const require = createRequire(import.meta.url);
-    const manifestPath = require.resolve("@oh-my-pi/pi-coding-agent/package.json");
-    const manifest: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
-    if (typeof manifest === "object" && manifest !== null && "version" in manifest) {
-      const version = manifest.version;
-      return typeof version === "string" ? version : null;
-    }
-    return null;
+    candidates.push(createRequire(import.meta.url).resolve("@oh-my-pi/pi-coding-agent/package.json"));
   } catch {
-    return null;
+    // Bundled: fall through to the directory walk.
   }
+
+  let dir = import.meta.dirname || process.cwd();
+  while (true) {
+    candidates.push(join(dir, "node_modules", "@oh-my-pi", "pi-coding-agent", "package.json"));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  for (const manifestPath of candidates) {
+    try {
+      const manifest: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
+      if (typeof manifest === "object" && manifest !== null && "version" in manifest) {
+        const version = manifest.version;
+        if (typeof version === "string") return version;
+      }
+    } catch {
+      // Next candidate.
+    }
+  }
+  return null;
 }
 
 // GET /api/health — machine health probe; no side effects, no network calls.
