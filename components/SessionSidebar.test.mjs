@@ -18,11 +18,10 @@ test("does not register row-level session deletion shortcuts", () => {
   assert.doesNotMatch(sessionItemSource, /tabIndex=\{0\}/);
 });
 
-test("polls running sessions only while the tab is visible", () => {
+test("running-session polling moved to SessionListProvider — SessionSidebar only consumes the shared state", () => {
   assert.doesNotMatch(source, /new EventSource\("\/api\/agent\/running\/events"\)/);
-  assert.match(source, /fetch\(apiPath\("\/api\/agent\/running"\)/);
-  assert.match(source, /document\.visibilityState !== "visible"/);
-  assert.match(source, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/);
+  assert.doesNotMatch(source, /document\.addEventListener\("visibilitychange"/);
+  assert.match(source, /const \{ sessions: allSessions, loading, error, runningSessionIds, refreshDone: sessionRefreshDone, refresh: refreshSessions \} = useSessionList\(\);/);
 });
 
 test("keeps subagents out of the left session sidebar", () => {
@@ -53,12 +52,10 @@ test("offers the downstream context-menu hook only on a normal session row", () 
     /onContextMenu=\{confirmDelete \|\| renaming \? undefined : handleContextMenu\}/,
   );
 });
-test("manual and lifecycle refreshes bypass the server session-list cache", () => {
-  assert.match(source, /force \? "\/api\/sessions\?force=1" : "\/api\/sessions"/);
-  assert.match(source, /cache: "no-store"/);
-  assert.match(source, /loadSessions\(isFirst, !isFirst\)/);
-  assert.match(source, /onClick=\{\(\) => loadSessions\(false, true\)\}/);
-  assert.match(source, /loadSessions\(false, true\);[\s\S]*?onBackgroundTaskDone/);
+test("manual refresh and the completion notification both go through SessionListProvider", () => {
+  assert.match(source, /onClick=\{\(\) => refreshSessions\(\)\}/);
+  assert.doesNotMatch(source, /\bloadSessions\(/);
+  assert.match(source, /completedInBackground\.length > 0[\s\S]*?onBackgroundTaskDone\?\.\(\);/);
 });
 
 test("does not expose disk-backed actions for transient sessions", () => {

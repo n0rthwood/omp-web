@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
 import { useMachines } from "@/lib/machine-context";
+import { useNavigation } from "./NavigationProvider";
 import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
 
 type SwitcherHealth = {
@@ -37,7 +38,8 @@ async function probe(machine: SafeMachine | UserVisibleMachine, signal: AbortSig
 }
 
 export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => void }) {
-  const { machineId, machines, setMachineId, loading } = useMachines();
+  const { machineId, machines, loading } = useMachines();
+  const { navigate } = useNavigation();
   const [open, setOpen] = useState(false);
   const [health, setHealth] = useState<Record<string, SwitcherHealth>>({});
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -68,7 +70,8 @@ export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => 
   }, []);
 
   const selectMachine = (id: string) => {
-    setMachineId(id);
+    // Machine switch drops project/session — cross-machine ids are meaningless.
+    navigate({ machineId: id, project: null, session: null }, { history: "push" });
     setDismissedError(null);
     setOpen(false);
   };

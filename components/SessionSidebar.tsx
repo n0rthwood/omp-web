@@ -8,10 +8,12 @@ import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { useI18n } from "@/hooks/useI18n";
 import { useWebUser } from "@/hooks/useWebUser";
+import { useSessionList } from "@/lib/session-list-context";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
 import { MachineSwitcher } from "./MachineSwitcher";
+import { AccessNotice } from "./AccessNotice";
 
 declare global {
   interface Window {
@@ -83,11 +85,8 @@ function ToolbarIconButton({
 interface Props {
   selectedSessionId: string | null;
   optimisticSession?: SessionInfo | null;
-  onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
+  onSelectSession: (session: SessionInfo) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
-  initialSessionId?: string | null;
-  skipInitialProjectSelection?: boolean;
-  onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
@@ -121,7 +120,6 @@ interface WorktreeState {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
-const RUNNING_SESSIONS_POLL_MS = 2500;
 const PROJECT_SESSION_LIMIT = 5;
 const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
 const REMOVED_PROJECTS_STORAGE_KEY = "omp-web:removed-projects";
@@ -448,18 +446,23 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
   const { t } = useI18n();
   const { user: webUser } = useWebUser();
   // The custom-cwd picker adds arbitrary project roots; user-role accounts are
   // limited to the projects an admin assigned them.
   const canAddCustomPath = webUser?.role !== "user";
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
-  const sessionsForDisplay = optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
-    ? [optimisticSession, ...allSessions]
-    : allSessions;
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Session-list ownership lives in SessionListProvider, above the machine
+  // remount key (issue #10, stage 3) — both this sidebar and the navigation
+  // pipeline consume it. Aliased to `allSessions` so every downstream
+  // reference in this file needs no further change.
+  const { sessions: allSessions, loading, error, runningSessionIds, refreshDone: sessionRefreshDone, refresh: refreshSessions } = useSessionList();
+  const sessionsForDisplay = useMemo(
+    () => (optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
+      ? [optimisticSession, ...allSessions]
+      : allSessions),
+    [optimisticSession, allSessions],
+  );
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [homeDir, setHomeDir] = useState<string>("");
   const [projectFilter, setProjectFilter] = useState("");
@@ -487,63 +490,15 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
-  const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
-  // Once polling has delivered a snapshot it is the source of truth for
-  // running state; late /api/sessions responses must not overwrite it.
-  const runningPollAuthoritativeRef = useRef(false);
-  const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
   useEffect(() => {
     setCollapsedProjects(loadCollapsedProjects());
     setRemovedProjects(loadRemovedProjects());
   }, []);
-
-
-  const loadSessions = useCallback(async (showLoading = false, force = false) => {
-    try {
-      if (showLoading) setLoading(true);
-      const res = await fetch(apiPath(force ? "/api/sessions?force=1" : "/api/sessions"), {
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
-      setAllSessions(data.sessions);
-      // Treat the fetched running set as an initial fallback only. Once the
-      // lightweight poll is live, a slow session-list fetch cannot overwrite it.
-      if (!runningPollAuthoritativeRef.current) {
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      }
-      // Drop unread markers for sessions that no longer exist (e.g. deleted).
-      const existingIds = new Set(data.sessions.map((s) => s.id));
-      setUnreadSessionIds((prev) => {
-        if (prev.size === 0) return prev;
-        const next = new Set([...prev].filter((id) => existingIds.has(id)));
-        return next.size === prev.size ? prev : next;
-      });
-      setError(null);
-      if (!showLoading) {
-        setSessionRefreshDone(true);
-        if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
-        sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, []);
-
-  const initialLoadDone = useRef(false);
-  useEffect(() => {
-    const isFirst = !initialLoadDone.current;
-    initialLoadDone.current = true;
-    loadSessions(isFirst, !isFirst);
-  }, [loadSessions, refreshKey]);
 
   // Browser storage is unavailable during server rendering. Restore the panel
   // preference after hydration so a collapsed explorer stays collapsed on reload.
@@ -558,65 +513,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [unreadSessionIds]);
 
   useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let controller: AbortController | null = null;
-
-    const clearTimer = () => {
-      if (timer) clearTimeout(timer);
-      timer = null;
-    };
-
-    const schedule = () => {
-      clearTimer();
-      if (stopped || document.visibilityState !== "visible") return;
-      timer = setTimeout(() => void poll(), RUNNING_SESSIONS_POLL_MS);
-    };
-
-    const poll = async () => {
-      if (stopped || document.visibilityState !== "visible") return;
-      const current = new AbortController();
-      controller?.abort();
-      controller = current;
-      try {
-        const res = await fetch(apiPath("/api/agent/running"), {
-          cache: "no-store",
-          signal: current.signal,
-        });
-        if (!res.ok) return;
-        const data = await res.json() as { runningSessionIds?: string[] };
-        if (stopped || controller !== current) return;
-        runningPollAuthoritativeRef.current = true;
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      } catch {
-        // Keep the last known state; the next visible-tab poll retries.
-      } finally {
-        if (controller === current) controller = null;
-        schedule();
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void poll();
-        return;
-      }
-      clearTimer();
-      controller?.abort();
-      controller = null;
-    };
-
-    void poll();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      stopped = true;
-      clearTimer();
-      controller?.abort();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, []);
-
-  useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
     const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
@@ -629,18 +525,12 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         return next;
       });
     }
-    const hasUnlistedRunningSession = newlyRunning.some(
-      (id) => !allSessions.some((session) => session.id === id),
-    );
-    if (completedInBackground.length > 0 || hasUnlistedRunningSession) {
-      loadSessions(false, true);
-    }
     if (completedInBackground.length > 0) {
       onBackgroundTaskDone?.();
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
+  }, [runningSessionIds, selectedSessionId, onBackgroundTaskDone]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -661,8 +551,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       if (d.home) setHomeDir(d.home);
     }).catch(() => {});
   }, []);
-
-  const restoredRef = useRef(false);
 
   /** Resolve the project root for a cwd from the freshest data available */
   const projectRootFor = useCallback((cwd: string | null): string | null => {
@@ -727,29 +615,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       });
     return () => { cancelled = true; };
   }, [selectedCwd, wtRefreshKey, refreshKey]);
-
-  // Auto-select cwd and restore session from URL on first load
-  useEffect(() => {
-    if (allSessions.length === 0 || skipInitialProjectSelection) return;
-
-    if (selectedCwd === null) {
-      // If restoring a session, set cwd to match that session
-      if (initialSessionId && !restoredRef.current) {
-        restoredRef.current = true;
-        const target = allSessions.find((s) => s.id === initialSessionId);
-        if (target) {
-          setSelectedCwd(target.cwd);
-          onSelectSession(target, true);
-          return;
-        }
-        // Session not found — notify parent so it can show the placeholder
-        onInitialRestoreDone?.();
-      }
-      const projects = getRecentProjects(allSessions)
-        .filter((project) => !removedProjects.has(normalizeProjectKey(project)));
-      if (projects.length > 0) setSelectedCwd(projects[0]);
-    }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, removedProjects]);
 
   const commitCustomPath = useCallback(async (candidate: string) => {
     const path = candidate.trim();
@@ -1051,7 +916,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
               {t("sidebar.new")}
             </button>
             <button
-              onClick={() => loadSessions(false, true)}
+              onClick={() => refreshSessions()}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 background: sessionRefreshDone ? "rgba(74,222,128,0.18)" : "var(--bg-hover)",
@@ -1199,9 +1064,22 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           </div>
         )}
         {!loading && !error && projectGroups.length === 0 && (
-          <div style={{ padding: "12px 8px", color: "var(--text-muted)", fontSize: 12 }}>
-            {normalizedProjectFilter ? t("sidebar.noMatchingProjects") : t("sidebar.noSessions")}
-          </div>
+          normalizedProjectFilter ? (
+            <div style={{ padding: "12px 8px", color: "var(--text-muted)", fontSize: 12 }}>
+              {t("sidebar.noMatchingProjects")}
+            </div>
+          ) : webUser?.role === "user" && Array.isArray(webUser.visibleProjects) && webUser.visibleProjects.length === 0 ? (
+            <AccessNotice
+              variant="not-available"
+              title={t("sidebar.noSessions")}
+              body={t("accessNotice.noVisibleSessions")}
+              fullScreen={false}
+            />
+          ) : (
+            <div style={{ padding: "12px 8px", color: "var(--text-muted)", fontSize: 12 }}>
+              {t("sidebar.noSessions")}
+            </div>
+          )
         )}
         {!loading && !error && projectGroups.map(({ project, name, sessions }) => {
           const isSelectedProject = project === selectedProject;
@@ -1726,10 +1604,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                       runningSessionIds={runningSessionIds}
                       unreadSessionIds={unreadSessionIds}
                       onSelectSession={handleSelectSessionFromList}
-                      onRenamed={loadSessions}
+                      onRenamed={() => refreshSessions(false)}
                       onSessionDeleted={(id) => {
                         onSessionDeleted?.(id);
-                        loadSessions();
+                        refreshSessions(false);
                       }}
                       depth={0}
                     />

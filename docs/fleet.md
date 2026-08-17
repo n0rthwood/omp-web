@@ -21,10 +21,12 @@ The URL shape is a pure prefix insert:
 Everything client-side goes through `apiPath()` (`lib/api-path.ts`), which
 decides — from a module-level current machine id — whether a URL stays local or
 gains the `/api/machines/<id>` prefix. Switching machines (the MachineSwitcher)
-changes `?machine=`, and the app subtree is keyed by machine id so it **remounts
-cleanly**: no session, file, or terminal state can leak from one machine into
-another. localStorage keys that hold absolute paths or session ids are
-namespaced per machine by `machineStorageKey()` (`k` → `m:<id>:k`).
+goes through the navigation pipeline (see
+[Deeplinks, resume, and navigation](#deeplinks-resume-and-navigation) below),
+which updates the URL to `/m/<id>[/p/<project>]` and remounts the app subtree
+keyed by machine id: no session, file, or terminal state can leak from one
+machine into another. localStorage keys that hold absolute paths or session
+ids are namespaced per machine by `machineStorageKey()` (`k` → `m:<id>:k`).
 
 The registry lives in `~/.omp/agent/omp-web-machines.json` (override with
 `OMP_WEB_MACHINES_FILE`), written `0600` through the atomic-replace helper. The
@@ -249,6 +251,82 @@ the remote and no way to scope one. Concretely:
   subscription or a terminal session opened while granted keeps running
   until it ends on its own; only *new* requests are checked against the
   current grant.
+
+## Deeplinks, resume, and navigation
+
+The app's location — which machine, project, and conversation — is a single
+piece of state owned end-to-end by `lib/nav-state.ts` (the pure resolution
+core) and `components/NavigationProvider.tsx` (its React binding, mounted
+above the machine remount key). Three surfaces stay in sync: the URL, a
+localStorage resume slot, and the UI.
+
+### URL scheme
+
+| Path | Meaning |
+| --- | --- |
+| `/` | resume the last machine/project/conversation from localStorage, or defaults |
+| `/m/<machineId>` | that machine, default project + default conversation |
+| `/m/<machineId>/p/<project>` | + project, default conversation (workspace-memory last, else most-recently modified) |
+| `/m/<machineId>/p/<project>/s/<sessionId>` | that exact conversation |
+| `/p/<project>[/s/<sessionId>]` | local machine, with the `/m` segment omitted |
+
+`<project>` is the project-root absolute path, percent-encoded into one path
+segment (`encodeURIComponent`, so `/` becomes `%2F`) — the same identifier
+`?cwd=` and workspace-memory keys already used; there is no separate project
+registry. Legacy `?machine=`/`?session=`/`?cwd=` query links (including
+already-delivered notification URLs) still parse — `cwd` still wins over
+`session` — and are canonicalized to the path form with one history
+`replace` the first time they resolve.
+
+### Resume
+
+`omp-web:last-location` (`{v: 1, machine, project, session}`) is written to
+localStorage exactly once, at the moment a navigation *settles* successfully.
+A deeplink that fails validation never touches it — a broken shared link
+can't clobber where you actually were. Precedence is decided once per
+navigation: an explicit URL target always wins over resume, which always wins
+over the built-in defaults (local machine, no project).
+
+### History: push vs. replace
+
+Explicit user selections — clicking a machine, project, or conversation in
+the sidebar — call `navigate(target, { history: "push" })`: each one is a
+real step in the back/forward stack. System-driven corrections — legacy
+query canonicalization, a resume/deeplink resolution settling, a session
+deletion falling back to the project's welcome page — `replace` instead, so
+back/forward never lands on a URL the pipeline immediately has to rewrite (or
+on a session you just deleted). `popstate` is handled in exactly one place
+(`NavigationProvider`) and always re-runs full resolution.
+
+### Staged resolution and error taxonomy
+
+A deeplink or resume target is resolved in stages — `machines` → `projects`
+→ `session` — each waiting on its own data before selecting from it (no
+"unknown id silently falls back to local" degrade). A target parsed from the
+URL is validated *hard*: any failure shows a full-screen `AccessNotice`
+naming the stage, with a call to action, never a silent fallback. A target
+recovered from resume/defaults instead steps down *softly*, one level at a
+time (stale session → the project's default conversation, stale project →
+the machine's default project, stale/unreachable machine → local) — **except
+offline, which is always a hard error even on resume**, since silently
+dropping to local would hide that a whole machine went dark.
+
+| Stage | Outcome | Notice variant |
+| --- | --- | --- |
+| machine | unknown id | `not-found` |
+| machine | exists, not granted to you | `no-permission` (deliberately distinct from `not-found` — machine-id existence is not a secret on this fleet, see "Per-user machine grants" above) |
+| machine | unreachable (network/proxy failure) | `offline` — always hard, with retry + "go local" |
+| project | unknown, or not visible to you (with a `POST /api/cwd/validate` fallback so a fresh, zero-session project directory still opens) | `not-available` |
+| session | unknown or hidden | `not-available` (uniform — never distinguishes "deleted" from "not visible to you", issue #7) |
+
+A zero-session project deeplink is not an error: it opens the same blank
+"start a new conversation here" state a fresh directory always would.
+
+### What's out of scope
+
+File-tab and right-panel state, per-machine roles, and the in-session branch
+id (`leafId`) are never part of the URL — only machine, project, and
+conversation are addressable and resumable.
 
 ## Limits, stated plainly
 

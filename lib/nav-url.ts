@@ -43,9 +43,9 @@ function trimmedOrNull(value: string | null): string | null {
 /**
  * Legacy `?machine=` / `?session=` / `?cwd=` deeplinks, preserved forever so
  * old bookmarks and shared links keep working. Reachable from ANY pathname,
- * including "/". `cwd` wins over `session`, exactly like the pre-existing
- * `lib/initial-navigation.ts`. Absent/empty (post-trim) keys fall through to
- * path parsing.
+ * including "/". `cwd` wins over `session`, matching the pre-#10 behavior
+ * this parser subsumes (the module that used to own this logic was deleted
+ * in stage 3). Absent/empty (post-trim) keys fall through to path parsing.
  */
 function parseLegacyQuery(params: URLSearchParams): ParsedLocation | null {
   const machine = trimmedOrNull(params.get("machine"));
