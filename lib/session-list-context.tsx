@@ -37,6 +37,11 @@ export interface SessionListContextValue {
   bumpRefreshKey(): void;
   /** One-off fetch for an arbitrary machine — used by the navigation pipeline to validate a deeplink/resume target before it becomes "current". Bypasses the reactive state above entirely. */
   fetchSessionsFor(machineId: string): Promise<SessionInfo[]>;
+  /** Threads the currently-selected session id in from AppShellBody so its
+   *  own completion never double-reloads/flashes the list via the polling
+   *  transition below — `bumpRefreshKey()` on agent-end already covers it
+   *  (issue #10 stage-3 review, minor #6). */
+  setActiveSessionId(id: string | null): void;
 }
 
 async function fetchSessionList(
@@ -70,6 +75,28 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
   const runningPollAuthoritativeRef = useRef(false);
   const previousRunningRef = useRef<Set<string>>(new Set());
   const refreshDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Threaded in from AppShellBody (minor #6) so its own completion never
+  // double-reloads/flashes the list via the polling transition below.
+  const activeSessionIdRef = useRef<string | null>(null);
+  const setActiveSessionId = useCallback((id: string | null) => {
+    activeSessionIdRef.current = id;
+  }, []);
+
+  // Machine-switch reset, done synchronously during render (the React
+  // "adjusting state during render" pattern) rather than in an effect —
+  // otherwise the previous machine's session list paints for one frame
+  // under the new machineId before the effect below clears it (issue #10
+  // stage-3 review, minor #7).
+  const sessionsMachineIdRef = useRef(machineId);
+  if (sessionsMachineIdRef.current !== machineId) {
+    sessionsMachineIdRef.current = machineId;
+    runningPollAuthoritativeRef.current = false;
+    previousRunningRef.current = new Set();
+    setSessions([]);
+    setRunningSessionIds(new Set());
+    setError(null);
+    setLoading(true);
+  }
 
   const load = useCallback(async (showLoading: boolean, force: boolean) => {
     try {
@@ -90,29 +117,31 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
     }
   }, [machineId]);
 
-  // The initial (or machine-switch) load. Resets synchronously first — this
-  // provider sits above the remount key, so unlike the pre-lift SessionSidebar
-  // it must clear stale state itself instead of relying on an unmount.
+  // The initial (or machine-switch) load. State reset now happens
+  // synchronously during render above — this effect only kicks off the
+  // fetch itself.
   useEffect(() => {
-    runningPollAuthoritativeRef.current = false;
-    previousRunningRef.current = new Set();
-    setSessions([]);
-    setRunningSessionIds(new Set());
-    setError(null);
     void load(true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is recreated with `machineId`; listing both is redundant, not incorrect.
   }, [machineId]);
 
   // External refreshKey bumps (session created/deleted/forked, rename, ...)
   // reload in the background, same as every such trigger did pre-lift.
+  // `load`'s identity also changes on every machine switch (it closes over
+  // `machineId`) — depending on it directly would refire this effect
+  // alongside the one above and double-fetch (issue #10 stage-3 review,
+  // minor #4), so only `refreshKey` itself is a dependency; `loadRef` reads
+  // the current `load` without retriggering on its identity changing.
+  const loadRef = useRef(load);
+  loadRef.current = load;
   const isInitialRefreshKeyRef = useRef(true);
   useEffect(() => {
     if (isInitialRefreshKeyRef.current) {
       isInitialRefreshKeyRef.current = false;
       return;
     }
-    void load(false, true);
-  }, [refreshKey, load]);
+    void loadRef.current(false, true);
+  }, [refreshKey]);
 
   // 2.5s running-session poll, paused while the tab is hidden.
   useEffect(() => {
@@ -175,10 +204,14 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
   }, [machineId]);
 
   // Refetch when a running session isn't listed yet, or one just completed
-  // in the background — the list itself is stale in both cases.
+  // in the background — the list itself is stale in both cases. The
+  // currently-active session is excluded from "completed": its own
+  // completion is already handled by `bumpRefreshKey()` on agent-end, so
+  // including it here would reload (and flash `refreshDone`) twice for the
+  // same event (issue #10 stage-3 review, minor #6).
   useEffect(() => {
     const previous = previousRunningRef.current;
-    const completed = [...previous].filter((id) => !runningSessionIds.has(id));
+    const completed = [...previous].filter((id) => !runningSessionIds.has(id) && id !== activeSessionIdRef.current);
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
     const hasUnlisted = newlyRunning.some((id) => !sessions.some((s) => s.id === id));
     if (completed.length > 0 || hasUnlisted) void load(false, true);
@@ -203,8 +236,8 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const value = useMemo<SessionListContextValue>(() => ({
-    sessions, loading, error, runningSessionIds, refreshDone, refreshKey, refresh, bumpRefreshKey, fetchSessionsFor,
-  }), [sessions, loading, error, runningSessionIds, refreshDone, refreshKey, refresh, bumpRefreshKey, fetchSessionsFor]);
+    sessions, loading, error, runningSessionIds, refreshDone, refreshKey, refresh, bumpRefreshKey, fetchSessionsFor, setActiveSessionId,
+  }), [sessions, loading, error, runningSessionIds, refreshDone, refreshKey, refresh, bumpRefreshKey, fetchSessionsFor, setActiveSessionId]);
 
   return <SessionListContext.Provider value={value}>{children}</SessionListContext.Provider>;
 }

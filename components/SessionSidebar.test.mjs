@@ -62,3 +62,17 @@ test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
 });
+
+test("minor #5: unread markers are pruned against the loaded session list, but never while it's still loading", () => {
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{\s*if \(loading\) return;\s*setUnreadSessionIds\(\(prev\) => \{\s*const next = new Set\(\[\.\.\.prev\]\.filter\(\(id\) => allSessions\.some\(\(s\) => s\.id === id\)\)\);/,
+  );
+});
+
+test("minor #8: the project-recency ranking is a shared helper, not a local duplicate of nav-state's default-project pick", () => {
+  assert.match(source, /import \{ mostRecentProjectRoots \} from "@\/lib\/project-recency";/);
+  assert.match(source, /import \{ loadRemovedProjects, normalizeProjectKey, saveRemovedProjects \} from "@\/lib\/removed-projects";/);
+  assert.doesNotMatch(source, /function getRecentProjects/);
+  assert.match(source, /const projectPaths = mostRecentProjectRoots\(sessionsForDisplay\)/);
+});

@@ -3,6 +3,8 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { apiPath, machineStorageKey } from "@/lib/api-path";
+import { mostRecentProjectRoots } from "@/lib/project-recency";
+import { loadRemovedProjects, normalizeProjectKey, saveRemovedProjects } from "@/lib/removed-projects";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -122,39 +124,6 @@ interface WorktreeState {
 const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
 const PROJECT_SESSION_LIMIT = 5;
 const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
-const REMOVED_PROJECTS_STORAGE_KEY = "omp-web:removed-projects";
-
-function normalizeProjectKey(project: string): string {
-  const normalized = project.replace(/\\/g, "/");
-  return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
-}
-
-function loadRemovedProjects(): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const raw = window.localStorage.getItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY));
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
-      ? new Set(parsed.filter((project): project is string => typeof project === "string").map(normalizeProjectKey))
-      : new Set();
-  } catch {
-    return new Set();
-  }
-}
-
-function saveRemovedProjects(projects: Set<string>): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (projects.size === 0) window.localStorage.removeItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY));
-    else window.localStorage.setItem(machineStorageKey(REMOVED_PROJECTS_STORAGE_KEY), JSON.stringify([...projects]));
-  } catch {
-    // Ignore storage quota and privacy-mode errors.
-  }
-}
-
-
-
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -200,27 +169,6 @@ function saveCollapsedProjects(projects: Set<string>): void {
   } catch {
     // Ignore storage quota and privacy-mode errors.
   }
-}
-
-
-
-/**
- * Return all projects (deduped by projectRoot so worktrees collapse into their
- * main repo) sorted by most recent session activity.
- */
-function getRecentProjects(sessions: SessionInfo[]): string[] {
-  const latestByRoot = new Map<string, string>(); // projectRoot -> most recent modified
-  for (const s of sessions) {
-    const root = s.projectRoot ?? s.cwd;
-    if (!root) continue;
-    const prev = latestByRoot.get(root);
-    if (!prev || s.modified > prev) {
-      latestByRoot.set(root, s.modified);
-    }
-  }
-  return [...latestByRoot.entries()]
-    .sort((a, b) => b[1].localeCompare(a[1]))
-    .map(([root]) => root);
 }
 
 /** Substitute the home dir prefix with ~ (no path truncation — see PathLabel) */
@@ -542,6 +490,20 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     });
   }, [selectedSessionId]);
 
+  // Deleted sessions never get a chance to clear their own unread marker
+  // (that only happens on selection, above) — prune anything no longer in
+  // the loaded list so a stale id doesn't linger in localStorage forever
+  // (issue #10 stage-3 review, minor #5). Skipped while the list hasn't
+  // loaded yet, so a slow initial fetch doesn't wipe markers restored from
+  // localStorage before it ever got a chance to load.
+  useEffect(() => {
+    if (loading) return;
+    setUnreadSessionIds((prev) => {
+      const next = new Set([...prev].filter((id) => allSessions.some((s) => s.id === id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [allSessions, loading]);
+
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
   }, [explorerRefreshKey]);
@@ -771,7 +733,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, []);
 
   const selectedProject = projectRootFor(selectedCwd);
-  const projectPaths = getRecentProjects(sessionsForDisplay)
+  const projectPaths = mostRecentProjectRoots(sessionsForDisplay)
     .filter((project) => !removedProjects.has(normalizeProjectKey(project)));
   if (selectedProject && !removedProjects.has(normalizeProjectKey(selectedProject)) && !projectPaths.includes(selectedProject)) {
     projectPaths.unshift(selectedProject);

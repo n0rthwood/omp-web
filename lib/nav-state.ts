@@ -36,7 +36,9 @@
  */
 
 import type { SessionInfo } from "./types";
-import type { NavigationTarget, ParsedLocation } from "./nav-url";
+import { buildUrl, type NavigationTarget, type ParsedLocation } from "./nav-url";
+import { mostRecentProjectRoots } from "./project-recency";
+import { normalizeProjectKey } from "./removed-projects";
 
 const LOCAL_MACHINE_ID = "local";
 
@@ -130,8 +132,25 @@ export interface NavError {
 }
 
 export type NavResult =
-  | { phase: NavPhase; target: NavigationTarget; session: SessionInfo | null; error: null }
-  | { phase: "error"; target: NavigationTarget; session: null; error: NavError };
+  | { phase: NavPhase; target: NavigationTarget; session: SessionInfo | null; error: null; source: NavSource }
+  | { phase: "error"; target: NavigationTarget; session: null; error: NavError; source: NavSource };
+
+/**
+ * The address-bar canonicalization for a settled URL-sourced resolution
+ * (issue #10 stage-3 review, blocker #1): a legacy `?machine=/?session=/
+ * ?cwd=` link, or a machine switch settling on its resolved defaults, must
+ * end up at the same path a fresh `/m/<id>/p/<project>/s/<session>` visit
+ * would produce — never left on the URL it started from. Resume/default-
+ * sourced settles (a plain `/` visit, or a stale-resume step-down) must
+ * never touch history, so this only ever returns non-null for a
+ * `"url"`-sourced `"settled"` result whose canonical form differs from
+ * `currentUrl` (the caller's `window.location.pathname + search`).
+ */
+export function canonicalRewriteUrl(result: NavResult, currentUrl: string): string | null {
+  if (result.phase !== "settled" || result.source !== "url") return null;
+  const canonical = buildUrl(result.target);
+  return canonical === currentUrl ? null : canonical;
+}
 
 // --- injected I/O -------------------------------------------------------------
 
@@ -164,6 +183,12 @@ export interface NavDeps {
   getSession(machineId: string, sessionId: string): Promise<SessionInfo | null>;
   /** Synchronous workspace-memory lookup for a project key. */
   getLastOpenSession(projectKey: string): string | null;
+  /** Reads the machine-scoped removed-projects set (`SessionSidebar`'s "hide
+   *  from workspace selector" list) so a removed project is never silently
+   *  picked as the pipeline's default. Omitted -> no project is treated as
+   *  removed (nav-state stays pure-injectable; the real storage read is
+   *  wired in by `NavigationProvider.tsx`). */
+  removedProjectsSupplier?(): Set<string>;
   /** Called once the machine id is committed, before the projects stage starts. */
   onMachineCommit?(machineId: string): void;
   storage: NavStorageLike | null;
@@ -171,24 +196,11 @@ export interface NavDeps {
 
 // --- defaults within an already-fetched session-list snapshot --------------
 
-/** Most-recently-modified project root across the snapshot (mirrors SessionSidebar's getRecentProjects). */
-function defaultProject(sessions: SessionInfo[]): string | null {
-  const latestByRoot = new Map<string, string>();
-  for (const s of sessions) {
-    const root = s.projectRoot ?? s.cwd;
-    if (!root) continue;
-    const prev = latestByRoot.get(root);
-    if (!prev || s.modified > prev) latestByRoot.set(root, s.modified);
-  }
-  let best: string | null = null;
-  let bestModified = "";
-  for (const [root, modified] of latestByRoot) {
-    if (modified > bestModified) {
-      bestModified = modified;
-      best = root;
-    }
-  }
-  return best;
+/** Most-recently-modified project root across the snapshot, excluding the
+ *  caller's removed projects (issue #10 stage-3 review, minor #8) — shares
+ *  its ranking with SessionSidebar's `mostRecentProjectRoots`. */
+function defaultProject(sessions: SessionInfo[], removedProjects: Set<string>): string | null {
+  return mostRecentProjectRoots(sessions).find((root) => !removedProjects.has(normalizeProjectKey(root))) ?? null;
 }
 
 /** Workspace-memory last-open session for the project, else the most-recently-modified session in it. */
@@ -226,15 +238,16 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
 
   async function resolve(intent: NavIntent, deps: NavDeps, myToken: number): Promise<void> {
     const hard = intent.source === "url";
+    const source = intent.source;
     let target = intent.target;
 
-    if (!emit(myToken, { phase: "boot", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "boot", target, session: null, error: null, source })) return;
 
-    if (!emit(myToken, { phase: "auth", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "auth", target, session: null, error: null, source })) return;
     await (deps.waitForAuth?.() ?? Promise.resolve());
     if (myToken !== token) return;
 
-    if (!emit(myToken, { phase: "machines", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "machines", target, session: null, error: null, source })) return;
     let machines: NavMachineSummary[];
     try {
       machines = await deps.listMachines();
@@ -260,6 +273,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
           target: { machineId, project: null, session: null },
           session: null,
           error: { stage: "machine", variant: "offline" },
+          source,
         });
         return;
       }
@@ -270,6 +284,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
             target: { machineId, project: null, session: null },
             session: null,
             error: { stage: "machine", variant: probe },
+            source,
           });
           return;
         }
@@ -283,10 +298,11 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
     }
 
     target = { ...target, machineId };
+    if (myToken !== token) return;
     deps.onMachineCommit?.(machineId);
-    if (!emit(myToken, { phase: "machine-commit", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "machine-commit", target, session: null, error: null, source })) return;
 
-    if (!emit(myToken, { phase: "projects", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "projects", target, session: null, error: null, source })) return;
     let sessions: SessionInfo[];
     try {
       sessions = await deps.listSessions(machineId);
@@ -298,6 +314,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
           target: { machineId, project: null, session: null },
           session: null,
           error: { stage: "machine", variant: "offline" },
+          source,
         });
         return;
       }
@@ -305,6 +322,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
     }
     if (myToken !== token) return;
 
+    const removedProjects = deps.removedProjectsSupplier?.() ?? new Set<string>();
     let project = target.project;
     // Set to true when the effective project differs from what was requested
     // (a soft step-down): the originally-requested session, if any, no longer
@@ -325,6 +343,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
               target: { machineId, project: null, session: null },
               session: null,
               error: { stage: "machine", variant: "offline" },
+              source,
             });
             return;
           }
@@ -340,21 +359,22 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
             target: { machineId, project: null, session: null },
             session: null,
             error: { stage: "project", variant: "not-available" },
+            source,
           });
           return;
         } else {
-          project = defaultProject(sessions);
+          project = defaultProject(sessions, removedProjects);
           sessionRedirected = true;
         }
       }
     } else {
-      project = defaultProject(sessions);
+      project = defaultProject(sessions, removedProjects);
     }
 
     target = { machineId, project, session: sessionRedirected ? null : target.session };
-    if (!emit(myToken, { phase: "project-commit", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "project-commit", target, session: null, error: null, source })) return;
 
-    if (!emit(myToken, { phase: "session", target, session: null, error: null })) return;
+    if (!emit(myToken, { phase: "session", target, session: null, error: null, source })) return;
     let resolvedSession: SessionInfo | null = null;
     if (target.session) {
       try {
@@ -367,6 +387,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
             target: { machineId, project, session: null },
             session: null,
             error: { stage: "machine", variant: "offline" },
+            source,
           });
           return;
         }
@@ -381,6 +402,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
             target: { machineId, project, session: null },
             session: null,
             error: { stage: "session", variant: "not-available" },
+            source,
           });
           return;
         }
@@ -391,7 +413,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
     }
 
     const finalTarget: NavigationTarget = { machineId, project, session: resolvedSession?.id ?? null };
-    if (emit(myToken, { phase: "settled", target: finalTarget, session: resolvedSession, error: null })) {
+    if (emit(myToken, { phase: "settled", target: finalTarget, session: resolvedSession, error: null, source })) {
       writeLastLocation(deps.storage, {
         v: 1,
         machine: finalTarget.machineId,

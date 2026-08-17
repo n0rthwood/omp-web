@@ -291,12 +291,17 @@ over the built-in defaults (local machine, no project).
 
 Explicit user selections — clicking a machine, project, or conversation in
 the sidebar — call `navigate(target, { history: "push" })`: each one is a
-real step in the back/forward stack. System-driven corrections — legacy
-query canonicalization, a resume/deeplink resolution settling, a session
-deletion falling back to the project's welcome page — `replace` instead, so
-back/forward never lands on a URL the pipeline immediately has to rewrite (or
-on a session you just deleted). `popstate` is handled in exactly one place
-(`NavigationProvider`) and always re-runs full resolution.
+real step in the back/forward stack, including a machine switch, which
+pushes its bare `/m/<id>` immediately. System-driven corrections instead
+`replace`: legacy query canonicalization, a machine switch's resolved
+defaults filling in the bare URL it just pushed, and a session deletion
+falling back to the project's welcome page — so back/forward never lands on
+a URL the pipeline immediately has to rewrite (or on a session you just
+deleted), and a machine switch never costs a second stack entry. A resume
+settle (visiting `/`) never touches history at all — there is no URL to
+correct it from, and rewriting one on every plain visit would be history
+pollution. `popstate` is handled in exactly one place (`NavigationProvider`)
+and always re-runs full resolution.
 
 ### Staged resolution and error taxonomy
 

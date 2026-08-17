@@ -39,7 +39,7 @@ import { apiPath } from "@/lib/api-path";
 import { MachineProvider, useMachines } from "@/lib/machine-context";
 import { SessionListProvider, useSessionList } from "@/lib/session-list-context";
 import { NavigationProvider, useNavigation } from "./NavigationProvider";
-import type { NavigationTarget } from "@/lib/nav-url";
+import { buildUrl, type NavigationTarget } from "@/lib/nav-url";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
   getDefaultRightPanelWidth,
@@ -420,6 +420,10 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
     syncWithOmp: true,
   });
   const activeProjectRootRef = useRef<string | null>(null);
+  // Guards the async workspace-memory self-heal below so a slow response
+  // from an earlier cwd change cannot act on behalf of (or clobber memory
+  // for) a project the user has already switched away from.
+  const cwdSelfHealTokenRef = useRef(0);
   // Suppresses the redundant sessionKey bump that handleCwdChange would
   // otherwise apply when SessionSidebar echoes back the cwd this component
   // mounted with — relevant only for the "resolved project, no default
@@ -438,6 +442,14 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
       ?? selectedSession.cwd;
     setLastOpenSession(projectKey, selectedSession.id);
   }, [selectedSession]);
+
+  // Thread the selected session into SessionListProvider (minor #6) so its
+  // own completion never double-reloads/flashes the list via the polling
+  // transition — bumpRefreshKey() calls above (handleAgentEnd et al.)
+  // already cover it.
+  useEffect(() => {
+    sessionList.setActiveSessionId(selectedSession?.id ?? null);
+  }, [sessionList, selectedSession]);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
     setActiveCwd(cwd);
@@ -480,30 +492,42 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
     setFileTabs([]);
     setActiveFileTabId(null);
     setRightPanelOpen(false);
-    // Restore the workspace we switched to: its last open session (from
-    // workspace-memory, matched against the currently loaded list), or the
-    // default welcome page when none is remembered. Synchronous — the
-    // target project is already known-valid (it came from the loaded
-    // session/worktree list); the async, race-guarded version of this same
-    // lookup lives in lib/nav-state.ts's session stage, for deeplink/resume
-    // resolution ahead of this component ever mounting.
+    // Restore the workspace we switched to: its last open session, matched
+    // synchronously against the currently loaded list — that list is
+    // already known-fresh enough to select the right session immediately
+    // (the async, race-guarded version of this same lookup lives in
+    // lib/nav-state.ts's session stage, for deeplink/resume resolution
+    // ahead of this component ever mounting).
     const lastOpenId = getLastOpenSession(newProject);
     const restored = lastOpenId
       ? sessionList.sessions.find((s) => s.id === lastOpenId && (s.projectRoot ?? s.cwd) === newProject)
       : undefined;
-    if (lastOpenId && !restored && !sessionList.loading) {
-      // Self-heal: the remembered session no longer exists (or drifted out
-      // of this project) — forget it so future switches don't repeat the
-      // same no-op lookup. Skipped while the list hasn't loaded yet, so a
-      // slow fetch doesn't erase the memory before it ever got a chance.
-      clearLastOpen(newProject);
+    if (lastOpenId && !restored) {
+      // Self-heal: the remembered session might not actually be gone —
+      // `sessionList.sessions` can be stale (e.g. created moments ago on
+      // another tab). Confirm against a fresh, uncached fetch before
+      // forgetting it; a network failure keeps the memory for a later
+      // retry rather than risk erasing a session that is still there.
+      // Token-guarded: a second cwd change before this resolves must not
+      // let a stale response act on the wrong project.
+      const myToken = ++cwdSelfHealTokenRef.current;
+      void fetch(apiPath("/api/sessions"), { cache: "no-store" })
+        .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+        .then((d) => {
+          if (!d || cwdSelfHealTokenRef.current !== myToken) return;
+          const stillThere = d.sessions.some((s) => s.id === lastOpenId && (s.projectRoot ?? s.cwd) === newProject);
+          if (!stillThere) clearLastOpen(newProject);
+        })
+        .catch(() => {
+          // Network hiccup — keep the remembered session for a later retry.
+        });
     }
     if (restored) {
       setSelectedSession(restored);
       setSessionKey((k) => k + 1);
     }
     nav.navigate({ machineId: machines.machineId, project: newProject, session: restored?.id ?? null }, { history: "push" });
-  }, [nav, machines.machineId, sessionList.sessions, sessionList.loading, selectedSession]);
+  }, [nav, machines.machineId, sessionList.sessions, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
     // Mark the target project before the cwd synchronization effect runs.
@@ -592,7 +616,9 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
     if (!("Notification" in window)) return;
 
     const fire = () => {
-      const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
+      const sessionUrl = targetSession
+        ? buildUrl({ machineId: machines.machineId, project: targetSession.projectRoot ?? targetSession.cwd, session: targetSession.id })
+        : "/";
       void showBrowserNotification({
         title,
         body,
@@ -610,7 +636,7 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
     } else if (Notification.permission === "default") {
       void Notification.requestPermission().then((p) => { if (p === "granted") fire(); });
     }
-  }, [handleSelectSession]);
+  }, [handleSelectSession, machines.machineId]);
 
   const handleAgentEnd = useCallback(() => {
     sessionList.bumpRefreshKey();

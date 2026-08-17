@@ -55,3 +55,56 @@ test("the wrapper layers SessionListProvider and NavigationProvider above the ma
 test("NavigationProvider is the only popstate handler AppShell.tsx itself never listens for it", () => {
   assert.doesNotMatch(source, /addEventListener\("popstate"/);
 });
+
+// issue #10 stage-3 review, blockers #1 and #2: the pipeline canonicalizes
+// the address bar at settle, and an interactive machine switch runs through
+// it instead of settling immediately with a raw, project-less target.
+
+const navProviderSource = fs.readFileSync(new URL("./NavigationProvider.tsx", import.meta.url), "utf8");
+
+test("blocker #1: a settled result is canonicalized via canonicalRewriteUrl, replacing the URL only when it differs", () => {
+  assert.match(navProviderSource, /import \{\s*canonicalRewriteUrl,/);
+  assert.match(
+    navProviderSource,
+    /const rewrite = canonicalRewriteUrl\(result, pathname \+ search\);\s*if \(rewrite\) router\.replace\(rewrite, \{ scroll: false \}\);/,
+  );
+});
+
+test("blocker #2: navigate() routes a machine-changing target through the async pipeline, not the sync fast path", () => {
+  const navigateStart = navProviderSource.indexOf("const navigate = useCallback");
+  const navigateEnd = navProviderSource.indexOf("const retry = useCallback", navigateStart);
+  assert.notEqual(navigateStart, -1);
+  const navigateBody = navProviderSource.slice(navigateStart, navigateEnd);
+
+  assert.match(navigateBody, /if \(next\.machineId !== machinesRef\.current\.machineId\) \{/);
+  assert.match(navigateBody, /resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);/);
+  // The same-machine fast path still settles synchronously, without a
+  // pipeline round trip.
+  assert.match(navigateBody, /setResult\(\{ phase: "settled", target: next, session: null, error: null, source: "url" \}\);/);
+});
+
+test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {
+  const notificationBody = callbackBody("deliverSessionNotification", "handleAgentEnd");
+  assert.match(
+    notificationBody,
+    /buildUrl\(\{ machineId: machines\.machineId, project: targetSession\.projectRoot \?\? targetSession\.cwd, session: targetSession\.id \}\)/,
+  );
+  assert.doesNotMatch(notificationBody, /`\/\?session=\$\{encodeURIComponent\(targetSession\.id\)\}`/);
+  assert.match(source, /\}, \[handleSelectSession, machines\.machineId\]\);/);
+});
+
+test("minor #9: workspace-memory self-heal confirms against a fresh fetch (never the cached snapshot) before clearing, token-guarded, and keeps memory on fetch failure", () => {
+  const handleCwdChangeBody = callbackBody("handleCwdChange", "handleSelectSession");
+  // Never clears memory off the stale, in-memory sessionList snapshot alone.
+  assert.doesNotMatch(handleCwdChangeBody, /if \(lastOpenId && !restored && !sessionList\.loading\)/);
+  assert.match(handleCwdChangeBody, /const myToken = \+\+cwdSelfHealTokenRef\.current;/);
+  assert.match(handleCwdChangeBody, /void fetch\(apiPath\("\/api\/sessions"\), \{ cache: "no-store" \}\)/);
+  assert.match(handleCwdChangeBody, /if \(!d \|\| cwdSelfHealTokenRef\.current !== myToken\) return;/);
+  assert.match(handleCwdChangeBody, /if \(!stillThere\) clearLastOpen\(newProject\);/);
+  // A network failure (rejected promise, `.catch`) never clears the memory.
+  assert.match(handleCwdChangeBody, /\.catch\(\(\) => \{/);
+});
+
+test("minor #6: the selected session id is threaded into SessionListProvider so its own completion doesn't double-reload the list", () => {
+  assert.match(source, /sessionList\.setActiveSessionId\(selectedSession\?\.id \?\? null\);/);
+});

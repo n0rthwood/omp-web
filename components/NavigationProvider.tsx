@@ -14,11 +14,20 @@
  *    error taxonomy, storage write at settle.
  *  - Interactive (`navigate()`): the caller already holds an
  *    already-validated target (a session/project clicked from a loaded
- *    list, a machine picked from the loaded machines list) — this updates
- *    the URL, storage, and the machine seam directly, with no re-validation
- *    round trip. All 6 writer call sites (machine switch, session select,
- *    project select, new-session, session-created/-forked, session-deleted)
- *    use this path.
+ *    list, a machine picked from the loaded machines list). A same-machine
+ *    target updates the URL, storage, and the machine seam directly, no
+ *    re-validation round trip. A target that *changes* the machine instead
+ *    runs through the same async pipeline as a `/m/<id>` deeplink — its
+ *    defaults (project, conversation) resolve exactly as a fresh visit's
+ *    would, so an interactive machine switch lands on the identical URL a
+ *    matching deeplink would (issue #10 stage-3 review, blocker #2).
+ *
+ * A settled resolution sourced from the URL (deeplink, legacy query, or the
+ * machine-switch pipeline above) canonicalizes the address bar to its
+ * resolved form via `router.replace` when it differs — a legacy `?session=`
+ * link or a bare `/m/<id>` switch both end up at the full
+ * `/m/<id>/p/<project>/s/<session>` path. Resume/default-sourced settles (a
+ * plain `/` visit) never touch history (blocker #1).
  *
  * Children render only once `phase === "settled"` — the whole-subtree
  * loading gate idiom, extended with per-stage progress and `AccessNotice`
@@ -28,6 +37,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  canonicalRewriteUrl,
   createNavigationResolver,
   NavOfflineError,
   writeLastLocation,
@@ -40,6 +50,7 @@ import {
 } from "@/lib/nav-state";
 import { buildUrl, parseLocation, type NavigationTarget } from "@/lib/nav-url";
 import { apiPath } from "@/lib/api-path";
+import { loadRemovedProjects } from "@/lib/removed-projects";
 import { useMachines } from "@/lib/machine-context";
 import { useSessionList } from "@/lib/session-list-context";
 import { useWebUser } from "@/hooks/useWebUser";
@@ -112,6 +123,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     target: { machineId: "local", project: null, session: null },
     session: null,
     error: null,
+    source: "default",
   });
 
   // Refs mirror the latest values into stable closures the resolver's deps
@@ -207,6 +219,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
       return data?.info ?? null;
     },
     getLastOpenSession: (projectKey: string) => getLastOpenSession(projectKey),
+    removedProjectsSupplier: () => loadRemovedProjects(),
     onMachineCommit: (machineId: string) => machinesRef.current.commitMachineId(machineId),
     storage: getStorage(),
   }), []);
@@ -228,16 +241,37 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     return () => window.removeEventListener("popstate", onPopState);
   }, [buildDeps]);
 
+  // Canonicalize the address bar once a URL-sourced resolution settles
+  // somewhere other than where it started (blocker #1): a legacy
+  // `?machine=/?session=/?cwd=` link, or a machine switch's defaults
+  // resolving past the bare `/m/<id>` `navigate()` pushed below. A no-op
+  // once the URL already matches; resume/default-sourced settles are never
+  // even considered (see `canonicalRewriteUrl`), so a plain `/` visit never
+  // gets a history entry rewritten under it.
+  useEffect(() => {
+    const { pathname, search } = currentLocation();
+    const rewrite = canonicalRewriteUrl(result, pathname + search);
+    if (rewrite) router.replace(rewrite, { scroll: false });
+  }, [result, router]);
+
   const navigate = useCallback((next: NavigationTarget, options: { history: "push" | "replace" }) => {
-    if (next.machineId !== machinesRef.current.machineId) {
-      machinesRef.current.commitMachineId(next.machineId);
-    }
     const url = buildUrl(next);
     if (options.history === "push") router.push(url, { scroll: false });
     else router.replace(url, { scroll: false });
+
+    if (next.machineId !== machinesRef.current.machineId) {
+      // Machine changes: run the same async pipeline a `/m/<id>` deeplink
+      // would (blocker #2) instead of settling immediately with a raw,
+      // project-less target — defaults (project, conversation) resolve,
+      // `onMachineCommit` fires at the pipeline's own machine-commit phase,
+      // and the settle above canonicalizes this URL to the full resolved
+      // path, landing identically to a matching deeplink.
+      resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
+      return;
+    }
     writeLastLocation(getStorage(), { v: 1, machine: next.machineId, project: next.project, session: next.session });
-    setResult({ phase: "settled", target: next, session: null, error: null });
-  }, [router]);
+    setResult({ phase: "settled", target: next, session: null, error: null, source: "url" });
+  }, [router, buildDeps]);
 
   const retry = useCallback(() => {
     const { pathname, search } = currentLocation();
