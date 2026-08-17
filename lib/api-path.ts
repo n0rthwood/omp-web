@@ -9,9 +9,14 @@
  * machine. Likewise, localStorage keys that hold absolute paths or session ids
  * must be namespaced per machine via `machineStorageKey()`.
  *
+ * `appUrl()` is the app's only URL builder — it wraps the pure codec in
+ * `./nav-url` (path shapes: `/`, `/m/<id>`, `/p/<project>`, `/s/<session>`).
+ *
  * Pure module: no React, no fs. The current machine id is module-level state,
  * set synchronously by the MachineProvider before any child effect runs.
  */
+
+import { buildUrl } from "./nav-url";
 
 export const LOCAL_MACHINE_ID = "local";
 
@@ -50,14 +55,15 @@ export function machineStorageKey(key: string, machineId?: string): string {
 }
 
 /**
- * The app's own URL for the current machine: `?machine=` survives every
- * navigation that also writes `?session=`, so a reload or a shared link lands
- * on the same machine. Local machine and no session collapse to "/".
+ * The app's own URL for the current machine/project/session — see
+ * `./nav-url` for the full path grammar. Local machine, no project, and no
+ * session collapse to "/".
  */
-export function appUrl(params: { session?: string | null }, machineId?: string): string {
+export function appUrl(params: { project?: string | null; session?: string | null }, machineId?: string): string {
   const id = machineId ?? currentMachineId;
-  const search = new URLSearchParams();
-  if (id !== LOCAL_MACHINE_ID) search.set("machine", id);
-  if (params.session) search.set("session", params.session);
-  return search.size > 0 ? `?${search.toString()}` : "/";
+  return buildUrl({
+    machineId: id,
+    project: params.project ?? null,
+    session: params.session ?? null,
+  });
 }
