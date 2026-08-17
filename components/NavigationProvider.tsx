@@ -24,7 +24,7 @@
  *
  * A settled resolution sourced from the URL (deeplink, legacy query, or the
  * machine-switch pipeline above) canonicalizes the address bar to its
- * resolved form via `router.replace` when it differs — a legacy `?session=`
+ * resolved form via a native `history.replaceState` when it differs — a legacy `?session=`
  * link or a bare `/m/<id>` switch both end up at the full
  * `/m/<id>/p/<project>/s/<session>` path. Resume/default-sourced settles (a
  * plain `/` visit) never touch history (blocker #1).
@@ -35,7 +35,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   canonicalRewriteUrl,
   createNavigationResolver,
@@ -106,6 +105,24 @@ function currentLocation(): { pathname: string; search: string } {
   return { pathname: window.location.pathname, search: window.location.search };
 }
 
+/**
+ * Writes the address bar with the native History API — NEVER the Next
+ * router. Every provider in this app mounts inside the page subtree
+ * (app/layout.tsx is bare), and App Router pages do not preserve state, so
+ * router.push/replace remounts the whole app on each navigation: the boot
+ * resolver re-runs, the loading gate covers the screen, and in-flight state
+ * (a fresh new-chat composer, SSE streams) is destroyed. Next 16 patches
+ * pushState/replaceState to sync its canonical URL without any RSC fetch or
+ * segment swap, and back/forward on such entries restores from cache; this
+ * provider's own popstate listener drives the app-level reaction.
+ */
+function writeAddressBar(url: string, mode: "push" | "replace"): void {
+  const { pathname, search } = currentLocation();
+  if (pathname + search === url) return; // identical entry adds nothing
+  if (mode === "push") window.history.pushState(null, "", url);
+  else window.history.replaceState(null, "", url);
+}
+
 const LOADING_LABEL_BY_PHASE: Partial<Record<NavPhase, string>> = {
   auth: "nav.loading.auth",
   machines: "nav.loading.machines",
@@ -120,7 +137,6 @@ function noticeVariantFrom(error: NavError): AccessNoticeVariant {
 }
 
 export function NavigationProvider({ children }: { children: React.ReactNode }): React.ReactElement {
-  const router = useRouter();
   const machines = useMachines();
   const sessionList = useSessionList();
   const { user: webUser, authRequired: webAuthRequired, loading: webUserLoading } = useWebUser();
@@ -265,13 +281,12 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
   useEffect(() => {
     const { pathname, search } = currentLocation();
     const rewrite = canonicalRewriteUrl(result, pathname + search);
-    if (rewrite) router.replace(rewrite, { scroll: false });
-  }, [result, router]);
+    if (rewrite) writeAddressBar(rewrite, "replace");
+  }, [result]);
 
   const navigate = useCallback((next: NavigationTarget, options: { history: "push" | "replace" }) => {
     const url = buildUrl(next);
-    if (options.history === "push") router.push(url, { scroll: false });
-    else router.replace(url, { scroll: false });
+    writeAddressBar(url, options.history);
 
     if (next.machineId !== machinesRef.current.machineId) {
       // Machine changes: run the same async pipeline a `/m/<id>` deeplink
@@ -285,7 +300,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     }
     writeLastLocation(getStorage(), { v: 1, machine: next.machineId, project: next.project, session: next.session });
     setResult({ phase: "settled", target: next, session: null, error: null, source: "url" });
-  }, [router, buildDeps]);
+  }, [buildDeps]);
 
   const retry = useCallback(() => {
     const { pathname, search } = currentLocation();
