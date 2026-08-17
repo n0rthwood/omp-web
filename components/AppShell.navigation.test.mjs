@@ -66,8 +66,19 @@ test("blocker #1: a settled result is canonicalized via canonicalRewriteUrl, rep
   assert.match(navProviderSource, /import \{\s*canonicalRewriteUrl,/);
   assert.match(
     navProviderSource,
-    /const rewrite = canonicalRewriteUrl\(result, pathname \+ search\);\s*if \(rewrite\) router\.replace\(rewrite, \{ scroll: false \}\);/,
+    /const rewrite = canonicalRewriteUrl\(result, pathname \+ search\);\s*if \(rewrite\) writeAddressBar\(rewrite, "replace"\);/,
   );
+});
+
+// issue #12: router.push/replace re-render the page segment, and the whole
+// provider tree is page-mounted — a Next-router navigation remounts the app
+// (the "every switch reloads" bug). URL writes must use the native History
+// API, which Next 16 syncs without fetching or remounting.
+test("issue #12: NavigationProvider writes URLs with the native History API, never the Next router", () => {
+  assert.doesNotMatch(navProviderSource, /from "next\/navigation"/);
+  assert.doesNotMatch(navProviderSource, /router\.(push|replace)\(/);
+  assert.match(navProviderSource, /window\.history\.pushState\(null, "", url\)/);
+  assert.match(navProviderSource, /window\.history\.replaceState\(null, "", url\)/);
 });
 
 test("blocker #2: navigate() routes a machine-changing target through the async pipeline, not the sync fast path", () => {
