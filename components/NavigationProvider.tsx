@@ -79,6 +79,14 @@ export interface NavigationContextValue {
   session: SessionInfo | null;
   phase: NavPhase;
   error: NavError | null;
+  /** Increments only when a resolver run (boot/popstate/machine-changing
+   *  `navigate()`) delivers a phase result; the same-machine `navigate()`
+   *  fast path settles synchronously without bumping it. AppShellBody uses
+   *  this — not target/session directly — to detect that a *new*
+   *  resolution has landed and needs applying to the open conversation,
+   *  since its own interactive selections already update local state
+   *  themselves. */
+  resolutionRevision: number;
   /** Updates URL and localStorage resume and syncs the machine seam for an already-validated target. Same-machine selections settle synchronously; a machine-changing target re-runs the full async pipeline (identical to a /m/<id> deeplink) so defaults resolve and the URL canonicalizes. */
   navigate(target: NavigationTarget, options: { history: "push" | "replace" }): void;
   /** Re-runs the full pipeline against the current URL (offline retry). */
@@ -125,6 +133,9 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     error: null,
     source: "default",
   });
+  // Bumped only by the resolver's onChange below (a resolver-delivered
+  // phase result) — never by the same-machine sync fast path in navigate().
+  const [resolutionRevision, setResolutionRevision] = useState(0);
 
   // Refs mirror the latest values into stable closures the resolver's deps
   // (constructed fresh per `run()`, but the resolver itself is created once)
@@ -161,7 +172,10 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
 
   const resolverRef = useRef<ReturnType<typeof createNavigationResolver> | null>(null);
   if (!resolverRef.current) {
-    resolverRef.current = createNavigationResolver((next) => setResult(next));
+    resolverRef.current = createNavigationResolver((next) => {
+      setResult(next);
+      setResolutionRevision((r) => r + 1);
+    });
   }
 
   const buildDeps = useCallback((): NavDeps => ({
@@ -283,9 +297,10 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     session: result.session,
     phase: result.phase === "error" ? "settled" : result.phase, // "error" is rendered by the gate below, never observed by children
     error: result.error,
+    resolutionRevision,
     navigate,
     retry,
-  }), [result, navigate, retry]);
+  }), [result, resolutionRevision, navigate, retry]);
 
   if (result.phase === "error" && result.error) {
     return <ErrorGate error={result.error} t={t} onRetry={retry} onGoLocal={() => navigate({ machineId: "local", project: null, session: null }, { history: "replace" })} />;

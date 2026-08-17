@@ -99,9 +99,15 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
   }
 
   const load = useCallback(async (showLoading: boolean, force: boolean) => {
+    // Guards a race the pre-lift, per-machine-remounted sidebar never had:
+    // an in-flight fetch started for the previous machine resolving after
+    // the machine has already switched (and `sessionsMachineIdRef` reset
+    // the state above, synchronously, for the new one) must not clobber it.
+    const forMachine = machineId;
     try {
       if (showLoading) setLoading(true);
       const { sessions: fetched, runningSessionIds: running } = await fetchSessionList(machineId, force);
+      if (sessionsMachineIdRef.current !== forMachine) return;
       setSessions(fetched);
       if (!runningPollAuthoritativeRef.current) setRunningSessionIds(new Set(running));
       setError(null);
@@ -111,9 +117,10 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
         refreshDoneTimerRef.current = setTimeout(() => setRefreshDone(false), 2000);
       }
     } catch (err) {
+      if (sessionsMachineIdRef.current !== forMachine) return;
       setError(String(err));
     } finally {
-      if (showLoading) setLoading(false);
+      if (sessionsMachineIdRef.current === forMachine && showLoading) setLoading(false);
     }
   }, [machineId]);
 

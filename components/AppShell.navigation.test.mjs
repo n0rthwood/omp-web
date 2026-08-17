@@ -21,7 +21,7 @@ test("no writer calls router.replace/push directly — navigate() is the only UR
 });
 
 test("AppShellBody seeds its initial session/project from the resolved navigation target, not from URL parsing", () => {
-  assert.match(source, /function AppShellBody\(\{ initialTarget, initialSession \}: AppShellBodyProps\)/);
+  assert.match(source, /function AppShellBody\(\{ initialTarget, initialSession, resolutionRevision \}: AppShellBodyProps\)/);
   assert.match(
     source,
     /const \[selectedSession, setSelectedSession\] = useState<SessionInfo \| null>\(\(\) => initialSession\);/,
@@ -107,4 +107,57 @@ test("minor #9: workspace-memory self-heal confirms against a fresh fetch (never
 
 test("minor #6: the selected session id is threaded into SessionListProvider so its own completion doesn't double-reload the list", () => {
   assert.match(source, /sessionList\.setActiveSessionId\(selectedSession\?\.id \?\? null\);/);
+});
+
+// final-review fix #1: a popstate between two same-machine settled URLs
+// updates NavigationProvider's target but must also update the open
+// conversation — AppShellBody's remount key is machineId only, and a
+// same-machine navigate() settles synchronously without ever remounting it.
+
+test("final-review fix #1: resolutionRevision threads from NavigationProvider through AppShellMachineKey into AppShellBody", () => {
+  assert.match(
+    navProviderSource,
+    /resolutionRevision: number;/,
+  );
+  assert.match(source, /interface AppShellBodyProps \{\s*initialTarget: NavigationTarget;\s*initialSession: SessionInfo \| null;\s*resolutionRevision: number;\s*\}/);
+  assert.match(
+    source,
+    /function AppShellMachineKey\(\) \{\s*const \{ machineId \} = useMachines\(\);\s*const \{ target, session, resolutionRevision \} = useNavigation\(\);/,
+  );
+  assert.match(source, /resolutionRevision=\{resolutionRevision\}/);
+});
+
+test("final-review fix #1: NavigationProvider bumps resolutionRevision only from a resolver-delivered result, never from the same-machine navigate() fast path", () => {
+  assert.match(
+    navProviderSource,
+    /resolverRef\.current = createNavigationResolver\(\(next\) => \{\s*setResult\(next\);\s*setResolutionRevision\(\(r\) => r \+ 1\);\s*\}\);/,
+  );
+  const navigateStart = navProviderSource.indexOf("const navigate = useCallback");
+  const navigateEnd = navProviderSource.indexOf("const retry = useCallback", navigateStart);
+  const navigateBody = navProviderSource.slice(navigateStart, navigateEnd);
+  assert.doesNotMatch(navigateBody, /setResolutionRevision/);
+});
+
+test("final-review fix #1: AppShellBody's sync effect is keyed on resolutionRevision alone, adopts or closes to the settled target, and never writes history", () => {
+  const effectStart = source.indexOf("useEffect(() => {\n    if (initialSession) {");
+  const effectEnd = source.indexOf("}, [resolutionRevision]);", effectStart);
+  assert.notEqual(effectStart, -1, "the resolutionRevision sync effect was not found");
+  assert.notEqual(effectEnd, -1, "the sync effect must depend on [resolutionRevision] alone");
+  const effectBody = source.slice(effectStart, effectEnd);
+
+  // Adopt branch: initialSession differs from what's open -> open it exactly
+  // like the old cwd-restore path.
+  assert.match(effectBody, /if \(selectedSession\?\.id === initialSession\.id\) return;/);
+  assert.match(effectBody, /activeProjectRootRef\.current = initialSession\.projectRoot \?\? initialSession\.cwd;/);
+  assert.match(effectBody, /setSelectedSession\(initialSession\);/);
+  assert.match(effectBody, /setNewSessionCwd\(null\);/);
+
+  // Close branch: no session at the settled target, but one is open locally
+  // -> close it to the URL's project context.
+  assert.match(effectBody, /if \(selectedSession\) \{\s*setSelectedSession\(null\);/);
+  assert.match(effectBody, /setNewSessionCwd\(initialTarget\.project \?\? null\);/);
+
+  // Popstate must never create/replace history entries from this effect.
+  assert.doesNotMatch(effectBody, /router\.(replace|push)\(/);
+  assert.doesNotMatch(effectBody, /nav\.navigate\(/);
 });

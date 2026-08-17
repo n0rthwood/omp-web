@@ -81,9 +81,10 @@ const LANGUAGE_MENU_WIDTH = 176;
 interface AppShellBodyProps {
   initialTarget: NavigationTarget;
   initialSession: SessionInfo | null;
+  resolutionRevision: number;
 }
 
-function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
+function AppShellBody({ initialTarget, initialSession, resolutionRevision }: AppShellBodyProps) {
   const nav = useNavigation();
   const machines = useMachines();
   const sessionList = useSessionList();
@@ -450,6 +451,35 @@ function AppShellBody({ initialTarget, initialSession }: AppShellBodyProps) {
   useEffect(() => {
     sessionList.setActiveSessionId(selectedSession?.id ?? null);
   }, [sessionList, selectedSession]);
+
+  // Same-machine popstate (or any other resolver-delivered resolution while
+  // this component stays mounted) updates NavigationProvider's target and
+  // session without remounting this component — the remount key above is
+  // machineId only, and a same-machine interactive navigate() settles
+  // synchronously without ever visiting the resolver. resolutionRevision is
+  // the seam: it bumps only on a resolver-delivered result, so an
+  // interactive selection (already applied by its own handler) never
+  // re-fires this — only a genuinely new resolved location does
+  // (final-review fix, issue #10). Reads the latest initialTarget/
+  // initialSession/selectedSession at fire time rather than depending on
+  // them directly, so the boot re-fire (selectedSession already seeded from
+  // initialSession) is a guaranteed no-op.
+  useEffect(() => {
+    if (initialSession) {
+      if (selectedSession?.id === initialSession.id) return;
+      activeProjectRootRef.current = initialSession.projectRoot ?? initialSession.cwd;
+      setSelectedSession(initialSession);
+      setSessionKey((k) => k + 1);
+      setNewSessionCwd(null);
+      return;
+    }
+    if (selectedSession) {
+      setSelectedSession(null);
+      setSessionKey((k) => k + 1);
+      setNewSessionCwd(initialTarget.project ?? null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on resolutionRevision alone: reads the latest initialTarget/initialSession/selectedSession props at fire time rather than re-firing on every prop change.
+  }, [resolutionRevision]);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
     setActiveCwd(cwd);
@@ -2058,6 +2088,13 @@ export function AppShell() {
 
 function AppShellMachineKey() {
   const { machineId } = useMachines();
-  const { target, session } = useNavigation();
-  return <AppShellBody key={machineId} initialTarget={target} initialSession={session} />;
+  const { target, session, resolutionRevision } = useNavigation();
+  return (
+    <AppShellBody
+      key={machineId}
+      initialTarget={target}
+      initialSession={session}
+      resolutionRevision={resolutionRevision}
+    />
+  );
 }

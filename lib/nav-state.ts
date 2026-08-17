@@ -395,6 +395,17 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
       }
       if (myToken !== token) return;
 
+      // Reconcile: an explicit-session deeplink/resume validates the session
+      // exists but not that it belongs to the requested project — the
+      // session's own project wins (precedent: the old `?session=` restore
+      // behaved the same way). `defaultSession` below is already
+      // project-filtered, so this only touches sessions actually resolved
+      // via `deps.getSession`.
+      if (resolvedSession) {
+        const sessProject = resolvedSession.projectRoot ?? resolvedSession.cwd;
+        if (sessProject !== project) project = sessProject;
+      }
+
       if (!resolvedSession) {
         if (hard) {
           emit(myToken, {
