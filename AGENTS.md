@@ -407,6 +407,14 @@ lib/
   machines/machine-store.ts   fleet registry (~/.omp/agent/omp-web-machines.json, mode 0600)
   machines/proxy-allowlist.ts route-template + method allow-list deciding what the proxy forwards
   machines/remote-request.ts  proxy transport — streaming both ways, header filters, machine credential
+  machines/machine-grants.ts  per-user machine grant resolution (effective/prune/granted/isGranted)
+  admin-api-policy.ts  shared admin-only API path policy (middleware + route guard + inner remote-path check)
+  nav-url.ts          pure deeplink codec: parseLocation(pathname, search) ↔ buildUrl() for /m//p URLs + legacy query
+  nav-state.ts        pure staged navigation resolver (phases, race tokens, error taxonomy, last-location resume)
+  session-list-context.tsx SessionListProvider — per-machine session list + running poll above the remount key
+  project-recency.ts   mostRecentProjectRoots() — shared project ranking (sidebar + nav default)
+  removed-projects.ts  per-machine removed-projects preference storage
+  workspace-memory.ts  per-project last-open-session memory (localStorage, machine-scoped)
   markdown.ts          shared markdown helpers
   model-roles.ts       omp's model roles, read/written for the browser
   model-scope.ts       enabledModels resolution shared by UI and startup
@@ -439,6 +447,10 @@ components/
   FileIcons.tsx       file icon helpers
   FileViewer.tsx      file content in a tab
   TabBar.tsx          tab bar (Chat + open file tabs)
+  NavigationProvider.tsx staged nav pipeline binding — sole popstate handler, staged loading, AccessNotice gates
+  AccessNotice.tsx    generic no-permission/not-found/not-available/offline notice
+  AppRoot.tsx         shared root tree for /, /m/[[...segments]], /p/[[...segments]]
+  AppShellBody (in AppShell.tsx)  keyed by machine id; consumes resolved target from NavigationProvider
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic

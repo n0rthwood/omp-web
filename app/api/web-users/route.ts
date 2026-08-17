@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType } from "@/lib/request-security";
+import { pruneMachineGrants } from "@/lib/machines/machine-grants";
 import {
   countEffectiveAdmins,
   createWebUser,
@@ -9,7 +10,7 @@ import {
   readWebUsersConfig,
   type EffectiveWebUser,
 } from "@/lib/web-users";
-import { jsonError, parseProjects, parseRole, readJsonBody, requireAdminApi } from "./_guard";
+import { jsonError, parseMachines, parseProjects, parseRole, readJsonBody, requireAdminApi } from "./_guard";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ function toListedUser(user: EffectiveWebUser) {
     username: user.username,
     role: user.role,
     projects: user.projects,
+    machines: pruneMachineGrants(user.machines),
     tokens: user.tokens.map(({ name, created }) => ({ name, created })),
     envBacked: user.envBacked,
   };
@@ -44,7 +46,7 @@ export async function POST(req: Request) {
   const body = await readJsonBody(req);
   if (!body) return jsonError(400, "Invalid JSON body");
 
-  const { username, password, role, projects } = body;
+  const { username, password, role, projects, machines } = body;
   if (typeof username !== "string" || !isValidWebUsername(username)) {
     return jsonError(400, "username must match [a-z0-9_-]{1,32}");
   }
@@ -57,6 +59,12 @@ export async function POST(req: Request) {
   if (!parsedProjects.ok) {
     return jsonError(400, "projects must be \"*\" or an array of absolute paths");
   }
+  const parsedMachines = machines === undefined
+    ? { ok: true as const, machines: [] as string[] | "*" }
+    : parseMachines(machines);
+  if (!parsedMachines.ok) {
+    return jsonError(400, "machines must be \"*\" or an array of machine ids");
+  }
 
   // Creating a non-admin named "omp" while the env bridge is active would
   // suppress the synthetic admin and leave zero effective admins (a lockout).
@@ -68,6 +76,7 @@ export async function POST(req: Request) {
       role: parsedRole,
       passwordHash: hashWebPassword(password),
       projects: parsedProjects.projects,
+      machines: parsedMachines.machines,
       tokens: [],
     },
   ];
@@ -80,6 +89,7 @@ export async function POST(req: Request) {
     role: parsedRole,
     passwordHash: hashWebPassword(password),
     projects: parsedProjects.projects,
+    machines: parsedMachines.machines,
     tokens: [],
   });
   if (!created) return jsonError(400, "Username already exists");
@@ -90,6 +100,7 @@ export async function POST(req: Request) {
         username,
         role: parsedRole,
         projects: parsedProjects.projects,
+        machines: parsedMachines.machines,
         tokens: [] as { name: string; created: string }[],
       },
     },

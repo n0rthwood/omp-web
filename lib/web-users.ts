@@ -30,6 +30,7 @@ export type StoredWebUser = {
   role: WebUserRole;
   passwordHash: string; // "scrypt$N$r$p$saltB64$hashB64"
   projects: string[] | "*"; // canonical absolute roots; "*" = all
+  machines: string[] | "*"; // granted machine ids; "*" = all (admin role is always effectively "*")
   tokens: StoredWebToken[];
 };
 
@@ -38,6 +39,7 @@ export type WebUser = {
   username: string;
   role: WebUserRole;
   visibleProjects: string[] | "*";
+  machines: string[] | "*"; // as stored; admin role is effectively "*" regardless of this value
 };
 
 export type EffectiveWebUser = Omit<StoredWebUser, "passwordHash"> & {
@@ -130,7 +132,7 @@ function parseStoredToken(value: unknown): StoredWebToken | null {
 
 function parseStoredUser(value: unknown): StoredWebUser | null {
   if (typeof value !== "object" || value === null) return null;
-  const { username, role, passwordHash, projects, tokens } = value as Record<string, unknown>;
+  const { username, role, passwordHash, projects, machines, tokens } = value as Record<string, unknown>;
   if (typeof username !== "string" || !isValidWebUsername(username)) return null;
   if (typeof passwordHash !== "string" || passwordHash.length === 0) return null;
 
@@ -142,11 +144,20 @@ function parseStoredUser(value: unknown): StoredWebUser | null {
     parsedProjects = [];
   }
 
+  let parsedMachines: string[] | "*";
+  if (machines === "*") parsedMachines = "*";
+  else if (Array.isArray(machines) && machines.every((id) => typeof id === "string")) {
+    parsedMachines = [...new Set(machines as string[])];
+  } else {
+    parsedMachines = [];
+  }
+
   return {
     username,
     role: role === "admin" ? "admin" : "user",
     passwordHash,
     projects: parsedProjects,
+    machines: parsedMachines,
     tokens: Array.isArray(tokens)
       ? tokens.map(parseStoredToken).filter((token): token is StoredWebToken => token !== null)
       : [],
@@ -236,7 +247,7 @@ export function createWebUser(user: StoredWebUser): boolean {
   return true;
 }
 
-export type WebUserUpdate = Partial<Pick<StoredWebUser, "role" | "projects">> & {
+export type WebUserUpdate = Partial<Pick<StoredWebUser, "role" | "projects" | "machines">> & {
   passwordHash?: string;
 };
 
@@ -249,6 +260,7 @@ export function updateWebUser(username: string, update: WebUserUpdate): StoredWe
     ...user,
     ...(update.role !== undefined ? { role: update.role } : {}),
     ...(update.projects !== undefined ? { projects: update.projects } : {}),
+    ...(update.machines !== undefined ? { machines: update.machines } : {}),
     ...(update.passwordHash !== undefined ? { passwordHash: update.passwordHash } : {}),
   };
   writeWebUsersConfig({
@@ -309,6 +321,7 @@ export function getEffectiveWebUsers(): EffectiveWebUser[] {
       role: "admin",
       passwordHash: null,
       projects: "*",
+      machines: "*",
       tokens: [],
       envBacked: true,
     },
@@ -385,5 +398,6 @@ export function toSafeWebUser(user: EffectiveWebUser): WebUser {
     username: user.username,
     role: user.role,
     visibleProjects: user.projects,
+    machines: user.machines,
   };
 }

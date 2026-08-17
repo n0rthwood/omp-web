@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { isAdminOnlyRemoteApiPath } from "@/lib/admin-api-policy";
+import { isValidMachineId, LOCAL_MACHINE_ID, getMachine } from "@/lib/machines/machine-store";
+import { isMachineGranted } from "@/lib/machines/machine-grants";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import type { WebUserRole } from "@/lib/web-users";
@@ -18,6 +21,42 @@ export async function requireAdminApi(request: Request): Promise<NextResponse | 
   }
   const user = await getWebUserOrSynthetic(request);
   if (!user || user.role !== "admin") {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403, headers: NO_STORE });
+  }
+  return null;
+}
+
+/**
+ * Trust gate + auth + per-machine grant check for the fleet proxy catch-all
+ * (`app/api/machines/[machineId]/[...path]/route.ts`). Distinguishes an
+ * unknown machine (404) from an existing-but-ungranted one (403) on purpose
+ * — machine-id existence is not treated as a secret on this fleet. `local`
+ * always passes here; the route's own `machineId === LOCAL_MACHINE_ID` check
+ * governs what happens next. `remotePathname` is the reconstructed inner
+ * path on the remote — a granted non-admin caller still may not reach an
+ * admin-only surface there (e.g. `PUT /api/models-config`).
+ */
+export async function requireMachineGrant(
+  request: Request,
+  machineId: string,
+  remotePathname: string,
+): Promise<NextResponse | null> {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403, headers: NO_STORE });
+  }
+  const user = await getWebUserOrSynthetic(request);
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: NO_STORE });
+  }
+  if (user.role === "admin") return null;
+  if (machineId === LOCAL_MACHINE_ID) return null;
+  if (!getMachine(machineId)) {
+    return NextResponse.json({ error: "Machine not found" }, { status: 404, headers: NO_STORE });
+  }
+  if (!isMachineGranted(user, machineId)) {
+    return NextResponse.json({ error: "No permission for this machine" }, { status: 403, headers: NO_STORE });
+  }
+  if (isAdminOnlyRemoteApiPath(remotePathname)) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403, headers: NO_STORE });
   }
   return null;
@@ -49,6 +88,22 @@ export function parseProjects(
     roots.push(entry === "/" ? "/" : entry.replace(/\/+$/, ""));
   }
   return { ok: true, projects: [...new Set(roots)] };
+}
+
+/** `"*"` or an array of valid, deduped machine ids. */
+export function parseMachines(
+  value: unknown,
+): { ok: true; machines: string[] | "*" } | { ok: false } {
+  if (value === "*") return { ok: true, machines: "*" };
+  if (!Array.isArray(value)) return { ok: false };
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0 || !isValidMachineId(entry)) {
+      return { ok: false };
+    }
+    ids.push(entry);
+  }
+  return { ok: true, machines: [...new Set(ids)] };
 }
 
 export async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {

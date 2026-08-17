@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isAdminOnlyLocalApiPath } from "@/lib/admin-api-policy";
 import {
   isApiRequestAllowed,
   isApiRequestHostAllowed,
@@ -12,23 +13,6 @@ const AUTH_EXEMPT_API_PATHS: Record<string, true> = {
   "/api/auth/web-login": true,
   "/api/auth/web-me": true,
 };
-
-/** API prefixes only the admin role may touch (defense in depth; user-role visibility filtering happens per-route). */
-const ADMIN_ONLY_API_PREFIXES = [
-  "/api/auth/all-providers",
-  "/api/auth/api-key",
-  "/api/auth/login",
-  "/api/auth/logout",
-  "/api/plugins",
-  "/api/mcp",
-  "/api/project-trust",
-  "/api/settings",
-  "/api/updates",
-  "/api/models-config",
-  "/api/git",
-  "/api/machines",
-  "/api/web-users",
-];
 
 export async function proxy(request: NextRequest) {
   const isApiRequest = request.nextUrl.pathname === "/api"
@@ -79,9 +63,7 @@ export async function proxy(request: NextRequest) {
   if (
     authEnabled()
     && user?.role !== "admin"
-    && ADMIN_ONLY_API_PREFIXES.some(
-      (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
-    )
+    && isAdminOnlyLocalApiPath(request.method, pathname)
   ) {
     return NextResponse.json(
       { error: "Admin access required" },
@@ -92,4 +74,4 @@ export async function proxy(request: NextRequest) {
   return NextResponse.next();
 }
 
-export const config = { matcher: ["/", "/api/:path*"] };
+export const config = { matcher: ["/", "/api/:path*", "/m/:path*", "/p/:path*"] };

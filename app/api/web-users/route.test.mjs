@@ -15,6 +15,7 @@ const SAVED_ENV = {
   OMP_WEB_PASSWORD: process.env.OMP_WEB_PASSWORD,
   OMP_WEB_USERS_FILE: process.env.OMP_WEB_USERS_FILE,
   OMP_WEB_SESSIONS_FILE: process.env.OMP_WEB_SESSIONS_FILE,
+  OMP_WEB_MACHINES_FILE: process.env.OMP_WEB_MACHINES_FILE,
 };
 
 function restoreEnv() {
@@ -24,6 +25,7 @@ function restoreEnv() {
   }
   globalThis.__ompWebUsersCache = undefined;
   globalThis.__ompWebSessions = undefined;
+  globalThis.__ompWebMachinesCache = undefined;
 }
 
 /** Point both stores at a fresh temp dir; auth derives from the file users. */
@@ -31,9 +33,11 @@ function freshStores() {
   const dir = mkdtempSync(join(tmpdir(), "omp-web-users-api-"));
   process.env.OMP_WEB_USERS_FILE = join(dir, "users.yml");
   process.env.OMP_WEB_SESSIONS_FILE = join(dir, "sessions.json");
+  process.env.OMP_WEB_MACHINES_FILE = join(dir, "machines.json");
   delete process.env.OMP_WEB_PASSWORD;
   globalThis.__ompWebUsersCache = undefined;
   globalThis.__ompWebSessions = undefined;
+  globalThis.__ompWebMachinesCache = undefined;
   return dir;
 }
 
@@ -41,7 +45,8 @@ async function loadLibs() {
   const users = await jiti.import("../../../lib/web-users.ts");
   const sessions = await jiti.import("../../../lib/web-sessions.ts");
   const authContext = await jiti.import("../../../lib/web-auth-context.ts");
-  return { users, sessions, authContext };
+  const machineStore = await jiti.import("../../../lib/machines/machine-store.ts");
+  return { users, sessions, authContext, machineStore };
 }
 
 async function seedUsers() {
@@ -53,6 +58,7 @@ async function seedUsers() {
         role: "admin",
         passwordHash: users.hashWebPassword("root-pass-1"),
         projects: "*",
+        machines: "*",
         tokens: [],
       },
       {
@@ -60,6 +66,7 @@ async function seedUsers() {
         role: "user",
         passwordHash: users.hashWebPassword("viewer-pass-1"),
         projects: ["/tmp"],
+        machines: [],
         tokens: [],
       },
     ],
@@ -115,12 +122,12 @@ test("admin CRUD happy path drives the user store end to end", async (t) => {
     apiRequest("", {
       method: "POST",
       cookie: admin,
-      body: { username: "alice", password: "alice-pass-1", role: "user", projects: ["/home/alice"] },
+      body: { username: "alice", password: "alice-pass-1", role: "user", projects: ["/home/alice"], machines: ["gpu-1"] },
     }),
   );
   assert.equal(created.status, 201);
   assert.deepEqual(await created.json(), {
-    user: { username: "alice", role: "user", projects: ["/home/alice"], tokens: [] },
+    user: { username: "alice", role: "user", projects: ["/home/alice"], machines: ["gpu-1"], tokens: [] },
   });
 
   // List shows all three users.
@@ -260,6 +267,7 @@ test("last admin cannot be demoted or deleted (409)", async (t) => {
         role: "admin",
         passwordHash: users.hashWebPassword("solo-pass-1"),
         projects: "*",
+        machines: "*",
         tokens: [],
       },
     ],
@@ -300,6 +308,7 @@ test("last admin cannot be demoted or deleted (409)", async (t) => {
         role: "admin",
         passwordHash: users.hashWebPassword("solo-pass-1"),
         projects: "*",
+        machines: "*",
         tokens: [],
       },
     ],
@@ -344,6 +353,7 @@ test("deleting a user revokes all of their sessions", async (t) => {
         role: "admin",
         passwordHash: users.hashWebPassword("boss-pass-1"),
         projects: "*",
+        machines: "*",
         tokens: [],
       },
       {
@@ -351,6 +361,7 @@ test("deleting a user revokes all of their sessions", async (t) => {
         role: "user",
         passwordHash: users.hashWebPassword("temp-pass-1"),
         projects: "*",
+        machines: [],
         tokens: [],
       },
     ],
@@ -402,7 +413,7 @@ test("token lifecycle: raw shown exactly once, usable as bearer, deletable", asy
   const bearerUser = await authContext.getWebUserFromRequest(
     apiRequest("", { authorization: `Bearer ${createdBody.raw}` }),
   );
-  assert.deepEqual(bearerUser, { username: "root", role: "admin", visibleProjects: "*" });
+  assert.deepEqual(bearerUser, { username: "root", role: "admin", visibleProjects: "*", machines: "*" });
 
   // Listing shows the token metadata but never the raw value.
   const listed = await list.GET(apiRequest("", { cookie: admin }));
@@ -534,4 +545,117 @@ test("POST rejects creating a non-admin 'omp' while the env bridge is the only a
   );
   assert.equal(res.status, 409, "would suppress the only admin");
   assert.deepEqual(await res.json(), { error: "Cannot remove the last admin" });
+});
+
+test("machines round-trips through POST and PATCH", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seedUsers();
+  const { machineStore } = await loadLibs();
+  machineStore.createMachine({ id: "gpu-1", name: "GPU 1", baseUrl: "http://gpu1", authMode: "none" });
+  const { list, detail } = await loadRoutes();
+  const admin = await loginAs("root");
+
+  // Absent on create -> [].
+  const created = await list.POST(
+    apiRequest("", {
+      method: "POST",
+      cookie: admin,
+      body: { username: "bob", password: "bob-pass-1", role: "user", projects: "*" },
+    }),
+  );
+  assert.equal(created.status, 201);
+  assert.deepEqual((await created.json()).user.machines, []);
+
+  // PATCH sets an explicit grant list.
+  const patched = await detail.PATCH(
+    apiRequest("/bob", { method: "PATCH", cookie: admin, body: { machines: ["gpu-1", "gpu-1"] } }),
+    params({ username: "bob" }),
+  );
+  assert.equal(patched.status, 200);
+  assert.deepEqual((await patched.json()).user.machines, ["gpu-1"]);
+
+  // PATCH can widen to "*".
+  const widened = await detail.PATCH(
+    apiRequest("/bob", { method: "PATCH", cookie: admin, body: { machines: "*" } }),
+    params({ username: "bob" }),
+  );
+  assert.equal(widened.status, 200);
+  assert.equal((await widened.json()).user.machines, "*");
+});
+
+test("invalid machines value on POST/PATCH -> 400", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seedUsers();
+  const { list, detail } = await loadRoutes();
+  const admin = await loginAs("root");
+
+  const post = (machines) =>
+    list
+      .POST(apiRequest("", {
+        method: "POST",
+        cookie: admin,
+        body: { username: "ok-user", password: "x-pass-123", role: "user", projects: "*", machines },
+      }))
+      .then((r) => r.status);
+
+  assert.equal(await post(42), 400, "not an array or \"*\"");
+  assert.equal(await post(["Not-Lowercase"]), 400, "id shape violates isValidMachineId");
+  assert.equal(await post([""]), 400, "empty string id");
+  assert.equal(await post(["local"]), 201, "\"local\" itself is a syntactically valid machine id");
+
+  const patched = await detail.PATCH(
+    apiRequest("/viewer", { method: "PATCH", cookie: admin, body: { machines: "everything" } }),
+    params({ username: "viewer" }),
+  );
+  assert.equal(patched.status, 400);
+});
+
+test("GET listing prunes stale machine ids from a grant while keeping \"*\" untouched", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { users, machineStore } = await loadLibs();
+  const { list } = await loadRoutes();
+
+  machineStore.createMachine({ id: "gpu-1", name: "GPU 1", baseUrl: "http://gpu1", authMode: "none" });
+  users.writeWebUsersConfig({
+    users: [
+      {
+        username: "root",
+        role: "admin",
+        passwordHash: users.hashWebPassword("root-pass-1"),
+        projects: "*",
+        machines: "*",
+        tokens: [],
+      },
+      {
+        username: "grantee",
+        role: "user",
+        passwordHash: users.hashWebPassword("grantee-pass-1"),
+        projects: "*",
+        machines: ["gpu-1", "deleted-machine"],
+        tokens: [],
+      },
+      {
+        username: "wildcard",
+        role: "user",
+        passwordHash: users.hashWebPassword("wildcard-pass-1"),
+        projects: "*",
+        machines: "*",
+        tokens: [],
+      },
+    ],
+    sessions: { secret: "", ttlDays: 30 },
+  });
+  const admin = await loginAs("root");
+
+  const listed = await list.GET(apiRequest("", { cookie: admin }));
+  const { users: listedUsers } = await listed.json();
+  const byName = Object.fromEntries(listedUsers.map((user) => [user.username, user]));
+  assert.deepEqual(byName.grantee.machines, ["gpu-1"], "the deleted machine id is pruned on read");
+  assert.equal(byName.wildcard.machines, "*", "\"*\" is never pruned");
 });

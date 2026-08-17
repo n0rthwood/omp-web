@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
@@ -20,7 +19,6 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
-import { useWebUser } from "@/hooks/useWebUser";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import {
@@ -37,9 +35,11 @@ import {
   shouldShowBrowserNotification,
   showBrowserNotification,
 } from "@/lib/browser-notifications";
-import { getInitialNavigation } from "@/lib/initial-navigation";
-import { apiPath, appUrl } from "@/lib/api-path";
+import { apiPath } from "@/lib/api-path";
 import { MachineProvider, useMachines } from "@/lib/machine-context";
+import { SessionListProvider, useSessionList } from "@/lib/session-list-context";
+import { NavigationProvider, useNavigation } from "./NavigationProvider";
+import { buildUrl, type NavigationTarget } from "@/lib/nav-url";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
   getDefaultRightPanelWidth,
@@ -78,10 +78,16 @@ interface TerminalInfoClient {
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
 
-function AppShellBody() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+interface AppShellBodyProps {
+  initialTarget: NavigationTarget;
+  initialSession: SessionInfo | null;
+  resolutionRevision: number;
+}
+
+function AppShellBody({ initialTarget, initialSession, resolutionRevision }: AppShellBodyProps) {
+  const nav = useNavigation();
+  const machines = useMachines();
+  const sessionList = useSessionList();
   const { preference, toggleTheme } = useTheme();
   const themeLabelKey =
     preference === "light" ? "theme.light" : preference === "dark" ? "theme.dark" : "theme.auto";
@@ -92,25 +98,17 @@ function AppShellBody() {
   // also fire for tasks finishing in a non-active workspace whose ChatWindow
   // is not mounted. ChatWindow receives the audio callbacks as props.
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, soundEnabledRef } = useAudio();
-  const { user: webUser, authRequired: webAuthRequired, loading: webUserLoading } = useWebUser();
-  // Auth-required installs with no resolved identity (expired or missing
-  // session cookie) get bounced to the login page, preserving location in `next`.
-  useEffect(() => {
-    if (webUserLoading || !webAuthRequired || webUser) return;
-    window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search));
-  }, [webAuthRequired, webUser, webUserLoading]);
   const notifiedAttentionRequestIdsRef = useRef(new Set<string>());
   const handleBackgroundTaskDone = useCallback(() => {
     if (soundEnabledRef.current) playDoneSound();
   }, [playDoneSound, soundEnabledRef]);
-  const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  // When user clicks +, we only store the cwd — no fake session id
-  const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
-  const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
-    () => initialNavigation.requestedCwd ? "validating" : "idle",
+  const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(() => initialSession);
+  // When user clicks +, we only store the cwd — no fake session id. Seeded
+  // from the resolved navigation target for the "project with no default
+  // session" case (e.g. a zero-session project deeplink).
+  const [newSessionCwd, setNewSessionCwd] = useState<string | null>(
+    () => (!initialSession && initialTarget.project) ? initialTarget.project : null,
   );
-  const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
@@ -347,7 +345,6 @@ function AppShellBody() {
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
   }, [isMobile]);
 
-  const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   // Reattach BEFORE the save effect below: on mount/cwd-change fileTabs is
   // empty, so an unguarded save would wipe the persisted ids before the
@@ -424,17 +421,17 @@ function AppShellBody() {
     syncWithOmp: true,
   });
   const activeProjectRootRef = useRef<string | null>(null);
-  // True once the initial ?session= URL param has been resolved (or confirmed absent)
-  const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
-  // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
-  const suppressCwdBumpRef = useRef(false);
-  // Guards the async workspace restore so a slow response from an earlier
-  // switch cannot resurrect a session into a project the user already left.
-  const workspaceRestoreTokenRef = useRef(0);
-
-  const invalidateWorkspaceRestore = useCallback(() => {
-    workspaceRestoreTokenRef.current += 1;
-  }, []);
+  // Guards the async workspace-memory self-heal below so a slow response
+  // from an earlier cwd change cannot act on behalf of (or clobber memory
+  // for) a project the user has already switched away from.
+  const cwdSelfHealTokenRef = useRef(0);
+  // Suppresses the redundant sessionKey bump that handleCwdChange would
+  // otherwise apply when SessionSidebar echoes back the cwd this component
+  // mounted with — relevant only for the "resolved project, no default
+  // session" case (a zero-session project deeplink): `selectedSession` is
+  // already set for every other case, and handleCwdChange's own
+  // already-in-this-project check covers those without help.
+  const suppressCwdBumpRef = useRef(Boolean(initialTarget.project) && !initialSession);
 
   // Persist every active-session transition, including new and forked sessions
   // that bypass the sidebar selection handler. Transient sessions do not yet
@@ -447,83 +444,44 @@ function AppShellBody() {
     setLastOpenSession(projectKey, selectedSession.id);
   }, [selectedSession]);
 
+  // Thread the selected session into SessionListProvider (minor #6) so its
+  // own completion never double-reloads/flashes the list via the polling
+  // transition — bumpRefreshKey() calls above (handleAgentEnd et al.)
+  // already cover it.
   useEffect(() => {
-    const requestedCwd = initialNavigation.requestedCwd;
-    if (!requestedCwd) return;
+    sessionList.setActiveSessionId(selectedSession?.id ?? null);
+  }, [sessionList, selectedSession]);
 
-    const controller = new AbortController();
-    setInitialCwdStatus("validating");
-    setInitialCwdError(null);
-
-    void fetch(apiPath("/api/cwd/validate"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: requestedCwd }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string };
-        if (!response.ok || !data.cwd) {
-          throw new Error(data.error ?? `HTTP ${response.status}`);
-        }
-
-        // The sidebar will notify us when it adopts this cwd. Avoid remounting
-        // the just-created empty chat during that initial synchronization.
-        suppressCwdBumpRef.current = true;
-        setNewSessionCwd(data.cwd);
-        setInitialCwdStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setInitialCwdError(error instanceof Error ? error.message : String(error));
-        setInitialCwdStatus("error");
-      });
-
-    return () => controller.abort();
-  }, [initialNavigation]);
-
-  // Restore the workspace's last open session after switching to it. Called
-  // from handleCwdChange once the outgoing context has been reset. The session
-  // is looked up against the live list so a deleted or drifted session falls
-  // back to the default welcome page instead of erroring.
-  const restoreWorkspaceContext = useCallback((projectKey: string) => {
-    const token = ++workspaceRestoreTokenRef.current;
-    const lastOpenSessionId = getLastOpenSession(projectKey);
-    if (!lastOpenSessionId) return;
-    void fetch(apiPath("/api/sessions"))
-      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
-      .then((d) => {
-        if (token !== workspaceRestoreTokenRef.current) return; // stale switch
-        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-        if (!s) {
-          // The list loaded but the remembered session is gone — forget it.
-          // When the list itself failed (d === null) keep the memory so a
-          // later switch retries the restore.
-          if (d) clearLastOpen(projectKey);
-          return;
-        }
-        if ((s.projectRoot ?? s.cwd) !== projectKey) {
-          // Defensive: the remembered session drifted out of this workspace.
-          clearLastOpen(projectKey);
-          return;
-        }
-        // Selecting the session must remount the chat with the session
-        // present: useAgentSession loads content in a mount-only effect, so
-        // the null-session welcome mount from the switch would never load
-        // the restored session's messages.
-        setSelectedSession(s);
-        setSessionKey((k) => k + 1);
-        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(appUrl({ session: s.id }), { scroll: false });
-        }
-      })
-      .catch(() => {
-        // Network hiccup: keep the remembered session for a later retry.
-      });
-  }, [router]);
+  // Same-machine popstate (or any other resolver-delivered resolution while
+  // this component stays mounted) updates NavigationProvider's target and
+  // session without remounting this component — the remount key above is
+  // machineId only, and a same-machine interactive navigate() settles
+  // synchronously without ever visiting the resolver. resolutionRevision is
+  // the seam: it bumps only on a resolver-delivered result, so an
+  // interactive selection (already applied by its own handler) never
+  // re-fires this — only a genuinely new resolved location does
+  // (final-review fix, issue #10). Reads the latest initialTarget/
+  // initialSession/selectedSession at fire time rather than depending on
+  // them directly, so the boot re-fire (selectedSession already seeded from
+  // initialSession) is a guaranteed no-op.
+  useEffect(() => {
+    if (initialSession) {
+      if (selectedSession?.id === initialSession.id) return;
+      activeProjectRootRef.current = initialSession.projectRoot ?? initialSession.cwd;
+      setSelectedSession(initialSession);
+      setSessionKey((k) => k + 1);
+      setNewSessionCwd(null);
+      return;
+    }
+    if (selectedSession) {
+      setSelectedSession(null);
+      setSessionKey((k) => k + 1);
+      setNewSessionCwd(initialTarget.project ?? null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on resolutionRevision alone: reads the latest initialTarget/initialSession/selectedSession props at fire time rather than re-firing on every prop change.
+  }, [resolutionRevision]);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
-    invalidateWorkspaceRestore();
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount).
     if (!cwd) return;
@@ -532,8 +490,8 @@ function AppShellBody() {
       ?? (selectedSession ? (selectedSession.projectRoot ?? selectedSession.cwd) : null);
     activeProjectRootRef.current = newProject;
 
-    // Keep the project identity in sync during the initial URL restore without
-    // remounting the just-created or restored chat.
+    // Keep the project identity in sync during the initial mount's cwd echo
+    // without remounting the just-resolved chat.
     if (suppressCwdBumpRef.current) {
       suppressCwdBumpRef.current = false;
       return;
@@ -564,23 +522,53 @@ function AppShellBody() {
     setFileTabs([]);
     setActiveFileTabId(null);
     setRightPanelOpen(false);
-    // Restore the workspace we switched to: its last open session, or keep
-    // the default welcome page when none is remembered.
-    restoreWorkspaceContext(newProject);
-    router.replace(appUrl({}), { scroll: false });
-  }, [router, selectedSession, invalidateWorkspaceRestore, restoreWorkspaceContext]);
+    // Restore the workspace we switched to: its last open session, matched
+    // synchronously against the currently loaded list — that list is
+    // already known-fresh enough to select the right session immediately
+    // (the async, race-guarded version of this same lookup lives in
+    // lib/nav-state.ts's session stage, for deeplink/resume resolution
+    // ahead of this component ever mounting).
+    const lastOpenId = getLastOpenSession(newProject);
+    const restored = lastOpenId
+      ? sessionList.sessions.find((s) => s.id === lastOpenId && (s.projectRoot ?? s.cwd) === newProject)
+      : undefined;
+    if (lastOpenId && !restored) {
+      // Self-heal: the remembered session might not actually be gone —
+      // `sessionList.sessions` can be stale (e.g. created moments ago on
+      // another tab). Confirm against a fresh, uncached fetch before
+      // forgetting it; a network failure keeps the memory for a later
+      // retry rather than risk erasing a session that is still there.
+      // Token-guarded: a second cwd change before this resolves must not
+      // let a stale response act on the wrong project.
+      const myToken = ++cwdSelfHealTokenRef.current;
+      void fetch(apiPath("/api/sessions"), { cache: "no-store" })
+        .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+        .then((d) => {
+          if (!d || cwdSelfHealTokenRef.current !== myToken) return;
+          const stillThere = d.sessions.some((s) => s.id === lastOpenId && (s.projectRoot ?? s.cwd) === newProject);
+          if (!stillThere) clearLastOpen(newProject);
+        })
+        .catch(() => {
+          // Network hiccup — keep the remembered session for a later retry.
+        });
+    }
+    if (restored) {
+      setSelectedSession(restored);
+      setSessionKey((k) => k + 1);
+    }
+    nav.navigate({ machineId: machines.machineId, project: newProject, session: restored?.id ?? null }, { history: "push" });
+  }, [nav, machines.machineId, sessionList.sessions, selectedSession]);
 
-  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+  const handleSelectSession = useCallback((session: SessionInfo) => {
     // Mark the target project before the cwd synchronization effect runs.
     // Otherwise selecting a session in another project looks like a manual
     // project switch and the just-selected session is cleared.
     activeProjectRootRef.current = session.projectRoot ?? session.cwd;
-    invalidateWorkspaceRestore();
     // Re-clicking the already-open session must not remount the chat and
     // re-run the full load/positioning cycle. Only skip when the effective
     // cwd context already matches — otherwise a pending cwd move still needs
     // the full re-select flow.
-    if (!isRestore && selectedSession) {
+    if (selectedSession) {
       const sameProject =
         (selectedSession.projectRoot ?? selectedSession.cwd) ===
         (session.projectRoot ?? session.cwd);
@@ -593,23 +581,12 @@ function AppShellBody() {
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
-    setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
-    if (isMobile && !isRestore) setSidebarOpen(false);
-    if (isRestore) {
-      // Suppress the redundant sessionKey bump that would come from the
-      // onCwdChange effect firing after setSelectedCwd in the sidebar
-      suppressCwdBumpRef.current = true;
-    }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
-    if (!isRestore) {
-      router.replace(appUrl({ session: session.id }), { scroll: false });
-    }
-  }, [invalidateWorkspaceRestore, router, isMobile, selectedSession]);
+    if (isMobile) setSidebarOpen(false);
+    nav.navigate({ machineId: machines.machineId, project: session.projectRoot ?? session.cwd, session: session.id }, { history: "push" });
+  }, [nav, machines.machineId, isMobile, selectedSession]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
-    invalidateWorkspaceRestore();
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -618,8 +595,8 @@ function AppShellBody() {
     setSystemPrompt(null);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(appUrl({}), { scroll: false });
-  }, [invalidateWorkspaceRestore, router, isMobile]);
+    nav.navigate({ machineId: machines.machineId, project: cwd, session: null }, { history: "push" });
+  }, [nav, machines.machineId, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -648,13 +625,12 @@ function AppShellBody() {
 
   // Called by ChatWindow when a new session gets its real id from omp
   const handleSessionCreated = useCallback((session: SessionInfo) => {
-    invalidateWorkspaceRestore();
     setNewSessionCwd(null);
     setSelectedSession(session);
-    setRefreshKey((k) => k + 1);
+    sessionList.bumpRefreshKey();
     hydrateSelectedSession(session.id);
-    router.replace(appUrl({ session: session.id }), { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    nav.navigate({ machineId: machines.machineId, project: session.projectRoot ?? session.cwd, session: session.id }, { history: "push" });
+  }, [nav, machines.machineId, sessionList, hydrateSelectedSession]);
 
   const deliverSessionNotification = useCallback(({
     targetSession,
@@ -670,7 +646,9 @@ function AppShellBody() {
     if (!("Notification" in window)) return;
 
     const fire = () => {
-      const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
+      const sessionUrl = targetSession
+        ? buildUrl({ machineId: machines.machineId, project: targetSession.projectRoot ?? targetSession.cwd, session: targetSession.id })
+        : "/";
       void showBrowserNotification({
         title,
         body,
@@ -688,10 +666,10 @@ function AppShellBody() {
     } else if (Notification.permission === "default") {
       void Notification.requestPermission().then((p) => { if (p === "granted") fire(); });
     }
-  }, [handleSelectSession]);
+  }, [handleSelectSession, machines.machineId]);
 
   const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
+    sessionList.bumpRefreshKey();
     setExplorerRefreshKey((k) => k + 1);
     if (selectedSession) hydrateSelectedSession(selectedSession.id);
 
@@ -735,7 +713,7 @@ function AppShellBody() {
       }
 
       const title = body.title.trim();
-      setRefreshKey((key) => key + 1);
+      sessionList.bumpRefreshKey();
       if (activeSessionIdRef.current !== sessionId) return;
       setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
       setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
@@ -759,8 +737,7 @@ function AppShellBody() {
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
-    invalidateWorkspaceRestore();
-    setRefreshKey((k) => k + 1);
+    sessionList.bumpRefreshKey();
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
     setSelectedSession((prev) => ({
@@ -769,16 +746,11 @@ function AppShellBody() {
       transient: false,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(appUrl({ session: newSessionId }), { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
-
-  const handleInitialRestoreDone = useCallback(() => {
-    setInitialSessionRestored(true);
-  }, []);
+    nav.navigate({ machineId: machines.machineId, project: activeProjectRootRef.current, session: newSessionId }, { history: "push" });
+  }, [nav, machines.machineId, sessionList, hydrateSelectedSession]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
-    invalidateWorkspaceRestore();
-    setRefreshKey((k) => k + 1);
+    sessionList.bumpRefreshKey();
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
@@ -788,9 +760,9 @@ function AppShellBody() {
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
-      router.replace(appUrl({}), { scroll: false });
+      nav.navigate({ machineId: machines.machineId, project: selectedSession.projectRoot ?? selectedSession.cwd, session: null }, { history: "replace" });
     }
-  }, [invalidateWorkspaceRestore, selectedSession, router]);
+  }, [nav, machines.machineId, sessionList, selectedSession]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -908,8 +880,7 @@ function AppShellBody() {
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const showSubagentPanel = !isMobile && selectedSession !== null && subagents.length > 0;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
-  // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const showPlaceholder = !showChat;
 
   useEffect(() => {
     setProjectTrust(null);
@@ -997,10 +968,7 @@ function AppShellBody() {
         optimisticSession={selectedSession}
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
-        initialSessionId={initialSessionId}
-        skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
-        onInitialRestoreDone={handleInitialRestoreDone}
-        refreshKey={refreshKey}
+        refreshKey={sessionList.refreshKey}
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
@@ -1866,27 +1834,6 @@ function AppShellBody() {
               playDoneSound={playDoneSound}
               unlockAudio={unlockAudio}
             />
-          ) : initialCwdStatus === "validating" ? (
-            <div
-              role="status"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-               <div style={{ fontSize: 14, color: "var(--text)" }}>{translate("workspace.opening")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-            </div>
-          ) : initialCwdStatus === "error" ? (
-            <div
-              role="alert"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-               <div style={{ fontSize: 14, color: "#dc2626" }}>{translate("workspace.unable")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-              <div style={{ maxWidth: 720, fontSize: 12 }}>{initialCwdError}</div>
-            </div>
           ) : showPlaceholder ? (
             activeCwd ? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>
@@ -2115,20 +2062,39 @@ function AppShellBody() {
 }
 
 /**
- * Fleet wrapper. MachineProvider stays OUTSIDE the key so it survives a
- * machine switch (machine list, loading state); AppShellBody carries
- * `key={machineId}` so the whole app subtree — sessions, files, terminals —
- * remounts on switch and no state leaks across machines.
+ * Fleet + navigation wrapper (issue #10, stage 3). MachineProvider and
+ * SessionListProvider stay OUTSIDE the remount key — they own the raw
+ * machine/session-list data and must survive a machine switch.
+ * NavigationProvider sits above the key too: it resolves the location
+ * (deeplink/resume/popstate) *before* anything below it mounts, gating the
+ * whole subtree on a staged loading surface / AccessNotice instead of
+ * mounting immediately with a possibly-invalid target. AppShellBody itself
+ * carries `key={machineId}` so the app subtree — sessions, files, terminals —
+ * remounts on switch and no state leaks across machines; it receives the
+ * pipeline's already-resolved target as props instead of parsing the URL
+ * itself.
  */
 export function AppShell() {
   return (
     <MachineProvider>
-      <AppShellMachineKey />
+      <SessionListProvider>
+        <NavigationProvider>
+          <AppShellMachineKey />
+        </NavigationProvider>
+      </SessionListProvider>
     </MachineProvider>
   );
 }
 
 function AppShellMachineKey() {
   const { machineId } = useMachines();
-  return <AppShellBody key={machineId} />;
+  const { target, session, resolutionRevision } = useNavigation();
+  return (
+    <AppShellBody
+      key={machineId}
+      initialTarget={target}
+      initialSession={session}
+      resolutionRevision={resolutionRevision}
+    />
+  );
 }

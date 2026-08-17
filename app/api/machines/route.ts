@@ -1,15 +1,18 @@
 import { NextResponse } from "next/server";
-import { hasJsonContentType } from "@/lib/request-security";
-import type { SafeMachine } from "@/lib/api-types";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
 import {
   MachineValidationError,
   createMachine,
   listSafeMachines,
   toSafeMachine,
+  toUserVisibleMachine,
   type MachineAuthMode,
   type MachineInput,
 } from "@/lib/machines/machine-store";
+import { grantedMachineIds } from "@/lib/machines/machine-grants";
 import { FLEET_CONFIGURATION_DENIED_MESSAGE, isFleetConfigurationAllowed } from "@/lib/machines/fleet-gate";
+import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import { jsonError, readJsonBody, requireAdminApi } from "../web-users/_guard";
 
 export const dynamic = "force-dynamic";
@@ -22,11 +25,23 @@ const AUTH_MODES: Record<string, MachineAuthMode> = {
   none: "none",
 };
 
-// GET /api/machines — list machines (safe fields only; local first)
+// GET /api/machines — list machines (local first). Admin sees the full safe
+// projection; a user role sees only granted machines (+local), slimmed of
+// baseUrl/headerNames (`lib/api-types.ts#UserVisibleMachine`).
 export async function GET(req: Request) {
-  const denied = await requireAdminApi(req);
-  if (denied) return denied;
-  const machines: SafeMachine[] = listSafeMachines();
+  if (!isApiRequestAllowed(req)) return jsonError(403, "Untrusted API request");
+  const user = await getWebUserOrSynthetic(req);
+  if (!user) return jsonError(401, "Authentication required");
+
+  if (user.role === "admin") {
+    const machines: SafeMachine[] = listSafeMachines();
+    return NextResponse.json({ machines }, { headers: NO_STORE });
+  }
+
+  const granted = new Set(grantedMachineIds(user));
+  const machines: UserVisibleMachine[] = listSafeMachines()
+    .filter((machine) => granted.has(machine.id))
+    .map(toUserVisibleMachine);
   return NextResponse.json({ machines }, { headers: NO_STORE });
 }
 

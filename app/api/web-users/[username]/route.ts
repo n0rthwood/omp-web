@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType } from "@/lib/request-security";
+import { pruneMachineGrants } from "@/lib/machines/machine-grants";
 import { revokeSessionsForUser } from "@/lib/web-sessions";
 import {
   countEffectiveAdmins,
@@ -10,7 +11,7 @@ import {
   type StoredWebUser,
   type WebUserUpdate,
 } from "@/lib/web-users";
-import { jsonError, parseProjects, parseRole, readJsonBody, requireAdminApi } from "../_guard";
+import { jsonError, parseMachines, parseProjects, parseRole, readJsonBody, requireAdminApi } from "../_guard";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,7 @@ function toSafeUser(user: StoredWebUser) {
     username: user.username,
     role: user.role,
     projects: user.projects,
+    machines: pruneMachineGrants(user.machines),
     tokens: user.tokens.map(({ name, created }) => ({ name, created })),
   };
 }
@@ -58,6 +60,13 @@ export async function PATCH(req: Request, { params }: Params) {
       return jsonError(400, "projects must be \"*\" or an array of absolute paths");
     }
     update.projects = projects.projects;
+  }
+  if (body.machines !== undefined) {
+    const machines = parseMachines(body.machines);
+    if (!machines.ok) {
+      return jsonError(400, "machines must be \"*\" or an array of machine ids");
+    }
+    update.machines = machines.machines;
   }
   if (body.password !== undefined) {
     if (typeof body.password !== "string" || body.password.length === 0) {

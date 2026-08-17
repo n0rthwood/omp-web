@@ -21,10 +21,12 @@ The URL shape is a pure prefix insert:
 Everything client-side goes through `apiPath()` (`lib/api-path.ts`), which
 decides — from a module-level current machine id — whether a URL stays local or
 gains the `/api/machines/<id>` prefix. Switching machines (the MachineSwitcher)
-changes `?machine=`, and the app subtree is keyed by machine id so it **remounts
-cleanly**: no session, file, or terminal state can leak from one machine into
-another. localStorage keys that hold absolute paths or session ids are
-namespaced per machine by `machineStorageKey()` (`k` → `m:<id>:k`).
+goes through the navigation pipeline (see
+[Deeplinks, resume, and navigation](#deeplinks-resume-and-navigation) below),
+which updates the URL to `/m/<id>[/p/<project>]` and remounts the app subtree
+keyed by machine id: no session, file, or terminal state can leak from one
+machine into another. localStorage keys that hold absolute paths or session
+ids are namespaced per machine by `machineStorageKey()` (`k` → `m:<id>:k`).
 
 The registry lives in `~/.omp/agent/omp-web-machines.json` (override with
 `OMP_WEB_MACHINES_FILE`), written `0600` through the atomic-replace helper. The
@@ -94,10 +96,16 @@ that remote authenticates:
   machine token and never constructs a credential header — the gateway attaches
   the machine's own credential server-side and drops any `authorization` the
   caller sent.
-- **The fleet is admin-only and single-user by design.** `/api/machines` sits in
-  `ADMIN_ONLY_API_PREFIXES` in `proxy.ts`. Per-user visibility (#7) cannot be
-  projected onto another machine's absolute paths, so multi-user fleet access is
-  out of scope, deliberately.
+- **Fleet configuration is admin-only; reaching a machine is per-user, grant-based.**
+  Adding, editing, deleting and probing machines (`POST`/`PATCH`/`DELETE
+  /api/machines[/…]`) always require the admin role — `lib/admin-api-policy.ts`
+  and `requireAdminApi` enforce that in two layers, same as everywhere else in
+  this app. *Reaching* an already-configured machine — listing it and proxying
+  to it — is grantable per user; see
+  [Per-user machine grants](#per-user-machine-grants) below. Per-user visibility
+  (#7) still cannot be projected onto another machine's absolute paths: a
+  granted user gets the machine's *entire* credential-backed surface, not a
+  filtered one.
 - **An unauthenticated gateway cannot be given machines.** `machines.json` holds
   credentials to *other* hosts, so an open gateway on a reachable interface
   would hand out lateral access to the whole registry. Adding, editing and
@@ -161,6 +169,169 @@ not routed through `apiPath()` (which would blindly gain the machine prefix,
 and the proxy would reject them anyway). `web-me`, `web-login`, `web-logout`,
 `web-users`, `machines`, and `updates` always address the gateway you are
 logged into.
+
+## Per-user machine grants
+
+A file-backed web user (`~/.omp/agent/omp-web-users.yml`) carries a
+`machines` field alongside `projects`: `"*"` or an array of machine ids. The
+admin role always has effective access to every machine — `"*"` is implied
+by the role, regardless of what is stored — a non-admin only reaches the
+ids explicitly listed. `local` is implicitly granted to everyone and never
+needs to appear in the list. A user created before this field existed reads
+back as `machines: []` (no remote access — exactly today's pre-#10
+behavior; nothing regresses on upgrade).
+
+**Grants are pruned against the live registry on every read**, never
+trusted as stored. Deleting a machine from the fleet silently drops it out
+of every grant that named it — `lib/machines/machine-grants.ts`
+(`pruneMachineGrants`) does the intersection; `"*"` is never pruned.
+`GET /api/web-users` and `GET /api/web-users/<username>` (admin-only, same
+as ever) report the pruned value, so a stale id never lingers in what an
+admin sees either.
+
+`GET /api/machines` itself now serves any authenticated user, not just
+admins — the response shape differs by role:
+
+- **Admin** gets the full `SafeMachine` projection for every machine
+  (unchanged): `id`, `name`, `baseUrl`, `authMode`, `hasCredential`,
+  `headerNames`, timestamps, `isLocal`.
+- **User role** gets only `local` plus their granted machines, each
+  slimmed to `UserVisibleMachine` — `baseUrl` and `headerNames` are
+  dropped. A user role never learns a remote's origin or its configured
+  static header names, even for a machine it is granted.
+
+Every mutation (`POST`/`PATCH`/`DELETE /api/machines[/…]`) stays
+admin-only; a grant only ever widens *reach*, never *configuration*
+privilege.
+
+### Two-layer enforcement on the fleet proxy
+
+Reaching a granted machine's API (`/api/machines/<id>/api/...`) is checked
+twice, the same discipline as everywhere else in this app:
+
+1. **`proxy.ts` (outer, local-pathname gate).** `isAdminOnlyLocalApiPath`
+   (`lib/admin-api-policy.ts`) special-cases `/api/machines`: the listing
+   (`GET /api/machines`) is open to any authenticated user; every mutation
+   on `/api/machines` or `/api/machines/<id>` (one extra segment) stays
+   admin-only; the fleet-proxy catch-all
+   (`/api/machines/<id>/api/...`, two or more extra segments) is **not**
+   blocked here — the middleware cannot see which machine the caller is
+   granted, so that decision is deferred entirely to the route guard below.
+2. **`requireMachineGrant` (inner, route-level, `app/api/web-users/_guard.ts`).**
+   Runs on every method the fleet-proxy catch-all accepts. In order: trust
+   gate → authentication (401) → admin bypass → `local` bypass (the route's
+   own 400 governs from there) → **unknown machine → 404** "Machine not
+   found" → **existing-but-ungranted machine → 403** "No permission for
+   this machine" → **granted but the inner remote path is admin-only
+   (`isAdminOnlyRemoteApiPath`, e.g. `PUT /api/models-config`,
+   `POST /api/auth/api-key/<provider>`) → 403** "Admin access required".
+
+The 404-vs-403 split for machine identity is **deliberate, not an
+oversight**: machine-id existence is not treated as a secret on this
+fleet. A granted user can tell a machine id is real without being
+granted to it; an admin auditing "why is my proxy request being denied"
+gets a straight answer instead of a deliberately ambiguous one.
+
+**What a grant actually hands out — read this before granting one.** A
+granted user's requests to that machine carry the machine's own stored
+credential, exactly like an admin's — there is no per-user credential on
+the remote and no way to scope one. Concretely:
+
+- **Full power on that machine, not a filtered view.** Whatever role the
+  machine's stored credential resolves to on the remote (usually admin,
+  per the "Minting the credential" note above) is what the request runs
+  as. A grant is an all-or-nothing key to that machine, not a role
+  mapping.
+- **Per-user project visibility does not apply on remotes.** The remote
+  enforces its own visibility rules against *its own* file users, and the
+  gateway's proxied request never carries the granting user's identity —
+  only the machine's credential. A grant is machine-wide, not
+  project-scoped.
+- **Revoking a grant does not close streams already open.** An SSE
+  subscription or a terminal session opened while granted keeps running
+  until it ends on its own; only *new* requests are checked against the
+  current grant.
+
+## Deeplinks, resume, and navigation
+
+The app's location — which machine, project, and conversation — is a single
+piece of state owned end-to-end by `lib/nav-state.ts` (the pure resolution
+core) and `components/NavigationProvider.tsx` (its React binding, mounted
+above the machine remount key). Three surfaces stay in sync: the URL, a
+localStorage resume slot, and the UI.
+
+### URL scheme
+
+| Path | Meaning |
+| --- | --- |
+| `/` | resume the last machine/project/conversation from localStorage, or defaults |
+| `/m/<machineId>` | that machine, default project + default conversation |
+| `/m/<machineId>/p/<project>` | + project, default conversation (workspace-memory last, else most-recently modified) |
+| `/m/<machineId>/p/<project>/s/<sessionId>` | that exact conversation |
+| `/p/<project>[/s/<sessionId>]` | local machine, with the `/m` segment omitted |
+
+`<project>` is the project-root absolute path, percent-encoded into one path
+segment (`encodeURIComponent`, so `/` becomes `%2F`) — the same identifier
+`?cwd=` and workspace-memory keys already used; there is no separate project
+registry. Legacy `?machine=`/`?session=`/`?cwd=` query links (including
+already-delivered notification URLs) still parse — `cwd` still wins over
+`session` — and are canonicalized to the path form with one history
+`replace` the first time they resolve.
+
+### Resume
+
+`omp-web:last-location` (`{v: 1, machine, project, session}`) is written to
+localStorage exactly once, at the moment a navigation *settles* successfully.
+A deeplink that fails validation never touches it — a broken shared link
+can't clobber where you actually were. Precedence is decided once per
+navigation: an explicit URL target always wins over resume, which always wins
+over the built-in defaults (local machine, no project).
+
+### History: push vs. replace
+
+Explicit user selections — clicking a machine, project, or conversation in
+the sidebar — call `navigate(target, { history: "push" })`: each one is a
+real step in the back/forward stack, including a machine switch, which
+pushes its bare `/m/<id>` immediately. System-driven corrections instead
+`replace`: legacy query canonicalization, a machine switch's resolved
+defaults filling in the bare URL it just pushed, and a session deletion
+falling back to the project's welcome page — so back/forward never lands on
+a URL the pipeline immediately has to rewrite (or on a session you just
+deleted), and a machine switch never costs a second stack entry. A resume
+settle (visiting `/`) never touches history at all — there is no URL to
+correct it from, and rewriting one on every plain visit would be history
+pollution. `popstate` is handled in exactly one place (`NavigationProvider`)
+and always re-runs full resolution.
+
+### Staged resolution and error taxonomy
+
+A deeplink or resume target is resolved in stages — `machines` → `projects`
+→ `session` — each waiting on its own data before selecting from it (no
+"unknown id silently falls back to local" degrade). A target parsed from the
+URL is validated *hard*: any failure shows a full-screen `AccessNotice`
+naming the stage, with a call to action, never a silent fallback. A target
+recovered from resume/defaults instead steps down *softly*, one level at a
+time (stale session → the project's default conversation, stale project →
+the machine's default project, stale/unreachable machine → local) — **except
+offline, which is always a hard error even on resume**, since silently
+dropping to local would hide that a whole machine went dark.
+
+| Stage | Outcome | Notice variant |
+| --- | --- | --- |
+| machine | unknown id | `not-found` |
+| machine | exists, not granted to you | `no-permission` (deliberately distinct from `not-found` — machine-id existence is not a secret on this fleet, see "Per-user machine grants" above) |
+| machine | unreachable (network/proxy failure) | `offline` — always hard, with retry + "go local" |
+| project | unknown, or not visible to you (with a `POST /api/cwd/validate` fallback so a fresh, zero-session project directory still opens) | `not-available` |
+| session | unknown or hidden | `not-available` (uniform — never distinguishes "deleted" from "not visible to you", issue #7) |
+
+A zero-session project deeplink is not an error: it opens the same blank
+"start a new conversation here" state a fresh directory always would.
+
+### What's out of scope
+
+File-tab and right-panel state, per-machine roles, and the in-session branch
+id (`leafId`) are never part of the URL — only machine, project, and
+conversation are addressable and resumable.
 
 ## Limits, stated plainly
 

@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
 import { useMachines } from "@/lib/machine-context";
-import type { SafeMachine } from "@/lib/api-types";
+import { useNavigation } from "./NavigationProvider";
+import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
 
 type SwitcherHealth = {
   state: "loading" | "online" | "offline" | "unauthorized";
@@ -24,7 +25,7 @@ function statusColor(status: SwitcherHealth | undefined): string {
   return "var(--danger)";
 }
 
-async function probe(machine: SafeMachine, signal: AbortSignal): Promise<SwitcherHealth> {
+async function probe(machine: SafeMachine | UserVisibleMachine, signal: AbortSignal): Promise<SwitcherHealth> {
   try {
     const response = await fetch(apiPath("/api/health", machine.id), { cache: "no-store", signal });
     const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
@@ -37,7 +38,8 @@ async function probe(machine: SafeMachine, signal: AbortSignal): Promise<Switche
 }
 
 export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => void }) {
-  const { machineId, machines, setMachineId, loading } = useMachines();
+  const { machineId, machines, loading } = useMachines();
+  const { navigate } = useNavigation();
   const [open, setOpen] = useState(false);
   const [health, setHealth] = useState<Record<string, SwitcherHealth>>({});
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -68,7 +70,8 @@ export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => 
   }, []);
 
   const selectMachine = (id: string) => {
-    setMachineId(id);
+    // Machine switch drops project/session — cross-machine ids are meaningless.
+    navigate({ machineId: id, project: null, session: null }, { history: "push" });
     setDismissedError(null);
     setOpen(false);
   };

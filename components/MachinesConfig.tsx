@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiPath } from "@/lib/api-path";
 import { useMachines } from "@/lib/machine-context";
+import { useI18n } from "@/hooks/useI18n";
+import { AccessNotice } from "./AccessNotice";
 import type { MachineAuthMode, MachineHealth, MachineTestResult, SafeMachine } from "@/lib/api-types";
 import styles from "./SettingsConfig.module.css";
 
@@ -102,6 +104,7 @@ function versionLabel(label: string, remote: string | null, local: string | null
 
 export function MachinesConfig() {
   const { refreshMachines } = useMachines();
+  const { t } = useI18n();
   const [machines, setMachines] = useState<SafeMachine[] | null>(null);
   const [health, setHealth] = useState<Record<string, HealthState>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -281,7 +284,7 @@ export function MachinesConfig() {
   };
 
   if (forbidden) {
-    return <div className={styles.empty}>Fleet management requires an admin account.</div>;
+    return <AccessNotice variant="no-permission" title={t("accessNotice.adminOnly")} body={t("accessNotice.forbidden")} fullScreen={false} />;
   }
 
   return (
