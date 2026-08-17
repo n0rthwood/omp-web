@@ -24,6 +24,7 @@ const ANONYMOUS_WEB_USER: WebUser = {
   username: "__anonymous",
   role: "admin",
   visibleProjects: "*",
+  machines: "*",
 };
 
 export function parseCookieValue(header: string | null, name: string): string | null {

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
 import { useMachines } from "@/lib/machine-context";
-import type { SafeMachine } from "@/lib/api-types";
+import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
 
 type SwitcherHealth = {
   state: "loading" | "online" | "offline" | "unauthorized";
@@ -24,7 +24,7 @@ function statusColor(status: SwitcherHealth | undefined): string {
   return "var(--danger)";
 }
 
-async function probe(machine: SafeMachine, signal: AbortSignal): Promise<SwitcherHealth> {
+async function probe(machine: SafeMachine | UserVisibleMachine, signal: AbortSignal): Promise<SwitcherHealth> {
   try {
     const response = await fetch(apiPath("/api/health", machine.id), { cache: "no-store", signal });
     const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };

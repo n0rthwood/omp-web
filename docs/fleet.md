@@ -94,10 +94,16 @@ that remote authenticates:
   machine token and never constructs a credential header — the gateway attaches
   the machine's own credential server-side and drops any `authorization` the
   caller sent.
-- **The fleet is admin-only and single-user by design.** `/api/machines` sits in
-  `ADMIN_ONLY_API_PREFIXES` in `proxy.ts`. Per-user visibility (#7) cannot be
-  projected onto another machine's absolute paths, so multi-user fleet access is
-  out of scope, deliberately.
+- **Fleet configuration is admin-only; reaching a machine is per-user, grant-based.**
+  Adding, editing, deleting and probing machines (`POST`/`PATCH`/`DELETE
+  /api/machines[/…]`) always require the admin role — `lib/admin-api-policy.ts`
+  and `requireAdminApi` enforce that in two layers, same as everywhere else in
+  this app. *Reaching* an already-configured machine — listing it and proxying
+  to it — is grantable per user; see
+  [Per-user machine grants](#per-user-machine-grants) below. Per-user visibility
+  (#7) still cannot be projected onto another machine's absolute paths: a
+  granted user gets the machine's *entire* credential-backed surface, not a
+  filtered one.
 - **An unauthenticated gateway cannot be given machines.** `machines.json` holds
   credentials to *other* hosts, so an open gateway on a reachable interface
   would hand out lateral access to the whole registry. Adding, editing and
@@ -161,6 +167,88 @@ not routed through `apiPath()` (which would blindly gain the machine prefix,
 and the proxy would reject them anyway). `web-me`, `web-login`, `web-logout`,
 `web-users`, `machines`, and `updates` always address the gateway you are
 logged into.
+
+## Per-user machine grants
+
+A file-backed web user (`~/.omp/agent/omp-web-users.yml`) carries a
+`machines` field alongside `projects`: `"*"` or an array of machine ids. The
+admin role always has effective access to every machine — `"*"` is implied
+by the role, regardless of what is stored — a non-admin only reaches the
+ids explicitly listed. `local` is implicitly granted to everyone and never
+needs to appear in the list. A user created before this field existed reads
+back as `machines: []` (no remote access — exactly today's pre-#10
+behavior; nothing regresses on upgrade).
+
+**Grants are pruned against the live registry on every read**, never
+trusted as stored. Deleting a machine from the fleet silently drops it out
+of every grant that named it — `lib/machines/machine-grants.ts`
+(`pruneMachineGrants`) does the intersection; `"*"` is never pruned.
+`GET /api/web-users` and `GET /api/web-users/<username>` (admin-only, same
+as ever) report the pruned value, so a stale id never lingers in what an
+admin sees either.
+
+`GET /api/machines` itself now serves any authenticated user, not just
+admins — the response shape differs by role:
+
+- **Admin** gets the full `SafeMachine` projection for every machine
+  (unchanged): `id`, `name`, `baseUrl`, `authMode`, `hasCredential`,
+  `headerNames`, timestamps, `isLocal`.
+- **User role** gets only `local` plus their granted machines, each
+  slimmed to `UserVisibleMachine` — `baseUrl` and `headerNames` are
+  dropped. A user role never learns a remote's origin or its configured
+  static header names, even for a machine it is granted.
+
+Every mutation (`POST`/`PATCH`/`DELETE /api/machines[/…]`) stays
+admin-only; a grant only ever widens *reach*, never *configuration*
+privilege.
+
+### Two-layer enforcement on the fleet proxy
+
+Reaching a granted machine's API (`/api/machines/<id>/api/...`) is checked
+twice, the same discipline as everywhere else in this app:
+
+1. **`proxy.ts` (outer, local-pathname gate).** `isAdminOnlyLocalApiPath`
+   (`lib/admin-api-policy.ts`) special-cases `/api/machines`: the listing
+   (`GET /api/machines`) is open to any authenticated user; every mutation
+   on `/api/machines` or `/api/machines/<id>` (one extra segment) stays
+   admin-only; the fleet-proxy catch-all
+   (`/api/machines/<id>/api/...`, two or more extra segments) is **not**
+   blocked here — the middleware cannot see which machine the caller is
+   granted, so that decision is deferred entirely to the route guard below.
+2. **`requireMachineGrant` (inner, route-level, `app/api/web-users/_guard.ts`).**
+   Runs on every method the fleet-proxy catch-all accepts. In order: trust
+   gate → authentication (401) → admin bypass → `local` bypass (the route's
+   own 400 governs from there) → **unknown machine → 404** "Machine not
+   found" → **existing-but-ungranted machine → 403** "No permission for
+   this machine" → **granted but the inner remote path is admin-only
+   (`isAdminOnlyRemoteApiPath`, e.g. `PUT /api/models-config`,
+   `POST /api/auth/api-key/<provider>`) → 403** "Admin access required".
+
+The 404-vs-403 split for machine identity is **deliberate, not an
+oversight**: machine-id existence is not treated as a secret on this
+fleet. A granted user can tell a machine id is real without being
+granted to it; an admin auditing "why is my proxy request being denied"
+gets a straight answer instead of a deliberately ambiguous one.
+
+**What a grant actually hands out — read this before granting one.** A
+granted user's requests to that machine carry the machine's own stored
+credential, exactly like an admin's — there is no per-user credential on
+the remote and no way to scope one. Concretely:
+
+- **Full power on that machine, not a filtered view.** Whatever role the
+  machine's stored credential resolves to on the remote (usually admin,
+  per the "Minting the credential" note above) is what the request runs
+  as. A grant is an all-or-nothing key to that machine, not a role
+  mapping.
+- **Per-user project visibility does not apply on remotes.** The remote
+  enforces its own visibility rules against *its own* file users, and the
+  gateway's proxied request never carries the granting user's identity —
+  only the machine's credential. A grant is machine-wide, not
+  project-scoped.
+- **Revoking a grant does not close streams already open.** An SSE
+  subscription or a terminal session opened while granted keeps running
+  until it ends on its own; only *new* requests are checked against the
+  current grant.
 
 ## Limits, stated plainly
 

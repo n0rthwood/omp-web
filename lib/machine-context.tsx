@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { SafeMachine } from "@/lib/api-types";
+import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
 import { LOCAL_MACHINE_ID, appUrl, setCurrentMachineId } from "@/lib/api-path";
 
 export const localMachine: SafeMachine = {
@@ -19,7 +19,10 @@ export const localMachine: SafeMachine = {
 
 export interface MachineContextValue {
   machineId: string; // current, "local" by default
-  machines: SafeMachine[]; // local first
+  // Admin sees the full SafeMachine projection; a user role sees the
+  // slimmed UserVisibleMachine (no baseUrl, no headerNames) for granted
+  // machines — see `lib/api-types.ts#UserVisibleMachine`.
+  machines: (SafeMachine | UserVisibleMachine)[]; // local first
   setMachineId(id: string): void; // updates ?machine= and remounts the app subtree
   refreshMachines(): Promise<void>;
   loading: boolean;
@@ -49,7 +52,7 @@ setCurrentMachineId(readMachineFromLocation());
 export function MachineProvider(props: { children: React.ReactNode }): React.ReactElement {
   const router = useRouter();
   const [machineId, setMachineIdState] = useState<string>(readMachineFromLocation);
-  const [machines, setMachines] = useState<SafeMachine[]>([localMachine]);
+  const [machines, setMachines] = useState<(SafeMachine | UserVisibleMachine)[]>([localMachine]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,14 +64,16 @@ export function MachineProvider(props: { children: React.ReactNode }): React.Rea
     // Gateway-local fleet administration; never proxied.
     try {
       const res = await fetch("/api/machines", { cache: "no-store" });
-      if (res.status === 403) {
-        // Non-admin user: the fleet is admin-only, degrade to local-only.
+      if (res.status === 401 || res.status === 403) {
+        // Unauthenticated, or the trust gate rejected the request: degrade
+        // to local-only. A signed-in user role is never 403'd here — the
+        // route filters + slims the listing to their granted machines.
         setMachines([localMachine]);
         setError(null);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json().catch(() => ({}))) as { machines?: SafeMachine[] };
+      const body = (await res.json().catch(() => ({}))) as { machines?: (SafeMachine | UserVisibleMachine)[] };
       const remote = Array.isArray(body.machines) ? body.machines : [];
       // Local first, remote machines in server order.
       setMachines([localMachine, ...remote.filter((m) => m && m.id !== LOCAL_MACHINE_ID)]);

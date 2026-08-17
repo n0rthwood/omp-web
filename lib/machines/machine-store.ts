@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "../atomic-file";
-import type { MachineAuthMode, SafeMachine } from "../api-types";
+import type { MachineAuthMode, SafeMachine, UserVisibleMachine } from "../api-types";
 
-export type { MachineAuthMode, SafeMachine } from "../api-types";
+export type { MachineAuthMode, SafeMachine, UserVisibleMachine } from "../api-types";
 
 /** The synthetic local machine id — never stored, never deletable. */
 export const LOCAL_MACHINE_ID = "local";
@@ -85,6 +85,13 @@ const FORBIDDEN_HEADER_NAMES: Record<string, true> = {
 
 function isMachineAuthMode(value: string): value is MachineAuthMode {
   return value === "bearer" || value === "basic" || value === "none";
+}
+
+/** Shape-only check (does not exclude `local`) — used to validate `machines`
+ *  grant arrays on `StoredWebUser` without pulling in the full create/update
+ *  validation path. */
+export function isValidMachineId(id: string): boolean {
+  return MACHINE_ID_RE.test(id);
 }
 
 function validateId(id: string): void {
@@ -293,6 +300,19 @@ export function toSafeMachine(machine: StoredMachine): SafeMachine {
     createdAt: machine.createdAt,
     updatedAt: machine.updatedAt,
     isLocal: machine.id === LOCAL_MACHINE_ID,
+  };
+}
+
+/** The user-role projection — drops the remote origin and header names. */
+export function toUserVisibleMachine(input: SafeMachine): UserVisibleMachine {
+  return {
+    id: input.id,
+    name: input.name,
+    authMode: input.authMode,
+    hasCredential: input.hasCredential,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    isLocal: input.isLocal,
   };
 }
 

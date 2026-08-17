@@ -224,6 +224,13 @@ export interface SafeMachine {
   isLocal: boolean;
 }
 
+/**
+ * The user-role projection of `SafeMachine` — slimmed for `GET /api/machines`
+ * when the caller is not an admin. Never carries the remote origin or the
+ * static header names an admin can see.
+ */
+export type UserVisibleMachine = Omit<SafeMachine, "baseUrl" | "headerNames">;
+
 /** Health probe response (also served by every machine's `/api/health`). */
 export interface MachineHealth {
   ok: boolean;

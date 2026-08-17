@@ -10,6 +10,7 @@ type ListedUser = {
   username: string;
   role: WebRole;
   projects: string[] | "*";
+  machines: string[] | "*";
   tokens: { name: string; created: string }[];
   envBacked?: boolean;
 };
@@ -44,11 +45,13 @@ export function WebUsersConfig() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Editor form state (create + edit share the role/projects fields).
+  // Editor form state (create + edit share the role/projects/machines fields).
   const [newUsername, setNewUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<WebRole>("user");
   const [projectsText, setProjectsText] = useState("");
+  const [machines, setMachines] = useState<string[] | "*">([]);
+  const [registry, setRegistry] = useState<{ id: string; name: string }[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // Token state.
   const [tokenName, setTokenName] = useState("");
@@ -69,6 +72,14 @@ export function WebUsersConfig() {
     void load();
   }, [load]);
 
+  // The registry admins can grant from — an admin always sees the full
+  // fleet here (this component is admin-only, `requiresAdmin: true`).
+  useEffect(() => {
+    request<{ machines: { id: string; name: string }[] }>("/api/machines", { cache: "no-store" })
+      .then((result) => setRegistry(result.machines.filter((machine) => machine.id !== "local")))
+      .catch(() => setRegistry([]));
+  }, []);
+
   const currentUser = users?.find((user) => user.username === selected) ?? null;
 
   // Resync the editor form whenever the selection (or the reloaded user record) changes.
@@ -80,6 +91,7 @@ export function WebUsersConfig() {
     setPassword("");
     setRole(currentUser?.role ?? "user");
     setProjectsText(currentUser ? (currentUser.projects === "*" ? "*" : currentUser.projects.join("\n")) : "");
+    setMachines(currentUser?.machines ?? []);
   }, [currentUser]);
 
   const startCreate = () => {
@@ -92,6 +104,7 @@ export function WebUsersConfig() {
     setPassword("");
     setRole("user");
     setProjectsText("");
+    setMachines([]);
     setError(null);
   };
 
@@ -106,7 +119,7 @@ export function WebUsersConfig() {
     setBusy(true);
     setError(null);
     try {
-      await request("/api/web-users", { method: "POST", body: JSON.stringify({ username, password, role, projects }) });
+      await request("/api/web-users", { method: "POST", body: JSON.stringify({ username, password, role, projects, machines }) });
       setCreating(false);
       setSelected(username);
       await load();
@@ -129,7 +142,7 @@ export function WebUsersConfig() {
     try {
       await request(userUrl(currentUser.username), {
         method: "PATCH",
-        body: JSON.stringify({ role, projects, ...(password ? { password } : {}) }),
+        body: JSON.stringify({ role, projects, machines, ...(password ? { password } : {}) }),
       });
       await load();
     } catch (caught) {
@@ -224,6 +237,51 @@ export function WebUsersConfig() {
     />
   );
 
+  const machinesField = () => {
+    if (role === "admin") {
+      return (
+        <div className={styles.readOnlyNotice}>
+          All machines (admin role) — an admin grant is implicit and not editable here.
+        </div>
+      );
+    }
+    return (
+      <>
+        <label className={styles.serverRow} style={{ cursor: "pointer", padding: "4px 0" }}>
+          <input
+            type="checkbox"
+            checked={machines === "*"}
+            onChange={(event) => setMachines(event.target.checked ? "*" : [])}
+          />
+          <span className={styles.serverName}>All machines (*)</span>
+        </label>
+        {machines !== "*" && (
+          registry.length ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+              {registry.map((machine) => (
+                <label key={machine.id} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={machines.includes(machine.id)}
+                    onChange={(event) => setMachines((current) => current === "*"
+                      ? current
+                      : event.target.checked
+                        ? [...current, machine.id]
+                        : current.filter((id) => id !== machine.id))}
+                  />
+                  <span>{machine.name}</span>
+                </label>
+              ))}
+            </div>
+          ) : <div className={styles.saveState} style={{ marginTop: 4 }}>No remote machines registered yet.</div>
+        )}
+        <div className={styles.saveState} style={{ marginTop: 6 }}>
+          The local machine is always reachable. A granted user acts with that machine&apos;s stored credential — full power on that machine; per-user project visibility does not apply on remotes; revoking a grant does not close already-open streams.
+        </div>
+      </>
+    );
+  };
+
   return (
     <div className={styles.scrollContent}>
       <header className={styles.contentHeader}>
@@ -289,6 +347,8 @@ export function WebUsersConfig() {
                   {roleSelect()}
                   <div className={styles.settingLabel} style={{ marginTop: 10 }}>Projects</div>
                   {projectsField()}
+                  <div className={styles.settingLabel} style={{ marginTop: 10 }}>Machines</div>
+                  {machinesField()}
                   <div className={styles.editorActions}>
                     <div>{error && <div className={styles.error}>{error}</div>}</div>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -319,6 +379,8 @@ export function WebUsersConfig() {
                       {roleSelect()}
                       <div className={styles.settingLabel} style={{ marginTop: 10 }}>Projects — one absolute path per line, or * for all</div>
                       {projectsField()}
+                      <div className={styles.settingLabel} style={{ marginTop: 10 }}>Machines</div>
+                      {machinesField()}
                       <div className={styles.settingLabel} style={{ marginTop: 10 }}>Reset password</div>
                       <input
                         type="password"
