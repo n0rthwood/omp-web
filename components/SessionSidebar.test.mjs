@@ -63,10 +63,10 @@ test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
 });
 
-test("minor #5: unread markers are pruned against the loaded session list, but never while it's still loading", () => {
+test("unread markers prune against the loaded list — never while loading, never after a failed (empty-but-errored) fetch", () => {
   assert.match(
     source,
-    /useEffect\(\(\) => \{\s*if \(loading\) return;\s*setUnreadSessionIds\(\(prev\) => \{\s*const next = new Set\(\[\.\.\.prev\]\.filter\(\(id\) => allSessions\.some\(\(s\) => s\.id === id\)\)\);/,
+    /useEffect\(\(\) => \{\s*if \(loading \|\| error\) return;\s*setUnreadSessionIds\(\(prev\) => \{\s*const next = new Set\(\[\.\.\.prev\]\.filter\(\(id\) => allSessions\.some\(\(s\) => s\.id === id\)\)\);/,
   );
 });
 

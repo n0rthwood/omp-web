@@ -79,7 +79,7 @@ export interface NavigationContextValue {
   session: SessionInfo | null;
   phase: NavPhase;
   error: NavError | null;
-  /** Updates URL, localStorage resume, and (if it changed) the machine seam for an already-validated target. Never re-runs the async pipeline. */
+  /** Updates URL and localStorage resume and syncs the machine seam for an already-validated target. Same-machine selections settle synchronously; a machine-changing target re-runs the full async pipeline (identical to a /m/<id> deeplink) so defaults resolve and the URL canonicalizes. */
   navigate(target: NavigationTarget, options: { history: "push" | "replace" }): void;
   /** Re-runs the full pipeline against the current URL (offline retry). */
   retry(): void;

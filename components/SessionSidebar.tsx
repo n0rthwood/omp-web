@@ -494,15 +494,16 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // (that only happens on selection, above) — prune anything no longer in
   // the loaded list so a stale id doesn't linger in localStorage forever
   // (issue #10 stage-3 review, minor #5). Skipped while the list hasn't
-  // loaded yet, so a slow initial fetch doesn't wipe markers restored from
-  // localStorage before it ever got a chance to load.
+  // loaded yet or the fetch failed — a failed fetch leaves an empty list,
+  // and pruning against it would wipe every marker restored from
+  // localStorage (and the persist effect below would save that wipe).
   useEffect(() => {
-    if (loading) return;
+    if (loading || error) return;
     setUnreadSessionIds((prev) => {
       const next = new Set([...prev].filter((id) => allSessions.some((s) => s.id === id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [allSessions, loading]);
+  }, [allSessions, loading, error]);
 
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
