@@ -94,6 +94,27 @@ test("blocker #2: navigate() routes a machine-changing target through the async 
   assert.match(navigateBody, /setResult\(\{ phase: "settled", target: next, session: null, error: null, source: "url", home: false \}\);/);
 });
 
+test("Home session clicks run the resolver even when the target machine is already current", () => {
+  const navigateStart = navProviderSource.indexOf("const navigate = useCallback");
+  const navigateEnd = navProviderSource.indexOf("const goHome = useCallback", navigateStart);
+  assert.notEqual(navigateStart, -1);
+  assert.notEqual(navigateEnd, -1);
+  const navigateBody = navProviderSource.slice(navigateStart, navigateEnd);
+
+  assert.match(
+    navigateBody,
+    /if \(resultRef\.current\.phase !== "error" && resultRef\.current\.home && next\.session\) \{[\s\S]*resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);[\s\S]*return;[\s\S]*\}/,
+  );
+});
+
+const homePageSource = fs.readFileSync(new URL("./HomePage.tsx", import.meta.url), "utf8");
+
+test("Home fan-out fetch depends on stable fetchSessionsFor, not the whole session list object", () => {
+  assert.match(homePageSource, /const \{ fetchSessionsFor \} = useSessionList\(\);/);
+  assert.match(homePageSource, /sessions = await fetchSessionsFor\(machine\.id\);/);
+  assert.doesNotMatch(homePageSource, /\[machines, machinesLoading, sessionList\]/);
+});
+
 test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {
   const notificationBody = callbackBody("deliverSessionNotification", "handleAgentEnd");
   assert.match(

@@ -140,6 +140,8 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     source: "home",
     home: false,
   });
+  const resultRef = useRef(result);
+  resultRef.current = result;
   // Bumped only by the resolver's onChange below (a resolver-delivered
   // phase result) — never by the same-machine sync fast path in navigate().
   const [resolutionRevision, setResolutionRevision] = useState(0);
@@ -277,6 +279,15 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
   const navigate = useCallback((next: NavigationTarget, options: { history: "push" | "replace" }) => {
     const url = buildUrl(next);
     writeAddressBar(url, options.history);
+
+    if (resultRef.current.phase !== "error" && resultRef.current.home && next.session) {
+      // Home has no mounted AppShellBody to pre-seed with the clicked
+      // SessionInfo. Route session clicks through the resolver even when the
+      // machine is already current so the session object is fetched before the
+      // shell mounts.
+      resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
+      return;
+    }
 
     if (next.machineId !== machinesRef.current.machineId) {
       // Machine changes: run the same async pipeline a `/m/<id>` deeplink

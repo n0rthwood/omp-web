@@ -6,6 +6,12 @@
 /** Monday-first (1) or Sunday-first (0) week convention. */
 export type WeekStartsOn = 0 | 1;
 
+export function weekStartsOnFromIntlFirstDay(firstDay: number | undefined): WeekStartsOn {
+  // Intl.Locale#weekInfo uses ISO weekday numbers: Monday=1 ... Sunday=7.
+  // Date#getDay() uses Sunday=0, so normalize only the convention Home uses.
+  return firstDay === 0 || firstDay === 7 ? 0 : 1;
+}
+
 /** Midnight of the day `diff` days before `date` (local time). */
 function shiftDays(date: Date, diff: number): Date {
   const shifted = new Date(date.getFullYear(), date.getMonth(), date.getDate());

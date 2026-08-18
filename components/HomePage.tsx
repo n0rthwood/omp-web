@@ -36,7 +36,7 @@ function basename(path: string): string {
 export function HomePage() {
   const { locale, t } = useI18n();
   const { machines, loading: machinesLoading } = useMachines();
-  const sessionList = useSessionList();
+  const { fetchSessionsFor } = useSessionList();
   const [groups, setGroups] = useState<MachineProjects[] | null>(null);
   const [selected, setSelected] = useState<{ machineId: string; project: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -54,7 +54,7 @@ export function HomePage() {
         };
         let sessions: SessionInfo[];
         try {
-          sessions = await sessionList.fetchSessionsFor(machine.id);
+          sessions = await fetchSessionsFor(machine.id);
         } catch {
           return { ...base, offline: true };
         }
@@ -78,7 +78,7 @@ export function HomePage() {
       }),
     );
     setGroups(results);
-  }, [machines, machinesLoading, sessionList]);
+  }, [machines, machinesLoading, fetchSessionsFor]);
 
   useEffect(() => {
     void load();

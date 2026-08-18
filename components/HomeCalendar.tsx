@@ -10,7 +10,7 @@
 
 import { useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { daysOfWeek, groupSessionsByDay, localDayKey, weekStartDate, type WeekStartsOn } from "@/lib/calendar-week";
+import { daysOfWeek, groupSessionsByDay, localDayKey, weekStartDate, weekStartsOnFromIntlFirstDay, type WeekStartsOn } from "@/lib/calendar-week";
 import { parseTitleAnnotations } from "@/lib/title-annotations";
 import { useI18n } from "@/hooks/useI18n";
 import { useNavigation } from "./NavigationProvider";
@@ -101,7 +101,7 @@ export function HomeCalendar({ machineId, project, sessions }: {
     try {
       // `weekInfo` is not in TS's Intl typings yet (stage-3).
       const info = new Intl.Locale(locale) as Intl.Locale & { weekInfo?: { firstDay?: number } };
-      return info.weekInfo?.firstDay === 0 ? 0 : 1;
+      return weekStartsOnFromIntlFirstDay(info.weekInfo?.firstDay);
     } catch {
       return 1;
     }
