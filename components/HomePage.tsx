@@ -41,7 +41,7 @@ export function HomePage() {
   const [selected, setSelected] = useState<{ machineId: string; project: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
     const results = await Promise.all(
       machines.map(async (machine): Promise<MachineProjects> => {
@@ -54,7 +54,7 @@ export function HomePage() {
         };
         let sessions: SessionInfo[];
         try {
-          sessions = await fetchSessionsFor(machine.id);
+          sessions = await fetchSessionsFor(machine.id, force);
         } catch {
           return { ...base, offline: true };
         }
@@ -81,8 +81,7 @@ export function HomePage() {
   }, [machines, machinesLoading, fetchSessionsFor]);
 
   useEffect(() => {
-    void load();
-    // reloadKey lets the Refresh button force a re-fetch.
+    void load(reloadKey > 0);
   }, [load, reloadKey]);
 
   const selectedGroup = useMemo(

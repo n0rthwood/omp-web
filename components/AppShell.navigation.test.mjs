@@ -111,8 +111,20 @@ const homePageSource = fs.readFileSync(new URL("./HomePage.tsx", import.meta.url
 
 test("Home fan-out fetch depends on stable fetchSessionsFor, not the whole session list object", () => {
   assert.match(homePageSource, /const \{ fetchSessionsFor \} = useSessionList\(\);/);
-  assert.match(homePageSource, /sessions = await fetchSessionsFor\(machine\.id\);/);
+  assert.match(homePageSource, /sessions = await fetchSessionsFor\(machine\.id, force\);/);
   assert.doesNotMatch(homePageSource, /\[machines, machinesLoading, sessionList\]/);
+});
+
+const sessionListContextSource = fs.readFileSync(new URL("../lib/session-list-context.tsx", import.meta.url), "utf8");
+
+test("Home Refresh bypasses the arbitrary-machine session-list cache", () => {
+  assert.match(sessionListContextSource, /fetchSessionsFor\(machineId: string, force\?: boolean\): Promise<SessionInfo\[]>;/);
+  assert.match(
+    sessionListContextSource,
+    /const fetchSessionsFor = useCallback\(async \(targetMachineId: string, force = false\): Promise<SessionInfo\[]> => \{\s*const \{ sessions: fetched \} = await fetchSessionList\(targetMachineId, force\);/,
+  );
+  assert.match(homePageSource, /const load = useCallback\(async \(force: boolean\) => \{/);
+  assert.match(homePageSource, /void load\(reloadKey > 0\);/);
 });
 
 test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {

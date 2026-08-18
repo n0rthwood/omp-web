@@ -35,8 +35,8 @@ export interface SessionListContextValue {
   refresh(force?: boolean): void;
   /** External "something changed" signal (session created/deleted/forked, rename, auto-name, project trust...). Also reloads the list. */
   bumpRefreshKey(): void;
-  /** One-off fetch for an arbitrary machine — used by the navigation pipeline to validate a deeplink/resume target before it becomes "current". Bypasses the reactive state above entirely. */
-  fetchSessionsFor(machineId: string): Promise<SessionInfo[]>;
+  /** One-off fetch for an arbitrary machine — used by the navigation pipeline to validate a deeplink before it becomes "current", and by Home refresh to bypass cached lists. Bypasses the reactive state above entirely. */
+  fetchSessionsFor(machineId: string, force?: boolean): Promise<SessionInfo[]>;
   /** Threads the currently-selected session id in from AppShellBody so its
    *  own completion never double-reloads/flashes the list via the polling
    *  transition below — `bumpRefreshKey()` on agent-end already covers it
@@ -237,8 +237,8 @@ export function SessionListProvider({ children }: { children: React.ReactNode })
     setRefreshKey((k) => k + 1);
   }, []);
 
-  const fetchSessionsFor = useCallback(async (targetMachineId: string): Promise<SessionInfo[]> => {
-    const { sessions: fetched } = await fetchSessionList(targetMachineId, false);
+  const fetchSessionsFor = useCallback(async (targetMachineId: string, force = false): Promise<SessionInfo[]> => {
+    const { sessions: fetched } = await fetchSessionList(targetMachineId, force);
     return fetched;
   }, []);
 
