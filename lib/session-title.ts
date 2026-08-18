@@ -39,6 +39,14 @@ const WEB_TITLE_SYSTEM_PROMPT = [
   "If there is no task (a bare greeting or small talk), answer <title/>.",
 ].join("\n");
 
+const WEB_TITLE_HUMAN_ONLY_PROMPT = [
+  "Write a concise 3-10 word title for the task in <user>.",
+  "Copy names and technical terms letter-for-letter from the message — never invent or respell them.",
+  "Keep this human title under 60 characters; issue annotations are appended separately.",
+  "Do not include GitHub issue numbers or parenthesized issue annotations.",
+  "If there is no task (a bare greeting or small talk), answer <title/>.",
+].join("\n");
+
 /** The SDK's appended marker instruction tells the model to answer <title>none</title> for no-task; treat that literal as a decline. */
 export function isDeclinedTitle(title: string): boolean {
   return title.toLowerCase() === "none";
@@ -141,6 +149,40 @@ export function normalizeWebGeneratedTitle(value: string | null | undefined): st
   return cleaned;
 }
 
+export function appendIssueAnnotationSuffix(title: string, sourceText: string): string {
+  const base = truncateTitle(title);
+  if (!base) return "";
+  const related = new Set<string>();
+  const relatedPattern = /\b(?:rel|related)\b(?:\s+[\p{L}\p{N}_-]+){0,3}?\s*#(\d+)/giu;
+  let relatedMatch: RegExpExecArray | null = relatedPattern.exec(sourceText);
+  while (relatedMatch) {
+    related.add(relatedMatch[1]);
+    relatedMatch = relatedPattern.exec(sourceText);
+  }
+
+  const seen = new Set<string>();
+  const main: string[] = [];
+  const relatedOrdered: string[] = [];
+  const issuePattern = /#(\d+)/g;
+  let issueMatch: RegExpExecArray | null = issuePattern.exec(sourceText);
+  while (issueMatch) {
+    const issue = issueMatch[1];
+    if (seen.has(issue)) {
+      issueMatch = issuePattern.exec(sourceText);
+      continue;
+    }
+    seen.add(issue);
+    if (related.has(issue)) relatedOrdered.push(issue);
+    else main.push(issue);
+    issueMatch = issuePattern.exec(sourceText);
+  }
+
+  const parts: string[] = [];
+  if (main.length > 0) parts.push(main.map((issue) => `#${issue}`).join(" · "));
+  if (relatedOrdered.length > 0) parts.push(`rel ${relatedOrdered.map((issue) => `#${issue}`).join(", ")}`);
+  return parts.length === 0 ? base : truncateTitle(`${base} (${parts.join(" · ")})`);
+}
+
 function resolveWebTitleModel(session: AgentSessionLike): Model<Api> | undefined {
   const availableModels = session.modelRegistry.getAvailable() as Model<Api>[];
   if (availableModels.length === 0) return undefined;
@@ -205,14 +247,17 @@ export async function generateSessionTitle(
 
   const title = session.settings.get("providers.tinyModel") === "online"
     ? await generateOnlineWebSessionTitle(session, firstMessage)
-    : await generateOmpSessionTitle(
+    : appendIssueAnnotationSuffix(
+      await generateOmpSessionTitle(
+        firstMessage,
+        session.modelRegistry as never,
+        session.settings,
+        session.sessionId,
+        session.model as never,
+        undefined,
+        WEB_TITLE_HUMAN_ONLY_PROMPT,
+      ) ?? "",
       firstMessage,
-      session.modelRegistry as never,
-      session.settings,
-      session.sessionId,
-      session.model as never,
-      undefined,
-      WEB_TITLE_SYSTEM_PROMPT,
     );
   if (!title) return null;
 
