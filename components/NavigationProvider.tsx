@@ -39,13 +39,11 @@ import {
   canonicalRewriteUrl,
   createNavigationResolver,
   NavOfflineError,
-  writeLastLocation,
   type MachineProbeResult,
   type NavDeps,
   type NavError,
   type NavPhase,
   type NavResult,
-  type NavStorageLike,
 } from "@/lib/nav-state";
 import { buildUrl, parseLocation, type NavigationTarget } from "@/lib/nav-url";
 import { apiPath } from "@/lib/api-path";
@@ -59,23 +57,13 @@ import { AccessNotice, type AccessNoticeVariant } from "./AccessNotice";
 import type { SessionInfo } from "@/lib/types";
 import { createContext, useContext } from "react";
 
-const LAST_LOCATION_STORAGE_KEY = "omp-web:last-location";
-
-function getStorage(): NavStorageLike | null {
-  if (typeof window === "undefined") return null;
-  try {
-    // Probe access — some browsers (privacy mode) expose the object but throw on use.
-    window.localStorage.getItem(LAST_LOCATION_STORAGE_KEY);
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
 
 export interface NavigationContextValue {
   target: NavigationTarget;
   /** The resolved session object once known — set at settle (deeplink/resume/popstate), stale after a subsequent interactive `navigate()`. Consumers needing a live value should track their own selection instead. */
   session: SessionInfo | null;
+  /** True while the app is on the Home landing (issue #15): no conversation target is open and the shell renders the Home page instead of the app body. */
+  home: boolean;
   phase: NavPhase;
   error: NavError | null;
   /** Increments only when a resolver run (boot/popstate/machine-changing
@@ -86,8 +74,10 @@ export interface NavigationContextValue {
    *  since its own interactive selections already update local state
    *  themselves. */
   resolutionRevision: number;
-  /** Updates URL and localStorage resume and syncs the machine seam for an already-validated target. Same-machine selections settle synchronously; a machine-changing target re-runs the full async pipeline (identical to a /m/<id> deeplink) so defaults resolve and the URL canonicalizes. */
+  /** Updates URL and syncs the machine seam for an already-validated target. Same-machine selections settle synchronously; a machine-changing target re-runs the full async pipeline (identical to a /m/<id> deeplink) so defaults resolve and the URL canonicalizes. */
   navigate(target: NavigationTarget, options: { history: "push" | "replace" }): void;
+  /** Lands on the Home page (issue #15): pushes "/" and settles the home intent. */
+  goHome(): void;
   /** Re-runs the full pipeline against the current URL (offline retry). */
   retry(): void;
 }
@@ -147,8 +137,11 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     target: { machineId: "local", project: null, session: null },
     session: null,
     error: null,
-    source: "default",
+    source: "home",
+    home: false,
   });
+  const resultRef = useRef(result);
+  resultRef.current = result;
   // Bumped only by the resolver's onChange below (a resolver-delivered
   // phase result) — never by the same-machine sync fast path in navigate().
   const [resolutionRevision, setResolutionRevision] = useState(0);
@@ -251,7 +244,6 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     getLastOpenSession: (projectKey: string) => getLastOpenSession(projectKey),
     removedProjectsSupplier: () => loadRemovedProjects(),
     onMachineCommit: (machineId: string) => machinesRef.current.commitMachineId(machineId),
-    storage: getStorage(),
   }), []);
 
   // Boot: resolve the page's initial location once.
@@ -288,6 +280,15 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     const url = buildUrl(next);
     writeAddressBar(url, options.history);
 
+    if (resultRef.current.phase !== "error" && resultRef.current.home && next.session) {
+      // Home has no mounted AppShellBody to pre-seed with the clicked
+      // SessionInfo. Route session clicks through the resolver even when the
+      // machine is already current so the session object is fetched before the
+      // shell mounts.
+      resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
+      return;
+    }
+
     if (next.machineId !== machinesRef.current.machineId) {
       // Machine changes: run the same async pipeline a `/m/<id>` deeplink
       // would (blocker #2) instead of settling immediately with a raw,
@@ -298,8 +299,12 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
       resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
       return;
     }
-    writeLastLocation(getStorage(), { v: 1, machine: next.machineId, project: next.project, session: next.session });
-    setResult({ phase: "settled", target: next, session: null, error: null, source: "url" });
+    setResult({ phase: "settled", target: next, session: null, error: null, source: "url", home: false });
+  }, [buildDeps]);
+
+  const goHome = useCallback(() => {
+    writeAddressBar("/", "push");
+    resolverRef.current!.run(parseLocation("/", ""), buildDeps());
   }, [buildDeps]);
 
   const retry = useCallback(() => {
@@ -310,12 +315,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
   const value = useMemo<NavigationContextValue>(() => ({
     target: result.target,
     session: result.session,
+    home: result.phase === "error" ? false : result.home,
     phase: result.phase === "error" ? "settled" : result.phase, // "error" is rendered by the gate below, never observed by children
     error: result.error,
     resolutionRevision,
     navigate,
+    goHome,
     retry,
-  }), [result, resolutionRevision, navigate, retry]);
+  }), [result, resolutionRevision, navigate, goHome, retry]);
 
   if (result.phase === "error" && result.error) {
     return <ErrorGate error={result.error} t={t} onRetry={retry} onGoLocal={() => navigate({ machineId: "local", project: null, session: null }, { history: "replace" })} />;

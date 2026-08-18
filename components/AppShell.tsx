@@ -12,6 +12,7 @@ import { TerminalIcon } from "./FileIcons";
 import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
+import { HomePage } from "./HomePage";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -2088,7 +2089,8 @@ export function AppShell() {
 
 function AppShellMachineKey() {
   const { machineId } = useMachines();
-  const { target, session, resolutionRevision } = useNavigation();
+  const { target, session, resolutionRevision, home } = useNavigation();
+  if (home) return <HomePage />;
   return (
     <AppShellBody
       key={machineId}

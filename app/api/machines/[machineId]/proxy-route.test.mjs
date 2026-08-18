@@ -85,6 +85,14 @@ async function seed() {
         machines: [],
         tokens: [],
       },
+      {
+        username: "limited",
+        role: "user",
+        passwordHash: users.hashWebPassword("limited-pass-1"),
+        projects: ["/opt/granted/a", "/opt/granted/b"],
+        machines: ["gpu-1"],
+        tokens: [],
+      },
     ],
     sessions: { secret: "", ttlDays: 30 },
   });
@@ -115,6 +123,48 @@ async function withStubbedFetch(body) {
     globalThis.fetch = original;
   }
 }
+
+/** Stub global fetch so a "forwarded" assertion never touches the network, with a caller-supplied JSON payload. */
+async function withStubbedSessionList(payload, body) {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    return { result: await body(), calls };
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** Stub global fetch with a raw caller-built Response (non-JSON / error-status cases). */
+async function withStubbedRawResponse(response, body) {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return response;
+  };
+  try {
+    return { result: await body(), calls };
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const REMOTE_SESSIONS = {
+  sessions: [
+    { id: "s-granted", cwd: "/opt/granted/a", projectRoot: "/opt/granted/a", name: "granted one" },
+    { id: "s-other", cwd: "/opt/other/wsc_dev", projectRoot: "/opt/other/wsc_dev", name: "wsc dev" },
+    { id: "s-worktree", cwd: "/opt/granted/b-wt", projectRoot: "/opt/granted/b", name: "worktree" },
+  ],
+  runningSessionIds: ["s-granted", "s-other"],
+};
 
 test("granted user + non-admin inner path is forwarded to the machine", async (t) => {
   t.after(restoreEnv);
@@ -282,4 +332,128 @@ test("a non-allow-listed remote path -> 403 Proxy path not allowed", async (t) =
   );
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "Proxy path not allowed" });
+});
+
+test("limited granted user's proxied session list drops non-granted sessions", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const { result } = await withStubbedSessionList(REMOTE_SESSIONS, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/sessions", { cookie }), params({ machineId: "gpu-1", path: ["api", "sessions"] })),
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("content-type"), "application/json");
+  const body = await result.json();
+  const ids = body.sessions.map((s) => s.id);
+  assert.deepEqual(ids.sort(), ["s-granted", "s-worktree"]);
+  assert.deepEqual(body.runningSessionIds, ["s-granted"]);
+});
+
+test("admin's proxied session list is byte-identical to the remote payload", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("root");
+  const { GET } = await loadRoute();
+
+  const { result } = await withStubbedSessionList(REMOTE_SESSIONS, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/sessions", { cookie }), params({ machineId: "gpu-1", path: ["api", "sessions"] })),
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), REMOTE_SESSIONS);
+});
+
+test("a user with projects: \"*\" sees the proxied session list unchanged", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("granted");
+  const { GET } = await loadRoute();
+
+  const { result } = await withStubbedSessionList(REMOTE_SESSIONS, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/sessions", { cookie }), params({ machineId: "gpu-1", path: ["api", "sessions"] })),
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), REMOTE_SESSIONS);
+});
+
+test("an SSE session-list response passes through untouched", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const streamed = "event: sessions\ndata: {\"sessions\":[]}\n\n";
+  const stub = new Response(streamed, { status: 200, headers: { "content-type": "text/event-stream" } });
+  const { result } = await withStubbedRawResponse(stub, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/sessions", { cookie }), params({ machineId: "gpu-1", path: ["api", "sessions"] })),
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("content-type"), "text/event-stream");
+  assert.equal(await result.text(), streamed);
+});
+
+test("a 502 session-list error response passes through unchanged", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const errorBody = JSON.stringify({ error: "bad gateway" });
+  const stub = new Response(errorBody, { status: 502, headers: { "content-type": "application/json" } });
+  const { result } = await withStubbedRawResponse(stub, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/sessions", { cookie }), params({ machineId: "gpu-1", path: ["api", "sessions"] })),
+  );
+  assert.equal(result.status, 502);
+  assert.equal(await result.text(), errorBody);
+});
+
+test("the session-detail proxy path is not filtered", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const { result } = await withStubbedSessionList(REMOTE_SESSIONS, () =>
+    GET(
+      apiRequest("/api/machines/gpu-1/api/sessions/some-id", { cookie }),
+      params({ machineId: "gpu-1", path: ["api", "sessions", "some-id"] }),
+    ),
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), REMOTE_SESSIONS);
+});
+
+test("?force=1 on the session-list route is still filtered", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const { result } = await withStubbedSessionList(REMOTE_SESSIONS, () =>
+    GET(
+      apiRequest("/api/machines/gpu-1/api/sessions?force=1", { cookie }),
+      params({ machineId: "gpu-1", path: ["api", "sessions"] }),
+    ),
+  );
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.deepEqual(
+    body.sessions.map((s) => s.id).sort(),
+    ["s-granted", "s-worktree"],
+  );
 });

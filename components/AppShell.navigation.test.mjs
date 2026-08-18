@@ -91,7 +91,46 @@ test("blocker #2: navigate() routes a machine-changing target through the async 
   assert.match(navigateBody, /resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);/);
   // The same-machine fast path still settles synchronously, without a
   // pipeline round trip.
-  assert.match(navigateBody, /setResult\(\{ phase: "settled", target: next, session: null, error: null, source: "url" \}\);/);
+  assert.match(navigateBody, /setResult\(\{ phase: "settled", target: next, session: null, error: null, source: "url", home: false \}\);/);
+});
+
+test("Home session clicks run the resolver even when the target machine is already current", () => {
+  const navigateStart = navProviderSource.indexOf("const navigate = useCallback");
+  const navigateEnd = navProviderSource.indexOf("const goHome = useCallback", navigateStart);
+  assert.notEqual(navigateStart, -1);
+  assert.notEqual(navigateEnd, -1);
+  const navigateBody = navProviderSource.slice(navigateStart, navigateEnd);
+
+  assert.match(
+    navigateBody,
+    /if \(resultRef\.current\.phase !== "error" && resultRef\.current\.home && next\.session\) \{[\s\S]*resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);[\s\S]*return;[\s\S]*\}/,
+  );
+});
+
+const homePageSource = fs.readFileSync(new URL("./HomePage.tsx", import.meta.url), "utf8");
+
+test("Home fan-out fetch depends on stable fetchSessionsFor, not the whole session list object", () => {
+  assert.match(homePageSource, /const \{ fetchSessionsFor \} = useSessionList\(\);/);
+  assert.match(homePageSource, /sessions = await fetchSessionsFor\(machine\.id, force\);/);
+  assert.doesNotMatch(homePageSource, /\[machines, machinesLoading, sessionList\]/);
+});
+
+const sessionListContextSource = fs.readFileSync(new URL("../lib/session-list-context.tsx", import.meta.url), "utf8");
+
+test("Home Refresh bypasses the arbitrary-machine session-list cache", () => {
+  assert.match(sessionListContextSource, /fetchSessionsFor\(machineId: string, force\?: boolean\): Promise<SessionInfo\[]>;/);
+  assert.match(
+    sessionListContextSource,
+    /const fetchSessionsFor = useCallback\(async \(targetMachineId: string, force = false\): Promise<SessionInfo\[]> => \{\s*const \{ sessions: fetched \} = await fetchSessionList\(targetMachineId, force\);/,
+  );
+  assert.match(homePageSource, /const load = useCallback\(async \(force: boolean\) => \{/);
+  assert.match(homePageSource, /void load\(reloadKey > 0\);/);
+});
+
+test("Home ignores superseded session-list fan-out results", () => {
+  assert.match(homePageSource, /const loadGenerationRef = useRef\(0\);/);
+  assert.match(homePageSource, /const generation = \+\+loadGenerationRef\.current;/);
+  assert.match(homePageSource, /if \(generation !== loadGenerationRef\.current\) return;\s*setGroups\(results\);/);
 });
 
 test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {
@@ -133,7 +172,7 @@ test("final-review fix #1: resolutionRevision threads from NavigationProvider th
   assert.match(source, /interface AppShellBodyProps \{\s*initialTarget: NavigationTarget;\s*initialSession: SessionInfo \| null;\s*resolutionRevision: number;\s*\}/);
   assert.match(
     source,
-    /function AppShellMachineKey\(\) \{\s*const \{ machineId \} = useMachines\(\);\s*const \{ target, session, resolutionRevision \} = useNavigation\(\);/,
+    /function AppShellMachineKey\(\) \{\s*const \{ machineId \} = useMachines\(\);\s*const \{ target, session, resolutionRevision, home \} = useNavigation\(\);\s*if \(home\) return <HomePage \/>;/,
   );
   assert.match(source, /resolutionRevision=\{resolutionRevision\}/);
 });

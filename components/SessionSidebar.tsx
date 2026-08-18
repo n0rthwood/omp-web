@@ -16,6 +16,7 @@ import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
 import { MachineSwitcher } from "./MachineSwitcher";
 import { AccessNotice } from "./AccessNotice";
+import { useNavigation } from "./NavigationProvider";
 
 declare global {
   interface Window {
@@ -396,6 +397,7 @@ function PiWebTitle() {
 
 export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
   const { t } = useI18n();
+  const { goHome } = useNavigation();
   const { user: webUser } = useWebUser();
   // The custom-cwd picker adds arbitrary project roots; user-role accounts are
   // limited to the projects an admin assigned them.
@@ -841,6 +843,38 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={() => goHome()}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "var(--bg-hover)",
+                border: "1px solid var(--border)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                width: 32, height: 32,
+                borderRadius: 7,
+                padding: 0,
+                flexShrink: 0,
+                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+              }}
+              title={t("home.title")}
+              aria-label={t("home.title")}
+              onMouseEnter={(event) => {
+                event.currentTarget.style.background = "var(--bg-selected)";
+                event.currentTarget.style.color = "var(--accent)";
+                event.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+              }}
+              onMouseLeave={(event) => {
+                event.currentTarget.style.background = "var(--bg-hover)";
+                event.currentTarget.style.color = "var(--text-muted)";
+                event.currentTarget.style.borderColor = "var(--border)";
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 10.5 12 3l9 7.5" />
+                <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
+              </svg>
+            </button>
             <button
               onClick={() => handleNewSession()}
               disabled={!selectedCwd}
