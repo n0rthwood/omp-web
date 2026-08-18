@@ -4,6 +4,8 @@ import {
   getMachine,
 } from "@/lib/machines/machine-store";
 import { isProxyablePath, proxyToMachine } from "@/lib/machines/remote-request";
+import { applySessionListVisibilityFilter, isSessionListProxyPath } from "@/lib/machines/proxy-response-filter";
+import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import { jsonError, requireMachineGrant } from "../../../web-users/_guard";
 
 interface RouteContext {
@@ -44,7 +46,12 @@ async function handle(req: Request, context: RouteContext): Promise<NextResponse
   }
 
   const search = new URL(req.url).search;
-  return proxyToMachine(machine, req, remotePathname, search);
+  const response = await proxyToMachine(machine, req, remotePathname, search);
+  if (isSessionListProxyPath(req.method, remotePathname)) {
+    const user = await getWebUserOrSynthetic(req);
+    if (user) return applySessionListVisibilityFilter(user, response);
+  }
+  return response;
 }
 
 export async function GET(req: Request, context: RouteContext) {
