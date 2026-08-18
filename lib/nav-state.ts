@@ -1,31 +1,25 @@
 /**
- * The staged navigation resolution core (issue #10, stage 3).
+ * The staged navigation resolution core (issue #10, stage 3; issue #15
+ * "Always Home" for the entry path).
  *
- * Pure module: no React, no fs. Resolves a parsed location (`./nav-url`)
- * through the pipeline described in issue #10's Design section:
+ * Pure module: no React, no fs. Two intents exist:
  *
- *   boot -> auth -> machines -> machine-commit -> projects -> project-commit
- *   -> session -> settled
+ * - `{kind:"target"}` — an explicit deeplink (or legacy query). Resolves
+ *   hard, in phases: boot -> auth -> machines -> machine-commit -> projects
+ *   -> project-commit -> session -> settled. Machine validation probes
+ *   unknown ids (not-found / no-permission / offline / ok); project
+ *   validation checks the session list with a cwd-validate fallback;
+ *   session validation is `getSession`-authoritative. Any stale id is an
+ *   error surfaced through the AccessNotice gate — the pre-#15 soft
+ *   step-downs belonged to the retired resume/default entry sources.
+ * - `{kind:"home"}` — the entry landing (issue #15). Runs boot -> auth only
+ *   and settles with `home:true`; the Home page renders instead of a
+ *   conversation and fetches its own overview data.
  *
  * All I/O is injected via `NavDeps` so the whole pipeline — including race
  * conditions — is testable without a browser or a server. `components/
  * NavigationProvider.tsx` is the only caller in the app; it binds these deps
  * to real fetches and React state.
- *
- * Validation + error taxonomy (see issue #10 "Design" for the full rationale):
- *  - machine: membership in the caller-provided (already filtered) machines
- *    list. Absent -> one health probe classifies not-found / no-permission /
- *    offline / ok.
- *  - project: session-list membership, falling back to a cwd-validate call
- *    (keeps zero-session project deeplinks working). Absent -> not-available.
- *  - session: `getSession` is authoritative (uniform 404 for hidden/deleted).
- *    Explicit id -> else workspace-memory last -> else most-recent in project.
- *
- * A target sourced from the URL (deeplink or legacy query) is "hard": any
- * validation failure surfaces as an error. A target sourced from localStorage
- * resume or the built-in default is "soft": a stale id steps one level down
- * (session -> default conversation, project -> default project, machine ->
- * local) — except offline, which is always hard, even on resume.
  *
  * Race safety: every `run()` call gets a fresh monotonic token; every commit
  * point (after each `await`, and before every side-effecting call such as
@@ -42,73 +36,28 @@ import { normalizeProjectKey } from "./removed-projects";
 
 const LOCAL_MACHINE_ID = "local";
 
-// --- localStorage resume -----------------------------------------------------
-
-export interface LastLocation {
-  v: 1;
-  machine: string;
-  project: string | null;
-  session: string | null;
-}
-
-export interface NavStorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-const LAST_LOCATION_KEY = "omp-web:last-location";
-
-export function readLastLocation(storage: NavStorageLike | null): LastLocation | null {
-  if (!storage) return null;
-  try {
-    const raw = storage.getItem(LAST_LOCATION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<LastLocation> | null;
-    if (!parsed || parsed.v !== 1 || typeof parsed.machine !== "string" || !parsed.machine) return null;
-    return {
-      v: 1,
-      machine: parsed.machine,
-      project: typeof parsed.project === "string" ? parsed.project : null,
-      session: typeof parsed.session === "string" ? parsed.session : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function writeLastLocation(storage: NavStorageLike | null, loc: LastLocation): void {
-  if (!storage) return;
-  try {
-    storage.setItem(LAST_LOCATION_KEY, JSON.stringify(loc));
-  } catch {
-    // best-effort, matches workspace-memory.ts's discipline
-  }
-}
-
 // --- intent: what are we trying to resolve, and how strictly? ---------------
 
-export type NavSource = "url" | "resume" | "default";
+export type NavSource = "url" | "home";
 
-export interface NavIntent {
-  target: NavigationTarget;
-  source: NavSource;
-}
+export type NavIntent =
+  | { target: NavigationTarget; source: "url"; home: false }
+  | { home: true };
 
 const DEFAULT_TARGET: NavigationTarget = { machineId: LOCAL_MACHINE_ID, project: null, session: null };
 
 /**
- * Precedence, decided once: URL deeplink (incl. legacy query) > localStorage
- * resume > built-in defaults. `parsed.kind === "root"` (malformed input) is
- * treated the same as `"resume"` — a mistyped path is not different from a
- * fresh `/` visit.
+ * Precedence, decided once (issue #15 "Always Home"): a URL deeplink
+ * (incl. legacy query) resolves as a hard target; every other location —
+ * bare `/`, bare `/m` / `/p`, malformed shapes — is the Home entry. The
+ * pre-#15 localStorage resume and built-in default-resolution entry paths
+ * are retired: opening the app lands on Home; a conversation is only ever
+ * opened through an explicit target (deeplink, Home/calendar click, or an
+ * in-app selection).
  */
-export function resolveIntent(parsed: ParsedLocation, storage: NavStorageLike | null): NavIntent {
-  if (parsed.kind === "target") return { target: parsed.target, source: "url" };
-  const stored = readLastLocation(storage);
-  if (stored) {
-    return { target: { machineId: stored.machine, project: stored.project, session: stored.session }, source: "resume" };
-  }
-  return { target: DEFAULT_TARGET, source: "default" };
+export function resolveIntent(parsed: ParsedLocation): NavIntent {
+  if (parsed.kind === "target") return { target: parsed.target, source: "url", home: false };
+  return { home: true };
 }
 
 // --- pipeline phases + result shape ------------------------------------------
@@ -132,7 +81,7 @@ export interface NavError {
 }
 
 export type NavResult =
-  | { phase: NavPhase; target: NavigationTarget; session: SessionInfo | null; error: null; source: NavSource }
+  | { phase: NavPhase; target: NavigationTarget; session: SessionInfo | null; error: null; source: NavSource; home: boolean }
   | { phase: "error"; target: NavigationTarget; session: null; error: NavError; source: NavSource };
 
 /**
@@ -191,7 +140,6 @@ export interface NavDeps {
   removedProjectsSupplier?(): Set<string>;
   /** Called once the machine id is committed, before the projects stage starts. */
   onMachineCommit?(machineId: string): void;
-  storage: NavStorageLike | null;
 }
 
 // --- defaults within an already-fetched session-list snapshot --------------
@@ -237,17 +185,32 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
   }
 
   async function resolve(intent: NavIntent, deps: NavDeps, myToken: number): Promise<void> {
-    const hard = intent.source === "url";
-    const source = intent.source;
+    if (intent.home) {
+      // Home (issue #15): no machine/project/session resolution — the Home
+      // page fetches its own overview data. Only the auth gate runs, so an
+      // unauthenticated visitor still bounces to /login from the provider.
+      const target = DEFAULT_TARGET;
+      if (!emit(myToken, { phase: "boot", target, session: null, error: null, source: "home", home: false })) return;
+      if (!emit(myToken, { phase: "auth", target, session: null, error: null, source: "home", home: false })) return;
+      await (deps.waitForAuth?.() ?? Promise.resolve());
+      if (myToken !== token) return;
+      emit(myToken, { phase: "settled", target, session: null, error: null, source: "home", home: true });
+      return;
+    }
+
+    // Every target is URL-shaped and hard (issue #15 retired the soft
+    // resume/default sources): a stale id surfaces the AccessNotice gate
+    // instead of silently stepping down to some other destination.
+    const source = "url";
     let target = intent.target;
 
-    if (!emit(myToken, { phase: "boot", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "boot", target, session: null, error: null, source, home: false })) return;
 
-    if (!emit(myToken, { phase: "auth", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "auth", target, session: null, error: null, source, home: false })) return;
     await (deps.waitForAuth?.() ?? Promise.resolve());
     if (myToken !== token) return;
 
-    if (!emit(myToken, { phase: "machines", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "machines", target, session: null, error: null, source, home: false })) return;
     let machines: NavMachineSummary[];
     try {
       machines = await deps.listMachines();
@@ -256,7 +219,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
     }
     if (myToken !== token) return;
 
-    let machineId = target.machineId;
+    const machineId = target.machineId;
     const known = machineId === LOCAL_MACHINE_ID || machines.some((m) => m.id === machineId);
     if (!known) {
       let probe: MachineProbeResult;
@@ -267,31 +230,15 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
       }
       if (myToken !== token) return;
 
-      if (probe === "offline") {
+      if (probe !== "ok") {
         emit(myToken, {
           phase: "error",
           target: { machineId, project: null, session: null },
           session: null,
-          error: { stage: "machine", variant: "offline" },
+          error: { stage: "machine", variant: probe },
           source,
         });
         return;
-      }
-      if (probe !== "ok") {
-        if (hard) {
-          emit(myToken, {
-            phase: "error",
-            target: { machineId, project: null, session: null },
-            session: null,
-            error: { stage: "machine", variant: probe },
-            source,
-          });
-          return;
-        }
-        // Soft step-down: a stale resume/default machine id falls back to local,
-        // taking its project/session with it — cross-machine ids are meaningless.
-        machineId = LOCAL_MACHINE_ID;
-        target = { machineId: LOCAL_MACHINE_ID, project: null, session: null };
       }
       // probe === "ok": accept machineId even though it was absent from the
       // cached list (e.g. a fresh grant not yet reflected in this session).
@@ -300,9 +247,9 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
     target = { ...target, machineId };
     if (myToken !== token) return;
     deps.onMachineCommit?.(machineId);
-    if (!emit(myToken, { phase: "machine-commit", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "machine-commit", target, session: null, error: null, source, home: false })) return;
 
-    if (!emit(myToken, { phase: "projects", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "projects", target, session: null, error: null, source, home: false })) return;
     let sessions: SessionInfo[];
     try {
       sessions = await deps.listSessions(machineId);
@@ -324,10 +271,6 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
 
     const removedProjects = deps.removedProjectsSupplier?.() ?? new Set<string>();
     let project = target.project;
-    // Set to true when the effective project differs from what was requested
-    // (a soft step-down): the originally-requested session, if any, no longer
-    // applies and must be re-derived against the new project instead.
-    let sessionRedirected = false;
 
     if (project) {
       const requestedProject = project;
@@ -353,7 +296,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
 
         if (validated) {
           project = validated; // canonicalized, same logical project — session still applies
-        } else if (hard) {
+        } else {
           emit(myToken, {
             phase: "error",
             target: { machineId, project: null, session: null },
@@ -362,19 +305,16 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
             source,
           });
           return;
-        } else {
-          project = defaultProject(sessions, removedProjects);
-          sessionRedirected = true;
         }
       }
     } else {
       project = defaultProject(sessions, removedProjects);
     }
 
-    target = { machineId, project, session: sessionRedirected ? null : target.session };
-    if (!emit(myToken, { phase: "project-commit", target, session: null, error: null, source })) return;
+    target = { machineId, project, session: target.session };
+    if (!emit(myToken, { phase: "project-commit", target, session: null, error: null, source, home: false })) return;
 
-    if (!emit(myToken, { phase: "session", target, session: null, error: null, source })) return;
+    if (!emit(myToken, { phase: "session", target, session: null, error: null, source, home: false })) return;
     let resolvedSession: SessionInfo | null = null;
     if (target.session) {
       try {
@@ -395,7 +335,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
       }
       if (myToken !== token) return;
 
-      // Reconcile: an explicit-session deeplink/resume validates the session
+      // Reconcile: an explicit-session deeplink validates the session
       // exists but not that it belongs to the requested project — the
       // session's own project wins (precedent: the old `?session=` restore
       // behaved the same way). `defaultSession` below is already
@@ -404,40 +344,28 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
       if (resolvedSession) {
         const sessProject = resolvedSession.projectRoot ?? resolvedSession.cwd;
         if (sessProject !== project) project = sessProject;
-      }
-
-      if (!resolvedSession) {
-        if (hard) {
-          emit(myToken, {
-            phase: "error",
-            target: { machineId, project, session: null },
-            session: null,
-            error: { stage: "session", variant: "not-available" },
-            source,
-          });
-          return;
-        }
-        resolvedSession = project ? defaultSession(project, sessions, deps.getLastOpenSession) : null;
+      } else {
+        emit(myToken, {
+          phase: "error",
+          target: { machineId, project, session: null },
+          session: null,
+          error: { stage: "session", variant: "not-available" },
+          source,
+        });
+        return;
       }
     } else if (project) {
       resolvedSession = defaultSession(project, sessions, deps.getLastOpenSession);
     }
 
     const finalTarget: NavigationTarget = { machineId, project, session: resolvedSession?.id ?? null };
-    if (emit(myToken, { phase: "settled", target: finalTarget, session: resolvedSession, error: null, source })) {
-      writeLastLocation(deps.storage, {
-        v: 1,
-        machine: finalTarget.machineId,
-        project: finalTarget.project,
-        session: finalTarget.session,
-      });
-    }
+    emit(myToken, { phase: "settled", target: finalTarget, session: resolvedSession, error: null, source, home: false });
   }
 
   return {
     run(parsed: ParsedLocation, deps: NavDeps): void {
       const myToken = ++token;
-      const intent = resolveIntent(parsed, deps.storage);
+      const intent = resolveIntent(parsed);
       void resolve(intent, deps, myToken);
     },
   };
