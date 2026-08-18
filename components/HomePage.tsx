@@ -9,7 +9,7 @@
  * weekly conversation calendar (`HomeCalendar`).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
 import { formatRelativeTime } from "@/lib/i18n/format";
@@ -40,9 +40,11 @@ export function HomePage() {
   const [groups, setGroups] = useState<MachineProjects[] | null>(null);
   const [selected, setSelected] = useState<{ machineId: string; project: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const loadGenerationRef = useRef(0);
 
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
+    const generation = ++loadGenerationRef.current;
     const results = await Promise.all(
       machines.map(async (machine): Promise<MachineProjects> => {
         const base: MachineProjects = {
@@ -77,6 +79,7 @@ export function HomePage() {
         return { ...base, projects, lastActivityByProject };
       }),
     );
+    if (generation !== loadGenerationRef.current) return;
     setGroups(results);
   }, [machines, machinesLoading, fetchSessionsFor]);
 
