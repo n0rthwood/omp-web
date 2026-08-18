@@ -32,7 +32,17 @@ export async function applySessionListVisibilityFilter(user: WebUser, response: 
   }
   if (!payload || !Array.isArray(payload.sessions)) return unbuffered(text, response.status);
 
-  const visible = filterVisibleSessions(user, payload.sessions as { id?: string; cwd: string; projectRoot?: string }[]);
+  // Anchor guard: an entry with neither a `cwd` nor a `projectRoot` string
+  // has nothing to test grants against — drop it rather than throw (one
+  // malformed remote entry must never 500 the whole list). An entry with
+  // only a `projectRoot` stays: `filterVisibleSessions` treats either as a
+  // visibility anchor, and a coerced empty cwd matches no grant by itself.
+  const anchored = payload.sessions.filter(
+    (s) => typeof s.cwd === "string" || typeof s.projectRoot === "string",
+  ) as { id?: string; cwd: string; projectRoot?: string }[];
+  const candidates = anchored.map((s) => (typeof s.cwd === "string" ? s : { ...s, cwd: "" }));
+
+  const visible = filterVisibleSessions(user, candidates);
   const visibleIds = new Set(visible.map((s) => s.id).filter((id): id is string => typeof id === "string"));
   const runningSessionIds = Array.isArray(payload.runningSessionIds)
     ? payload.runningSessionIds.filter((id) => visibleIds.has(id))
