@@ -57,7 +57,7 @@ buttons, active one accented.
 
 - 7 equal columns (`grid-template-columns: repeat(7, 1fr)`), day header
   (weekday + date) atop each; today's header in accent.
-- Conversation cards stacked top→bottom, newest first.
+- Conversation cards stacked top→bottom, newest first (by the active order key).
 - Empty day: column stays, centered compact marker (dim `—`).
 
 ### Calendar — <1280px (incl. mobile)
@@ -90,6 +90,11 @@ narrow), then full title, unclamped.
 Relative time via existing `formatRelativeTime` (`lib/i18n/format.ts:47`):
 seconds <60s, minutes <60m, hours <24h, days ≥24h — locale-aware (en / zh-CN).
 
+**Displayed timestamp = active sort key.** The meta line shows the time the
+list is currently sorted by — `modified` by default, `created` while the order
+switch is on Started — because a correctly sorted column must read as ordered
+by the time it displays. See "Order switch".
+
 ## Styled hover popover (PC only)
 
 Anchored floating panel, `OmpUpdateIndicator` pattern (`getBoundingClientRect`,
@@ -103,22 +108,34 @@ animation (or 120ms fade with `prefers-reduced-motion` guard, matching
 ┌──────────────────────────────────────┐   width: max 340px, ≤90vw
 │ Add weekly calendar view to Home #12 │   full title, wraps, no clamp
 │ ──────────────────────────────────── │   1px --border divider
-│ 2026-08-19 09:03:41 · 2 hours ago    │   full year+time + relative
+│ Modified: 2026-08-19 09:03:41        │   full precision, both keys
+│ · 2 hours ago                        │   labeled (Modified/Started),
+│ Started: 2026-08-19 08:41:02         │   so a Started sort that shows a
+│ First: "regarding n0rthwood/omp-web  │   cross-midnight session is
+│ #15 i have checked the deployed…"    │   self-explanatory
 │ 14 messages                          │   messageCount
-│ First: "regarding n0rthwood/omp-web  │   firstMessage preview,
-│ #15 i have checked the deployed…"    │   3-line clamp, --text-dim
 └──────────────────────────────────────┘   surface --bg-panel, 1px --border,
                                             radius 10, shadow, z-index 200
 ```
+
+The popover drops the un-labeled single-timestamp form: both keys are always
+labeled, covering every ordering mode.
 
 ## Order switch
 
 - State in `HomeCalendar`: `orderKey: "modified" | "created"`, default
   `"modified"`.
-- `groupSessionsByDay(sessions, orderKey)` — buckets by local day of the chosen
-  field, sorts each bucket descending by it.
-- `SessionInfo.created` (ISO) = session start (header timestamp);
-  `SessionInfo.modified` = last activity. Both already in the payload.
+- **Day membership is stable and always keyed on `modified`** — the calendar is
+  an activity diary; a conversation appears on the day it was last worked on,
+  regardless of the switch. The toggle changes ONLY the within-day sort:
+  `groupSessionsByDay(sessions)` buckets by `modified` day unconditionally and
+  sorts each bucket descending by the chosen key.
+- Consequently, while sorting by Started, a session started Monday 23:50 and
+  last active Tuesday 00:10 sits in Tuesday's column showing Monday's card
+  time — the popover's labeled `Started:`/`Modified:` fields resolve it.
+- `SessionInfo.created` (ISO, session header timestamp) = start;
+  `SessionInfo.modified` (file mtime) = last activity. Both already in the
+  payload.
 
 ## Data flow (unchanged)
 
@@ -133,13 +150,14 @@ ordering are client-side.
 |---|---|
 | `components/HomePage.tsx` | sticky header chips, auto-select, remove grid flip |
 | `components/HomeCalendar.tsx` | columns/stack by breakpoint, card anatomy, popover, order switch |
-| `lib/calendar-week.ts` | `groupSessionsByDay(sessions, orderKey)` |
+| `lib/calendar-week.ts` | sort-key parameter on within-day sort (bucketing unchanged) |
 | `hooks/useIsMobile.ts` | add `useMinWidth(1280)`-style hook (or `useIsWideCalendar`) |
 | `lib/i18n/messages/en.ts`, `zh-CN.ts` | new keys, lockstep |
 | `app/globals.css` | only if a shared 1280 breakpoint constant is needed |
 
 New i18n keys: `home.orderBy`, `home.orderModified`, `home.orderStarted`,
-`home.noConversationsDay`, `home.messageCount`, `home.firstMessageLabel`.
+`home.noConversationsDay`, `home.messageCount`, `home.startedAt`,
+`home.modifiedAt`.
 
 ## Constraints honored
 
@@ -155,9 +173,11 @@ New i18n keys: `home.orderBy`, `home.orderModified`, `home.orderStarted`,
 
 ## Testing
 
-- Unit: `lib/calendar-week.test.mjs` — grouping/sorting by both order keys,
-  boundary (sessions spanning midnight with different modified/created days).
+- Unit: `lib/calendar-week.test.mjs` — bucketing always by `modified` day;
+  within-day sort descending by each key; cross-midnight fixture (created day ≠
+  modified day) stays in the `modified` bucket under both keys.
 - Unit: card-order regression — within a day, newest first under both keys.
 - Existing guard test must pass unmodified.
 - Manual (production-build worktree): PC ≥1280 columns + popover + clamping;
-  narrow viewport stacked + unclamped; empty-day markers; en/zh; light/titanium.
+  narrow viewport stacked + unclamped; empty-day markers; order switch; en/zh;
+  light/titanium.
