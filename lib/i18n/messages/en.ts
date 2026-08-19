@@ -552,5 +552,12 @@ export const enLocale: LocalePlugin = {
     "home.mainIssues": "main issues",
     "home.relatedIssues": "related issues",
     "home.openProject": "Open project calendar",
+    "home.orderBy": "Order by",
+    "home.orderModified": "Modified",
+    "home.orderStarted": "Started",
+    "home.noConversationsDay": "No conversations",
+    "home.messageCount": "{count} messages",
+    "home.modifiedAt": "Modified",
+    "home.startedAt": "Started",
   },
 };

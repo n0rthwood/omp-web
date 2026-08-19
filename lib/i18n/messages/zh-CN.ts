@@ -552,5 +552,12 @@ export const zhCNLocale: LocalePlugin = {
     "home.mainIssues": "主要议题",
     "home.relatedIssues": "相关议题",
     "home.openProject": "打开项目日历",
+    "home.orderBy": "排序方式",
+    "home.orderModified": "修改时间",
+    "home.orderStarted": "开始时间",
+    "home.noConversationsDay": "暂无会话",
+    "home.messageCount": "{count} 条消息",
+    "home.modifiedAt": "修改",
+    "home.startedAt": "开始",
   },
 };
