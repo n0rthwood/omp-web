@@ -310,7 +310,7 @@ AgentSession in-process.
 
 ## Deployment Topology — where this repo runs
 
-This repo is deployed as a **fleet**: one gateway plus five remote omp-web
+This repo is deployed as a **fleet**: one gateway plus six remote omp-web
 instances, all `systemd --user` units, all serving port 5010. Full operator
 runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
 
@@ -323,6 +323,7 @@ runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
 | joysort109 | 172.30.3.109 | `omp-web.service` | remote |
 | gpu-dev | 172.30.3.202 | `omp-web.service` | remote; also runs 7 unrelated pm2 apps — never touch its pm2 |
 | joysort39 | 172.30.3.39 | `omp-web.service` | remote |
+| joysort110 | 172.30.3.110 | `omp-web.service` | remote; box hostname is `training2`, registered as `joysort110`; pre-existing omp install with session history (agent.db preserved, upgraded 17.3.0 → 17.3.4, 2026-08-19) |
 
 The gateway reaches each remote through the fleet proxy
 (`/api/machines/<id>/api/*`), registered in `~/.omp/agent/omp-web-machines.json`

@@ -1,8 +1,8 @@
 # The fleet gateway in omp-web
 
-For the concrete deployed fleet — the five-host topology, systemd units,
+For the concrete deployed fleet — the six-host topology, systemd units,
 per-host env layout, and day-2 operations (redeploy, rotate a password, add a
-sixth host) — see the operator runbook: [fleet-deployment.md](./fleet-deployment.md).
+new host) — see the operator runbook: [fleet-deployment.md](./fleet-deployment.md).
 
 ## What it is
 

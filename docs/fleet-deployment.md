@@ -1,6 +1,6 @@
 # Fleet deployment runbook
 
-Operator runbook for the concrete five-host omp-web fleet behind the gateway
+Operator runbook for the concrete six-host omp-web fleet behind the gateway
 at 172.30.3.123. This is a deployment/ops document — for the fleet gateway's
 API and proxy design, see [fleet.md](./fleet.md).
 
@@ -14,6 +14,11 @@ API and proxy design, see [fleet.md](./fleet.md).
 | 172.30.3.109 | joysort109 | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.202 | gpu-dev | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.39 | joysort39 | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.110 | joysort110 | remote | `main` | 5010 | `0.0.0.0` |
+
+`joysort110`'s box hostname is `training2` (it had a pre-existing omp install
+with session history; `agent.db`/`sessions/` were preserved when it joined the
+fleet on 2026-08-19 — only the binary and configs were refreshed).
 
 Every remote runs as a `systemd --user omp-web.service` unit, checked out from
 `~/omp/ompweb` on that host, built from `main`. The fleet feature was developed
@@ -202,7 +207,7 @@ systemctl --user status omp-web
    credential to be re-entered in the same request; it will not silently
    carry an old token to a new origin.
 
-## Adding a sixth host
+## Adding a new host
 
 Prerequisites, in order:
 
