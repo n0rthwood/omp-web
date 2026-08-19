@@ -37,8 +37,21 @@ export function localDayKey(date: Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-/** Groups sessions by their `modified` local day; within a day, most recent first. */
-export function groupSessionsByDay<S extends { modified: string }>(sessions: S[]): Map<string, S[]> {
+/** Within-day sort key: last activity (`modified`) or session start (`created`). */
+export type SessionOrderKey = "modified" | "created";
+
+/**
+ * Groups sessions by their `modified` local day (the calendar is an activity
+ * diary — day membership never changes with the order switch); within a day,
+ * most recent first by the chosen key. Sessions lacking `created` fall back
+ * to `modified` for sorting.
+ */
+export function groupSessionsByDay<S extends { modified: string; created?: string }>(
+  sessions: S[],
+  orderKey: SessionOrderKey = "modified",
+): Map<string, S[]> {
+  const sortValue = (session: S): string =>
+    orderKey === "created" ? session.created ?? session.modified : session.modified;
   const grouped = new Map<string, S[]>();
   for (const session of sessions) {
     const key = localDayKey(new Date(session.modified));
@@ -47,7 +60,11 @@ export function groupSessionsByDay<S extends { modified: string }>(sessions: S[]
     else grouped.set(key, [session]);
   }
   for (const bucket of grouped.values()) {
-    bucket.sort((a, b) => (a.modified < b.modified ? 1 : a.modified > b.modified ? -1 : 0));
+    bucket.sort((a, b) => {
+      const av = sortValue(a);
+      const bv = sortValue(b);
+      return av < bv ? 1 : av > bv ? -1 : 0;
+    });
   }
   return grouped;
 }
