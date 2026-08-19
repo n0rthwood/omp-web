@@ -14,6 +14,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import {
   daysOfWeek,
+  stackedDayOrder,
   groupSessionsByDay,
   localDayKey,
   weekStartDate,
@@ -157,6 +158,9 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
 
   const days = useMemo(() => daysOfWeek(start), [start]);
   const byDay = useMemo(() => groupSessionsByDay(sessions, orderKey), [sessions, orderKey]);
+  // Narrow/stacked view orders days by recency (latest conversations on
+  // top, empty placeholder days after) — see lib/calendar-week.ts #17.
+  const stackedDays = useMemo(() => stackedDayOrder(days, byDay), [days, byDay]);
   const todayKey = localDayKey(new Date());
 
   const weekLabel = useMemo(() => {
@@ -424,7 +428,7 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
         </div>
       ) : (
         <>
-          {days.map((day) => {
+          {stackedDays.map((day) => {
             const key = localDayKey(day);
             const daySessions = byDay.get(key) ?? [];
             const isToday = key === todayKey;

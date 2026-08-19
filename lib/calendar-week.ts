@@ -30,6 +30,18 @@ export function daysOfWeek(weekStart: Date): Date[] {
   return Array.from({ length: 7 }, (_, i) => shiftDays(weekStart, i));
 }
 
+/**
+ * Stacked (narrow) Home order: days that have conversations, newest day
+ * first — so the latest conversations sit on top — followed by the empty
+ * placeholder days in calendar order (issue #17).
+ */
+export function stackedDayOrder<S>(days: Date[], byDay: Map<string, S[]>): Date[] {
+  return days
+    .filter((day) => (byDay.get(localDayKey(day)) ?? []).length > 0)
+    .reverse()
+    .concat(days.filter((day) => (byDay.get(localDayKey(day)) ?? []).length === 0));
+}
+
 /** `YYYY-MM-DD` for a Date in local time (calendar-day identity). */
 export function localDayKey(date: Date): string {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
