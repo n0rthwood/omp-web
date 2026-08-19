@@ -97,6 +97,7 @@ export function HomePage() {
       ?? groups.find((g) => g.projects.size > 0)
       ?? groups[0];
     setSelectedMachineId(best.machineId);
+    setSelectedProject(null);
   }, [groups, selectedMachineId]);
 
   const selectedGroup = useMemo(
@@ -183,7 +184,8 @@ export function HomePage() {
               type="button"
               onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); }}
               style={{ ...chipStyle(group.machineId === selectedMachineId), ...(group.offline ? { opacity: 0.55 } : {}) }}
-              title={group.machineName}
+              title={group.offline ? `${group.machineName} (${t("home.machineOffline")})` : group.machineName}
+              aria-pressed={group.machineId === selectedMachineId}
             >
               {group.machineName}
               {group.offline && <span style={{ color: "var(--danger)", marginLeft: 6 }}>·</span>}
@@ -201,6 +203,7 @@ export function HomePage() {
                 type="button"
                 onClick={() => setSelectedProject(root)}
                 title={`${selectedGroup.machineName} · ${root}`}
+                aria-pressed={root === selectedProject}
                 style={chipStyle(root === selectedProject)}
               >
                 {basename(root)} {count}

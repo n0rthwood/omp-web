@@ -10,7 +10,7 @@
  * Narrower: day sections stacked vertically, full unclamped titles.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import {
   daysOfWeek,
@@ -134,6 +134,7 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
   const [orderKey, setOrderKey] = useState<SessionOrderKey>("modified");
   const [popover, setPopover] = useState<PopoverState | null>(null);
   const popoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => () => {
     if (popoverTimerRef.current) clearTimeout(popoverTimerRef.current);
@@ -190,6 +191,38 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
     setPopover(null);
   };
 
+  useEffect(() => {
+    if (!wide) closePopover();
+  }, [wide]);
+
+  useEffect(() => {
+    if (popover === null) return;
+    window.addEventListener("scroll", closePopover, { capture: true, passive: true });
+    window.addEventListener("resize", closePopover, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", closePopover, { capture: true });
+      window.removeEventListener("resize", closePopover);
+    };
+  }, [popover]);
+
+  useLayoutEffect(() => {
+    if (!popover) return;
+    const el = popoverRef.current;
+    if (!el) return;
+    const vh = window.innerHeight || 800;
+    const rect = el.getBoundingClientRect();
+    let clampedTop: number | null = null;
+    if (rect.bottom > vh) {
+      clampedTop = Math.max(8, vh - rect.height - 8);
+    } else if (rect.top < 8) {
+      clampedTop = 8;
+    }
+    if (clampedTop !== null && (popover.top !== clampedTop || popover.placeAbove)) {
+      const nextTop = clampedTop;
+      setPopover((prev) => (prev ? { ...prev, top: nextTop, placeAbove: false } : prev));
+    }
+  }, [popover]);
+
   const dayLabel = (day: Date) =>
     new Intl.DateTimeFormat(locale, wide
       ? { weekday: "short", day: "numeric" }
@@ -207,9 +240,10 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
         type="button"
         onClick={() => navigate({ machineId, project, session: session.id }, { history: "push" })}
         onMouseEnter={wide ? (event) => openPopover(session, event.currentTarget) : undefined}
-        onMouseLeave={wide ? closePopover : undefined}
+        onMouseLeave={wide ? (event) => { if (event.currentTarget !== document.activeElement) closePopover(); } : undefined}
         onFocus={wide ? (event) => openPopover(session, event.currentTarget) : undefined}
-        onBlur={wide ? closePopover : undefined}
+        onBlur={wide ? (event) => { if (!event.currentTarget.matches(":hover")) closePopover(); } : undefined}
+        aria-describedby={popover && popover.session.id === session.id ? "home-card-popover" : undefined}
         title={name}
         style={{
           width: "100%",
@@ -263,6 +297,8 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
 
   const popoverElement = popover ? (
     <div
+      ref={popoverRef}
+      id="home-card-popover"
       role="tooltip"
       style={{
         position: "fixed",
@@ -339,6 +375,7 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
               key={key}
               type="button"
               onClick={() => setOrderKey(key)}
+              aria-pressed={orderKey === key}
               style={{
                 height: 28,
                 padding: "0 10px",
