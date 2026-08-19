@@ -38,9 +38,10 @@ export function HomePage() {
   const { machines, loading: machinesLoading } = useMachines();
   const { fetchSessionsFor } = useSessionList();
   const [groups, setGroups] = useState<MachineProjects[] | null>(null);
-  const [selected, setSelected] = useState<{ machineId: string; project: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const loadGenerationRef = useRef(0);
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
 
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
@@ -87,25 +88,80 @@ export function HomePage() {
     void load(reloadKey > 0);
   }, [load, reloadKey]);
 
+  // Auto-select the machine (first online one with projects) once groups load.
+  useEffect(() => {
+    if (!groups || groups.length === 0) return;
+    if (groups.some((g) => g.machineId === selectedMachineId)) return;
+    const best =
+      groups.find((g) => !g.offline && g.projects.size > 0)
+      ?? groups.find((g) => g.projects.size > 0)
+      ?? groups[0];
+    setSelectedMachineId(best.machineId);
+  }, [groups, selectedMachineId]);
+
   const selectedGroup = useMemo(
-    () => groups?.find((g) => g.machineId === selected?.machineId) ?? null,
-    [groups, selected],
+    () => groups?.find((g) => g.machineId === selectedMachineId) ?? null,
+    [groups, selectedMachineId],
   );
+  const projectRoots = useMemo(
+    () => (selectedGroup ? [...selectedGroup.projects.keys()] : []),
+    [selectedGroup],
+  );
+
+  // Auto-select the machine's most-recent project (Map preserves recency order).
+  useEffect(() => {
+    if (!selectedGroup) return;
+    if (projectRoots.length === 0) {
+      if (selectedProject !== null) setSelectedProject(null);
+      return;
+    }
+    if (!selectedProject || !selectedGroup.projects.has(selectedProject)) {
+      setSelectedProject(projectRoots[0]);
+    }
+  }, [selectedGroup, projectRoots, selectedProject]);
+
   const selectedSessions = useMemo(
-    () => (selected && selectedGroup ? selectedGroup.projects.get(selected.project) ?? [] : []),
-    [selected, selectedGroup],
+    () => (selectedGroup && selectedProject ? selectedGroup.projects.get(selectedProject) ?? [] : []),
+    [selectedGroup, selectedProject],
   );
+
+  const chipRowStyle: React.CSSProperties = {
+    display: "flex",
+    gap: 6,
+    overflowX: "auto",
+    paddingBottom: 2,
+    scrollbarWidth: "thin",
+  };
+
+  const chipStyle = (active: boolean): React.CSSProperties => ({
+  flexShrink: 0,
+  height: 26,
+  padding: "0 11px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: active ? 600 : 500,
+  cursor: "pointer",
+  background: active ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg-hover)",
+  color: active ? "var(--accent)" : "var(--text-muted)",
+  border: `1px solid ${active ? "color-mix(in srgb, var(--accent) 45%, var(--border))" : "var(--border)"}`,
+  whiteSpace: "nowrap",
+  });
 
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 100,
       background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)",
-      overflowY: "auto",
+      display: "flex", flexDirection: "column",
     }}>
-      <div style={{ maxWidth: 760, margin: "0 auto", padding: "48px 28px 80px" }}>
-        <header style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "-0.01em" }}>
-            {t("home.welcome.title")}
+      <header style={{
+        flexShrink: 0,
+        borderBottom: "1px solid var(--border)",
+        background: "var(--bg-panel)",
+        padding: "14px 20px 10px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.01em" }}>
+            {t("home.title")}
           </h1>
           <div style={{ flex: 1 }} />
           <button
@@ -114,85 +170,72 @@ export function HomePage() {
             title={t("home.refresh")}
             style={{
               background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text-muted)",
-              cursor: "pointer", height: 30, padding: "0 12px", borderRadius: 7, fontSize: 12.5, flexShrink: 0,
+              cursor: "pointer", height: 28, padding: "0 12px", borderRadius: 7, fontSize: 12.5, flexShrink: 0,
             }}
           >
             {t("home.refresh")}
           </button>
-        </header>
-        <p style={{ margin: "0 0 8px", color: "var(--text-muted)", fontSize: 13.5, lineHeight: 1.5 }}>
-          {t("home.welcome.body")}
-        </p>
-
-        {selected ? (
-          <>
+        </div>
+        <div style={chipRowStyle}>
+          {groups?.map((group) => (
             <button
+              key={group.machineId}
               type="button"
-              onClick={() => setSelected(null)}
-              style={{
-                background: "none", border: "none", color: "var(--accent)", cursor: "pointer",
-                fontSize: 12.5, padding: "8px 0 0",
-              }}
+              onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); }}
+              style={{ ...chipStyle(group.machineId === selectedMachineId), ...(group.offline ? { opacity: 0.55 } : {}) }}
+              title={group.machineName}
             >
-              ‹ {t("home.quickAccess")}
+              {group.machineName}
+              {group.offline && <span style={{ color: "var(--danger)", marginLeft: 6 }}>·</span>}
             </button>
-            <div style={{ margin: "24px 0 0", color: "var(--text-dim)", fontSize: 12.5 }}>
-              {selectedGroup?.machineName} · {selected.project}
-            </div>
-            <HomeCalendar machineId={selected.machineId} project={selected.project} sessions={selectedSessions} />
-          </>
+          ))}
+          {groups === null && <span style={{ color: "var(--text-dim)", fontSize: 12.5 }}>…</span>}
+        </div>
+        <div style={{ ...chipRowStyle, marginTop: 6 }}>
+          {selectedGroup && projectRoots.length > 0 && projectRoots.map((root) => {
+            const count = selectedGroup.projects.get(root)?.length ?? 0;
+            const last = selectedGroup.lastActivityByProject.get(root);
+            return (
+              <button
+                key={root}
+                type="button"
+                onClick={() => setSelectedProject(root)}
+                title={`${selectedGroup.machineName} · ${root}`}
+                style={chipStyle(root === selectedProject)}
+              >
+                {basename(root)} {count}
+                {last && <span style={{ color: "var(--text-dim)", marginLeft: 6, fontWeight: 400 }}>
+                  {formatRelativeTime(new Date(last), locale)}
+                </span>}
+              </button>
+            );
+          })}
+          {selectedGroup?.offline && (
+            <span style={{ fontSize: 11.5, color: "var(--danger)", alignSelf: "center" }}>
+              {t("home.machineOffline")}
+            </span>
+          )}
+          {selectedGroup && !selectedGroup.offline && projectRoots.length === 0 && (
+            <span style={{ fontSize: 12.5, color: "var(--text-dim)", alignSelf: "center" }}>
+              {t("home.noProjects")}
+            </span>
+          )}
+        </div>
+      </header>
+      <main style={{ flex: 1, overflowY: "auto", width: "100%", maxWidth: 1440, margin: "0 auto", padding: "16px 20px 60px" }}>
+        {selectedGroup && selectedProject ? (
+          <HomeCalendar
+            machineId={selectedGroup.machineId}
+            machineName={selectedGroup.machineName}
+            project={selectedProject}
+            sessions={selectedSessions}
+          />
         ) : (
-          <>
-            <h2 style={{ margin: "28px 0 10px", color: "var(--text-muted)", fontSize: 13, fontWeight: 600, letterSpacing: "0.01em" }}>
-              {t("home.quickAccess")}
-            </h2>
-            {groups === null && <div style={{ color: "var(--text-dim)", fontSize: 13 }}>…</div>}
-            {groups?.map((group) => (
-              <div key={group.machineId} style={{ marginBottom: 22 }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{group.machineName}</span>
-                  {group.offline && (
-                    <span style={{ fontSize: 11.5, color: "var(--danger)", border: "1px solid var(--danger)", borderRadius: 999, padding: "0 7px" }}>
-                      {t("home.machineOffline")}
-                    </span>
-                  )}
-                </div>
-                {group.projects.size === 0 && !group.offline && (
-                  <div style={{ color: "var(--text-dim)", fontSize: 12.5 }}>{t("home.noProjects")}</div>
-                )}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}>
-                  {[...group.projects.entries()].map(([root, projectSessions]) => {
-                    const last = group.lastActivityByProject.get(root) ?? projectSessions[0]?.modified;
-                    return (
-                      <button
-                        key={root}
-                        type="button"
-                        onClick={() => setSelected({ machineId: group.machineId, project: root })}
-                        title={`${group.machineName} · ${root}`}
-                        aria-label={t("home.openProject")}
-                        style={{
-                          textAlign: "left", background: "var(--bg-panel)", border: "1px solid var(--border)",
-                          borderRadius: 10, padding: "12px 14px", cursor: "pointer",
-                          display: "flex", flexDirection: "column", gap: 4,
-                        }}
-                        onMouseEnter={(event) => { event.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 40%, var(--border))"; }}
-                        onMouseLeave={(event) => { event.currentTarget.style.borderColor = "var(--border)"; }}
-                      >
-                        <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {basename(root)}
-                        </span>
-                        <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
-                          {projectSessions.length} · {last ? formatRelativeTime(new Date(last), locale) : ""}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </>
+          <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
+            {groups === null ? "…" : t("home.noProjects")}
+          </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }
