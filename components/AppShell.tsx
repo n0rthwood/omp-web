@@ -2,10 +2,11 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { SessionSidebar } from "./SessionSidebar";
+import { SessionSidebar, ToolbarIconButton } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
+import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { TerminalPanel } from "./TerminalPanel";
 import { TabBar, type Tab } from "./TabBar";
 import { TerminalIcon } from "./FileIcons";
@@ -112,6 +113,10 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   );
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
+  const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [changesCount, setChangesCount] = useState(0);
+  const [changesCollapsed, setChangesCollapsed] = useState(true);
+  const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines">("models");
@@ -191,6 +196,8 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const languageBtnRef = useRef<HTMLButtonElement>(null);
+  const fileExplorerRef = useRef<FileExplorerHandle>(null);
+  const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
@@ -248,10 +255,10 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | "files" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language") => {
+  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language" | "files") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
@@ -288,6 +295,26 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     if (languageBtnRef.current) ro.observe(languageBtnRef.current);
     return () => ro.disconnect();
   }, [activeTopPanel, isMobile]);
+
+  // Close the open top-bar dropdown on click-outside or Escape — every
+  // panel (including its trigger button) lives inside topBarRef's subtree,
+  // even though the dropdown itself renders position: fixed.
+  useEffect(() => {
+    if (!activeTopPanel) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (topBarRef.current?.contains(e.target as Node)) return;
+      setActiveTopPanel(null);
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setActiveTopPanel(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeTopPanel]);
 
   // Right panel — file tabs and terminal tabs share one TabBar/Tab[] array.
   // A terminal tab carries kind:"terminal" + terminalId (server-side id).
@@ -941,6 +968,12 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
 
+  // The floating Files panel follows the active browsing cwd (worktree
+  // switches update `activeCwd` unconditionally, even within the same
+  // project — see handleCwdChange), falling back to the session/new-session
+  // cwd only before the first cwd echo lands.
+  const explorerCwd = activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? null;
+
   // A terminal that has just become the active tab must not sit behind a
   // collapsed panel: xterm cannot measure itself there, and the panel header's
   // own controls end up outside the viewport. Closing the last tab schedules
@@ -983,11 +1016,6 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
-        explorerRefreshKey={explorerRefreshKey}
-        onExplorerRefresh={handleExplorerRefresh}
-        onAtMention={handleAtMention}
-        onAtMentions={handleAtMentions}
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onOpenMachinesSettings={() => { setSettingsInitialSection("machines"); setSettingsConfigOpen(true); }}
       />
@@ -1430,6 +1458,32 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
                 hasSession
               />
               <button
+                onClick={() => toggleTopPanel("files")}
+                title={translate("files.toggle")}
+                aria-label={translate("files.toggle")}
+                aria-haspopup="true"
+                aria-expanded={activeTopPanel === "files"}
+                aria-pressed={activeTopPanel === "files"}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  height: "100%", padding: "0 12px",
+                  background: activeTopPanel === "files" ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  borderTop: activeTopPanel === "files" ? "2px solid var(--accent)" : "2px solid transparent",
+                  borderRight: "1px solid var(--border)",
+                  cursor: "pointer",
+                  color: activeTopPanel === "files" ? "var(--text)" : "var(--text-muted)",
+                  fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "files" ? "var(--text)" : "var(--text-muted)"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: activeTopPanel === "files" ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+                  <path d="M4 4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8L12 4Z" />
+                </svg>
+                 {!isMobile && <span>{translate("files.toggle")}</span>}
+              </button>
+              <button
                 ref={systemBtnRef}
                 onClick={() => toggleTopPanel("system")}
                  title={translate("system.prompt")}
@@ -1562,7 +1616,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
             );
           })()}
           {/* Top panel dropdown — shared, only one active at a time */}
-          {activeTopPanel && topPanelPos && (
+          {activeTopPanel && activeTopPanel !== "files" && topPanelPos && (
             <div style={{
               position: "fixed",
               top: topPanelPos.top,
@@ -1814,6 +1868,104 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {/* Files panel — reuses the same anchor-rect/ResizeObserver
+              positioning, but at a lower z-index than the fixed top-right
+              terminal/panel-toggle cluster (300) it can visually overlap. */}
+          {activeTopPanel === "files" && topPanelPos && (
+            <div style={{
+              position: "fixed",
+              top: topPanelPos.top,
+              left: topPanelPos.left,
+              width: topPanelPos.width,
+              maxHeight: `calc(100dvh - ${topPanelPos.top}px)`,
+              overflow: "hidden",
+              zIndex: 250,
+              background: "var(--bg-panel)",
+              borderBottom: "1px solid var(--border)",
+              display: "flex",
+              flexDirection: "column",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)" }}>
+                <div style={{
+                  flex: 1, padding: "6px 10px",
+                  color: "var(--text-muted)", fontSize: 11, fontWeight: 600,
+                  letterSpacing: "0.05em", textTransform: "uppercase",
+                }}>
+                  {translate("files.explorer")}
+                </div>
+                {changesCount > 0 && (
+                  <ToolbarIconButton
+                    onClick={() => setChangesCollapsed((v) => !v)}
+                    title={translate("sidebar.changedFiles", { count: changesCount })}
+                    ariaPressed={!changesCollapsed}
+                    color={changesCollapsed ? "var(--text-dim)" : "var(--accent)"}
+                    background={changesCollapsed ? "none" : "var(--bg-selected)"}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M3 12h6" />
+                      <path d="M15 12h6" />
+                    </svg>
+                  </ToolbarIconButton>
+                )}
+                <ToolbarIconButton
+                  onClick={() => fileExplorerRef.current?.openUploadPicker()}
+                  disabled={explorerUploadBusy}
+                  title={translate("sidebar.uploadFilesTitle")}
+                  color="var(--text-dim)"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <path d="m17 8-5-5-5 5" />
+                    <path d="M12 3v12" />
+                  </svg>
+                </ToolbarIconButton>
+                <ToolbarIconButton
+                  onClick={() => {
+                    handleExplorerRefresh();
+                    setExplorerRefreshDone(true);
+                    if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
+                    explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
+                  }}
+                  title={translate("sidebar.refreshExplorer")}
+                  skipHover={explorerRefreshDone}
+                  color={explorerRefreshDone ? "#4ade80" : "var(--text-dim)"}
+                  background={explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none"}
+                  marginRight={6}
+                >
+                  {explorerRefreshDone ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                    </svg>
+                  )}
+                </ToolbarIconButton>
+              </div>
+              <div style={{ overflowY: "auto", overflowX: "hidden" }}>
+                {explorerCwd ? (
+                  <FileExplorer
+                    ref={fileExplorerRef}
+                    cwd={explorerCwd}
+                    onOpenFile={handleOpenFile}
+                    refreshKey={explorerRefreshKey}
+                    onAtMention={handleAtMention}
+                    onAtMentions={handleAtMentions}
+                    onUploadBusyChange={setExplorerUploadBusy}
+                    changesCollapsed={changesCollapsed}
+                    onChangesCountChange={setChangesCount}
+                  />
+                ) : (
+                  <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                    {translate("files.selectSession")}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
