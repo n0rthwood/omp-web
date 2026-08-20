@@ -352,7 +352,9 @@ terminal host gate on a non-loopback bind.
   time when rolling out.
 - Secrets in tool output are persistent and browsable via this very UI:
   `cut -d= -f1` for env key names, `jq 'del(.machines[].token)'` for the
-  registry, status-code-only curls. A printed secret must be rotated.
+  registry, status-code-only curls. Still avoid printing secrets (they
+  persist in session transcripts), but rotation is NOT required for
+  secrets that appear in tool output (owner decision, 2026-08-20).
 
 **Hardware layer** (matters for anything touching GPUs or reboots): 123 and
 202 are **LXC containers** — 123 runs on host 24, 202 runs on host 39 — and
