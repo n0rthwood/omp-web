@@ -41,7 +41,21 @@ export async function POST(
       return NextResponse.json({ title: null, skipped: true });
     }
 
-    await session.inner.sessionManager.setSessionName(result.title, "auto");
+    // The manual button is an explicit user action: write with source "user"
+    // so it force-overwrites (the SDK no-ops "auto" over "user") and the
+    // result is protected from future auto re-titling.
+    const written = await session.inner.sessionManager.setSessionName(
+      result.title,
+      "user",
+    );
+    if (!written) {
+      // A source-"user" write is only refused when the session was released
+      // (or the cleaned title came back empty) — same shape as the check above.
+      return NextResponse.json(
+        { error: "The session was closed while its title was being generated. Please try again." },
+        { status: 409 },
+      );
+    }
     invalidateSessionListCache();
     return NextResponse.json({ title: result.title });
   } catch (error) {

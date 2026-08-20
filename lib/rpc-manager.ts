@@ -30,6 +30,7 @@ import { readDefaultModelRole } from "./model-roles";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
+import { generateSessionTitle, shouldAutoGenerateTitle } from "./session-title";
 import type { SlashCommandInfo } from "./omp-types";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
 import type {
@@ -584,6 +585,46 @@ export class AgentSessionWrapper {
     for (const l of this.listeners) l(event);
   }
 
+  /**
+   * Auto-title a browser session after its first real user prompt completes
+   * (issue #20). Mirrors the SDK's `maybeStartTitleGeneration` gate and the
+   * manual "Generate title" route's own generation path (session-title.ts),
+   * but never force-overwrites: `shouldAutoGenerateTitle` only proceeds on
+   * an unnamed session, and the name is re-checked after generation so a
+   * concurrent manual click always wins. Runs entirely server-side — this is
+   * the remote's own in-process AgentSession, so a fleet-proxied session's
+   * title lands in the remote's own session file with no extra plumbing.
+   */
+  private async maybeAutoGenerateTitle(message: string): Promise<void> {
+    try {
+      const sessionManager = this.inner.sessionManager;
+      const commandNames = new Set(
+        (this.inner.extensionRunner?.getRegisteredCommands() ?? []).map((command) => command.name),
+      );
+      const eligible = shouldAutoGenerateTitle({
+        message,
+        hasSessionName: Boolean(sessionManager.getSessionName()),
+        piNoTitle: process.env.PI_NO_TITLE,
+        extensionCommandNames: commandNames,
+      });
+      if (!eligible) return;
+
+      const result = await generateSessionTitle(this.inner, message);
+      if (!result || !this.isAlive()) return;
+      // Re-check after generation: a concurrent manual "Generate title"
+      // click may have already named the session while this was in flight.
+      if (sessionManager.getSessionName()) return;
+      const applied = await sessionManager.setSessionName(result.title, "auto");
+      if (!applied) return;
+
+      invalidateSessionListCache();
+      this.emit({ type: "session_renamed", title: result.title, sessionId: this.inner.sessionId });
+      notifyRunningChange();
+    } catch (error) {
+      console.error("[pi-web] auto title generation failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
@@ -660,7 +701,10 @@ export class AgentSessionWrapper {
         }).then(() => {
           this.promptRunning = false;
           this.resetIdleTimer();
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
+          if (!streamingBehavior) {
+            this.emit({ type: "prompt_done" });
+            void this.maybeAutoGenerateTitle(command.message as string);
+          }
           notifyRunningChange();
         }).catch((error) => {
           this.promptRunning = false;

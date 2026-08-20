@@ -697,6 +697,16 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     });
   }, [deliverSessionNotification, selectedSession, translate]);
 
+  // Relayed from the server's "session_renamed" event (issue #20 auto-title):
+  // mirrors handleAutoName's success path so the header/stats panel of the
+  // currently-viewed session and the sidebar row both pick up the generated
+  // title without a manual refresh.
+  const handleSessionRenamed = useCallback((title: string) => {
+    sessionList.bumpRefreshKey();
+    setSelectedSession((current) => current ? { ...current, name: title } : current);
+    setSessionStats((current) => current ? { ...current, sessionName: title } : current);
+  }, [sessionList]);
+
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
     if (!sessionId || autoNameStatus.kind === "naming") return;
@@ -1821,6 +1831,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               onAttentionNeeded={handleAttentionNeeded}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
+              onSessionRenamed={handleSessionRenamed}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}

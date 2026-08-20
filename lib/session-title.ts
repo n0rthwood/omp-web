@@ -1,6 +1,7 @@
 import { completeSimple, type Api, type Model } from "@oh-my-pi/pi-ai";
 import { resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { generateSessionTitle as generateOmpSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { isLowSignalTitleInput } from "@oh-my-pi/pi-coding-agent/tiny/text";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionLike } from "./omp-types";
 
@@ -30,6 +31,7 @@ export interface GeneratedSessionTitle {
  */
 const WEB_TITLE_SYSTEM_PROMPT = [
   "Write a concise 3-10 word title for the task in <user>.",
+  "Title the goal or outcome the task is working toward — never quote, restate, or lightly reword the user's own question or phrasing.",
   "Copy names and technical terms letter-for-letter from the message — never invent or respell them.",
   "When the user's message references GitHub issues, append an issue annotation suffix inside the same <title> tags, after the human title:",
   "- the issue(s) this task is mainly about: bare numbers prefixed with #, joined by \" · \" — e.g. #12 or #12 · #13;",
@@ -41,6 +43,7 @@ const WEB_TITLE_SYSTEM_PROMPT = [
 
 const WEB_TITLE_HUMAN_ONLY_PROMPT = [
   "Write a concise 3-10 word title for the task in <user>.",
+  "Title the goal or outcome the task is working toward — never quote, restate, or lightly reword the user's own question or phrasing.",
   "Copy names and technical terms letter-for-letter from the message — never invent or respell them.",
   "Keep this human title under 60 characters; issue annotations are appended separately.",
   "Do not include GitHub issue numbers or parenthesized issue annotations.",
@@ -50,6 +53,68 @@ const WEB_TITLE_HUMAN_ONLY_PROMPT = [
 /** The SDK's appended marker instruction tells the model to answer <title>none</title> for no-task; treat that literal as a decline. */
 export function isDeclinedTitle(title: string): boolean {
   return title.toLowerCase() === "none";
+}
+
+/**
+ * Registered extension slash-command names visible to a session (e.g. from
+ * `AgentSessionLike.extensionRunner.getRegisteredCommands()`), kept as a
+ * plain set so {@link shouldAutoGenerateTitle} stays pure and unit-testable
+ * without an `AgentSessionLike` fixture.
+ */
+export interface AutoTitleGateInput {
+  /** The literal text of the first real user submission. */
+  message: string;
+  /**
+   * True once the session already carries a name, from either "user" or
+   * "auto" source. The SDK gate skips re-titling on this alone
+   * (agent-session.ts:6370); the web auto path mirrors it — only an unnamed
+   * session is eligible. The manual "Generate title" button bypasses this
+   * gate entirely to force-regenerate.
+   */
+  hasSessionName: boolean;
+  /**
+   * `$env.PI_NO_TITLE` in the SDK gate; omp-web runs AgentSessions
+   * in-process, so `process.env.PI_NO_TITLE` is the same value.
+   */
+  piNoTitle: string | undefined;
+  /** Extension-registered slash-command names visible to the session. */
+  extensionCommandNames: ReadonlySet<string>;
+}
+
+/**
+ * Mirrors the SDK's local-extension-command check
+ * (agent-session.ts:6364-6369): a `/name` or `/name arg…` submission whose
+ * `name` resolves to a registered extension command is a command
+ * invocation, not a task description, and must never drive a title.
+ */
+function isLocalExtensionCommand(message: string, commandNames: ReadonlySet<string>): boolean {
+  if (!message.startsWith("/")) return false;
+  const space = message.indexOf(" ");
+  const name = space === -1 ? message.slice(1) : message.slice(1, space);
+  return name.length > 0 && commandNames.has(name);
+}
+
+/**
+ * Whether a browser session's first real user message should trigger
+ * automatic title generation (issue #20). Mirrors
+ * `AgentSession.maybeStartTitleGeneration`'s skip gates
+ * (agent-session.ts:6363-6372) so the web trigger matches CLI/TUI: skip a
+ * local extension command, a session that already has a name, `PI_NO_TITLE`,
+ * and low-signal openers (greetings, acks, bare numbers — the SDK's own
+ * {@link isLowSignalTitleInput}).
+ *
+ * Pure and side-effect free. A passing gate only means "eligible to
+ * generate" — the caller still must not force-overwrite: re-check
+ * `hasSessionName` after generation completes, since a concurrent manual
+ * click (or a second call racing this one) may have named the session while
+ * generation was in flight.
+ */
+export function shouldAutoGenerateTitle(input: AutoTitleGateInput): boolean {
+  if (input.hasSessionName) return false;
+  if (input.piNoTitle) return false;
+  if (isLocalExtensionCommand(input.message, input.extensionCommandNames)) return false;
+  if (isLowSignalTitleInput(input.message)) return false;
+  return true;
 }
 
 /** Plain text of a session message, ignoring images and tool blocks. */
@@ -235,12 +300,21 @@ export function truncateTitle(value: string): string {
  * same as one generated in the TUI and never burns the session's primary model.
  * Returns `null` when omp declines to title — greetings and other low-signal
  * first messages are deliberately left unnamed until the next real turn.
+ *
+ * @param overrideMessage - The exact text to title from, bypassing the
+ *   session-history lookup below. The auto-title trigger (issue #20) passes
+ *   the literal message that just made {@link shouldAutoGenerateTitle} pass —
+ *   mirroring the SDK, which titles from the current submission, not a
+ *   history-derived "first" turn. Without it (the manual "Generate title"
+ *   button's usage), the title always sources from the session's actual
+ *   first user turn, even if an earlier low-signal opener left it unnamed.
  */
 export async function generateSessionTitle(
   session: AgentSessionLike,
+  overrideMessage?: string,
 ): Promise<GeneratedSessionTitle | null> {
-  const context = session.sessionManager.buildSessionContext();
-  const firstMessage = findFirstTitleSource(context.messages);
+  const firstMessage = overrideMessage
+    ?? findFirstTitleSource(session.sessionManager.buildSessionContext().messages);
   if (!firstMessage) {
     throw new Error("The session has no user messages to name");
   }
