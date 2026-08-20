@@ -22,7 +22,8 @@ const AUTH_MODES: Record<string, MachineAuthMode> = {
   none: "none",
 };
 
-const PROBE_TIMEOUT_MS = 10_000;
+// Kept below the browser's 20s health-probe deadline (MachineSwitcher/MachinesConfig) so the gateway's own verdict always lands first; WAN remotes need the longer window.
+const PROBE_TIMEOUT_MS = 15_000;
 
 /** Cap on any upstream body this route reads — a hostile remote must not be able
  *  to OOM a process that also hosts live agent sessions. Content-Length is not a

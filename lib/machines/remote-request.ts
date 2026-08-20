@@ -29,8 +29,9 @@ const PASSTHROUGH_RESPONSE_HEADERS: Record<string, true> = {
   "cache-control": true,
 };
 
-/** Bound on connect+headers for the upstream fetch; cleared once headers arrive, so streaming bodies are never cut off. */
-const UPSTREAM_HEADER_TIMEOUT_MS = 10_000;
+/** Bound on connect+headers for the upstream fetch; cleared once headers arrive, so streaming bodies are never cut off.
+ *  15s (WAN remotes over ZeroTier) so the browser's own 20s health-probe deadline never fires first. */
+const UPSTREAM_HEADER_TIMEOUT_MS = 15_000;
 
 function errorResponse(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {

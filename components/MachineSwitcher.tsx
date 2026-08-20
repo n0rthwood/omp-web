@@ -51,7 +51,8 @@ export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => 
   useEffect(() => {
     if (!machines.length) return;
     const controllers = machines.map(() => new AbortController());
-    const timers = controllers.map((controller) => window.setTimeout(() => controller.abort(), 6_000));
+    // Must exceed the gateway's upstream/probe deadline (15s) so the browser never pre-empts the gateway's own verdict; WAN remotes need the longer window.
+    const timers = controllers.map((controller) => window.setTimeout(() => controller.abort(), 20_000));
     void Promise.all(machines.map((machine, index) => probe(machine, controllers[index].signal).then((status) => [machine.id, status] as const)))
       .then((results) => setHealth(Object.fromEntries(results)))
       .finally(() => timers.forEach((timer) => window.clearTimeout(timer)));
