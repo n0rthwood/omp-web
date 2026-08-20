@@ -20,7 +20,7 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
-  buildEntriesFromFiles, buildAtInsertText, buildAtMentionText, extractAtQuery, filterFileEntries,
+  buildEntriesFromFiles, buildAtInsertText, buildFileAtMentionsText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
 import { apiPath } from "@/lib/api-path";
@@ -671,7 +671,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const uploadTextFiles = useCallback(async (files: File[]) => {
-    if (!onUploadFiles || files.length === 0 || uploadingFilesRef.current) return;
+    if (!onUploadFiles || files.length === 0 || uploadingFilesRef.current || isStreaming) return;
     const accepted: File[] = [];
     for (const file of files) {
       if (file.size > UPLOAD_CONFIRM_BYTES) {
@@ -688,11 +688,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setIsUploadingFiles(true);
     try {
       const result = await onUploadFiles(accepted);
-      for (const uploaded of result.files) {
-        insertTextAtCursor(buildAtMentionText(uploaded.path, false));
+      if (result.files.length) {
+        insertTextAtCursor(buildFileAtMentionsText(result.files.map((f) => f.path)));
       }
-      for (const failure of result.errors ?? []) {
-        showUploadError(`${t("chat.uploadFailed", { name: failure.name })}: ${failure.error}`);
+      if (result.errors?.length) {
+        showUploadError(result.errors.map((f) => `${t("chat.uploadFailed", { name: f.name })}: ${f.error}`).join("\n"));
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -701,7 +701,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       uploadingFilesRef.current = false;
       setIsUploadingFiles(false);
     }
-  }, [onUploadFiles, t, insertTextAtCursor, showUploadError]);
+  }, [onUploadFiles, t, insertTextAtCursor, showUploadError, isStreaming]);
 
   const processImageFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -824,6 +824,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
     if (isStreaming) return;
+    if (uploadingFilesRef.current) return;
     onAudioUnlock?.();
     if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
@@ -1064,6 +1065,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
     if (attachedImages.length) return;
+    if (uploadingFilesRef.current) return;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
@@ -1565,7 +1567,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div
             role="alert"
             style={{
-              marginBottom: 8, padding: "5px 10px",
+              marginBottom: 8, padding: "5px 10px", whiteSpace: "pre-line",
               background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.3)",
               borderRadius: 6, fontSize: 12, color: "#ef4444",
               display: "flex", alignItems: "center", gap: 6,
@@ -2058,7 +2060,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={(!value.trim() && !attachedImages.length) || isUploadingFiles}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
@@ -2144,8 +2146,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </button>
             {onUploadFiles && (
               <button
-                onClick={() => { if (!isUploadingFiles) textFileInputRef.current?.click(); }}
-                disabled={isUploadingFiles}
+                onClick={() => { if (!isUploadingFiles && !isStreaming) textFileInputRef.current?.click(); }}
+                disabled={isUploadingFiles || isStreaming}
                title={isUploadingFiles ? t("chat.uploading") : t("chat.attachFile")}
                 style={{
                   flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
@@ -2153,12 +2155,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   background: "none", border: "none",
                   borderRadius: 9,
                   color: "var(--text-muted)",
-                  cursor: isUploadingFiles ? "not-allowed" : "pointer",
-                  opacity: isUploadingFiles ? 0.5 : 1,
+                  cursor: (isUploadingFiles || isStreaming) ? "not-allowed" : "pointer",
+                  opacity: (isUploadingFiles || isStreaming) ? 0.5 : 1,
                   transition: "background 0.12s, color 0.12s",
                 }}
                 onMouseEnter={(e) => {
-                  if (isUploadingFiles) return;
+                  if (isUploadingFiles || isStreaming) return;
                   e.currentTarget.style.background = "var(--bg-hover)";
                   e.currentTarget.style.color = "var(--text)";
                 }}

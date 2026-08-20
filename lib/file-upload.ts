@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 
 export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip"] as const;
 export type UploadConflictStrategy = typeof UPLOAD_CONFLICT_STRATEGIES[number];
@@ -58,20 +59,20 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
   return { conflicts, nonReplaceable };
 }
 
-const BINARY_UPLOAD_EXTENSIONS: Record<string, true> = {
-  zip: true, png: true, jpg: true, jpeg: true, gif: true, webp: true, bmp: true, ico: true, tiff: true,
-  pdf: true, exe: true, dll: true, so: true, dylib: true, jar: true, class: true, war: true, ear: true,
-  woff: true, woff2: true, ttf: true, otf: true, eot: true, mp3: true, wav: true, flac: true, ogg: true,
-  mp4: true, mov: true, avi: true, mkv: true, webm: true, sqlite: true, db: true, wasm: true, bin: true,
-  iso: true, dmg: true, pkg: true, deb: true, rar: true, "7z": true, gz: true, xz: true, bz2: true, zst: true,
-};
+const BINARY_UPLOAD_EXTENSIONS = new Set([
+  "zip", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff",
+  "pdf", "exe", "dll", "so", "dylib", "jar", "class", "war", "ear",
+  "woff", "woff2", "ttf", "otf", "eot", "mp3", "wav", "flac", "ogg",
+  "mp4", "mov", "avi", "mkv", "webm", "sqlite", "db", "wasm", "bin",
+  "iso", "dmg", "pkg", "deb", "rar", "7z", "gz", "xz", "bz2", "zst",
+]);
 
 const UPLOAD_BINARY_HEADER_SNIFF_BYTES = 8192;
 
 /** Extension-based pre-judgment: known-binary file types, checked before reading content. */
 export function isBinaryUploadName(name: string): boolean {
   const ext = path.extname(name).slice(1).toLowerCase();
-  return ext in BINARY_UPLOAD_EXTENSIONS;
+  return BINARY_UPLOAD_EXTENSIONS.has(ext);
 }
 
 /**
@@ -103,4 +104,24 @@ export function nextAvailableUploadPath(dir: string, name: string): string {
     candidate = `${base}-${suffix}${ext}`;
   }
   return path.join(dir, candidate);
+}
+
+// Same shape as the uploads route's own session-id check (app/api/agent/[id]/uploads) —
+// looser than the strict UUID check session-file-references uses, since it must match
+// the id that route already used to name the on-disk upload directory.
+const UPLOAD_SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+/**
+ * True when `filePath` sits inside `sessionId`'s permanent upload directory
+ * (~/.omp/agent/uploads/<sessionId>/). Lets a file the user just uploaded to
+ * a session be reopened even before the SDK's @-mention pipeline has made it
+ * a recognized session reference.
+ */
+export function isPathInSessionUploadDir(filePath: string, sessionId: string | null): boolean {
+  if (sessionId == null || !UPLOAD_SESSION_ID_RE.test(sessionId)) return false;
+  const root = path.resolve(path.join(getAgentDir(), "uploads", sessionId));
+  const target = path.resolve(filePath);
+  if (target === root) return true;
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return target.startsWith(rootWithSep);
 }

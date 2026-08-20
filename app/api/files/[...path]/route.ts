@@ -23,8 +23,10 @@ import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { getWebUserOrSynthetic, type WebUser } from "@/lib/web-auth-context";
 import { isAdmin, isPathVisible, visibleRootsForUser } from "@/lib/web-visibility";
+import { isSessionVisibleToUser } from "@/lib/web-session-guard";
 import {
   inspectUploadTargets,
+  isPathInSessionUploadDir,
   parseUploadConflictStrategy,
   validateUploadFileNames,
 } from "@/lib/file-upload";
@@ -451,12 +453,19 @@ export async function GET(
     const { user, roots: allowedRoots } = resolved;
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
     // Session-referenced files stay visible only inside the user's projects —
-    // the reference shortcut must not bypass the visibility filter.
+    // the reference shortcut must not bypass the visibility filter. A file
+    // sitting in the session's own permanent upload directory is allowed the
+    // same way, without requiring the SDK's @-mention pipeline to have
+    // already recognized it as a transcript reference.
     const allowedBySessionReference =
       !allowedByRoot &&
       type !== "list" &&
-      (await isFilePathReferencedBySession(filePath, sessionId)) &&
-      (isAdmin(user) || isPathVisible(user, filePath));
+      sessionId != null &&
+      (
+        ((await isFilePathReferencedBySession(filePath, sessionId)) &&
+          (isAdmin(user) || isPathVisible(user, filePath))) ||
+        (isPathInSessionUploadDir(filePath, sessionId) && (await isSessionVisibleToUser(user, sessionId)))
+      );
     if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
