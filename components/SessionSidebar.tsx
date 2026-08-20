@@ -6,10 +6,17 @@ import { apiPath, machineStorageKey } from "@/lib/api-path";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
 import { loadRemovedProjects, normalizeProjectKey, saveRemovedProjects } from "@/lib/removed-projects";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
-import { skillExpansionToCommand } from "@/lib/slash-display";
+import { sessionDisplayTitle } from "@/lib/session-display-title";
+import { parseTitleAnnotations } from "@/lib/title-annotations";
+import { formatRelativeTime } from "@/lib/i18n/format";
+import { formatSize } from "./FileViewer";
+import { type SidebarMode } from "@/lib/sidebar-mode";
+import { useIssueTitleResolver, type IssueTitleResolver } from "@/hooks/useIssueTitleResolver";
 import { useI18n } from "@/hooks/useI18n";
 import { useWebUser } from "@/hooks/useWebUser";
 import { useSessionList } from "@/lib/session-list-context";
+import { SessionStrip } from "./SessionStrip";
+import { IssueChips, fullStamp } from "./HomeCalendar";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { OmpWordmark } from "./OmpWordmark";
 import { MachineSwitcher } from "./MachineSwitcher";
@@ -96,6 +103,12 @@ interface Props {
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
   onOpenMachinesSettings: () => void;
+  /** Tri-state width mode (issue #22) — owned by AppShell, which also
+   *  computes the effective `--sidebar-width` CSS var per mode and forces
+   *  "table" on mobile viewports. */
+  sidebarMode: SidebarMode;
+  onSidebarModeChange: (mode: SidebarMode) => void;
+  isMobile: boolean;
 }
 
 interface WorktreeEntry {
@@ -118,6 +131,10 @@ interface WorktreeState {
 const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
 const PROJECT_SESSION_LIMIT = 5;
 const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
+/** Row hover popover width (issue #22) — reuses the #17 HomeCalendar
+ *  positioning approach, opening to the right of the row instead of below
+ *  it, since sidebar rows run the full width of a narrow column. */
+const ROW_POPOVER_WIDTH = 320;
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -388,8 +405,8 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
-  const { t } = useI18n();
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onBackgroundTaskDone, onOpenMachinesSettings, sidebarMode, onSidebarModeChange, isMobile }: Props) {
+  const { t, locale } = useI18n();
   const { goHome } = useNavigation();
   const { user: webUser } = useWebUser();
   // The custom-cwd picker adds arbitrary project roots; user-role accounts are
@@ -792,6 +809,151 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         (worktree.branch ?? displayCwd(worktree.path, homeDir)).toLowerCase().includes(wtFilter.trim().toLowerCase()))
     : (worktreeState?.worktrees ?? []);
 
+  // ── Hover popover (issue #22) — reuses the #17 HomeCalendar popover
+  // pattern: anchored to the hovered row, viewport-clamped, closes on
+  // scroll/resize, a11y wired via aria-describedby + role="tooltip". Opens
+  // to the right of the row (not below, like HomeCalendar's grid cards)
+  // since sidebar rows span the full width of a narrow column.
+  const [rowPopover, setRowPopover] = useState<{ session: SessionInfo; left: number; top: number; placeAbove: boolean } | null>(null);
+  const rowPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rowPopoverRef = useRef<HTMLDivElement | null>(null);
+  const issueTitles = useIssueTitleResolver();
+
+  useEffect(() => () => {
+    if (rowPopoverTimerRef.current) clearTimeout(rowPopoverTimerRef.current);
+  }, []);
+
+  const openRowPopover = useCallback((session: SessionInfo, element: HTMLElement) => {
+    if (rowPopoverTimerRef.current) clearTimeout(rowPopoverTimerRef.current);
+    const rect = element.getBoundingClientRect();
+    rowPopoverTimerRef.current = setTimeout(() => {
+      const vw = window.innerWidth || 1280;
+      const vh = window.innerHeight || 800;
+      setRowPopover({
+        session,
+        left: Math.min(Math.max(8, rect.right + 8), Math.max(8, vw - ROW_POPOVER_WIDTH - 8)),
+        top: Math.max(8, rect.top),
+        placeAbove: rect.top + 280 > vh,
+      });
+    }, 80);
+  }, []);
+
+  const closeRowPopover = useCallback(() => {
+    if (rowPopoverTimerRef.current) clearTimeout(rowPopoverTimerRef.current);
+    setRowPopover(null);
+  }, []);
+
+  useEffect(() => {
+    if (rowPopover === null) return;
+    window.addEventListener("scroll", closeRowPopover, { capture: true, passive: true });
+    window.addEventListener("resize", closeRowPopover, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", closeRowPopover, { capture: true });
+      window.removeEventListener("resize", closeRowPopover);
+    };
+  }, [rowPopover, closeRowPopover]);
+
+  useLayoutEffect(() => {
+    if (!rowPopover) return;
+    const el = rowPopoverRef.current;
+    if (!el) return;
+    const vh = window.innerHeight || 800;
+    const rect = el.getBoundingClientRect();
+    let clampedTop: number | null = null;
+    if (rect.bottom > vh) clampedTop = Math.max(8, vh - rect.height - 8);
+    else if (rect.top < 8) clampedTop = 8;
+    if (clampedTop !== null && (rowPopover.top !== clampedTop || rowPopover.placeAbove)) {
+      const nextTop = clampedTop;
+      setRowPopover((prev) => (prev ? { ...prev, top: nextTop, placeAbove: false } : prev));
+    }
+  }, [rowPopover]);
+
+  useEffect(() => {
+    if (sidebarMode === "strip") closeRowPopover();
+  }, [sidebarMode, closeRowPopover]);
+
+  // Re-resolve the live session by id on every render so status/messageCount
+  // /modified stay fresh while hovered, instead of the frozen snapshot
+  // captured when the popover opened. Positioning (left/top/placeAbove)
+  // stays pinned to that snapshot.
+  const liveRowPopoverSession = rowPopover
+    ? sessionsForDisplay.find((session) => session.id === rowPopover.session.id) ?? rowPopover.session
+    : null;
+
+  const rowPopoverElement = rowPopover && liveRowPopoverSession ? (
+    <div
+      ref={rowPopoverRef}
+      id="sidebar-row-popover"
+      role="tooltip"
+      style={{
+        position: "fixed",
+        left: rowPopover.left,
+        ...(rowPopover.placeAbove
+          ? { top: rowPopover.top - 12, transform: "translateY(-100%)" }
+          : { top: rowPopover.top }),
+        width: Math.min(ROW_POPOVER_WIDTH, (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.9),
+        maxWidth: "90vw",
+        background: "var(--bg-panel)",
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        boxShadow: "0 8px 24px rgba(0,0,0,.25)",
+        padding: "12px 14px",
+        zIndex: 260,
+        pointerEvents: "none",
+        fontSize: 12.5,
+        color: "var(--text)",
+      }}
+    >
+      <div style={{ fontWeight: 600, lineHeight: 1.4, wordBreak: "break-word", marginBottom: 6 }}>
+        <IssueChips name={sessionDisplayTitle(liveRowPopoverSession)} />
+      </div>
+      <IssueTitleLines session={liveRowPopoverSession} issueTitles={issueTitles} />
+      <div style={{ height: 1, background: "var(--border)", margin: "8px 0" }} />
+      <div style={{ color: "var(--text-muted)", marginBottom: 2 }}>
+        {t("home.modifiedAt")}: {fullStamp(new Date(liveRowPopoverSession.modified))}
+      </div>
+      <div style={{ color: "var(--text-dim)", marginBottom: 6 }}>
+        · {formatRelativeTime(new Date(liveRowPopoverSession.modified), locale)}
+      </div>
+      <div style={{ color: "var(--text-muted)", marginBottom: 2 }}>
+        {t("home.startedAt")}: {fullStamp(new Date(liveRowPopoverSession.created))}
+      </div>
+      <div style={{ color: "var(--text-dim)", marginBottom: 6 }}>
+        · {formatRelativeTime(new Date(liveRowPopoverSession.created), locale)}
+      </div>
+      <div style={{ color: "var(--text-dim)", marginBottom: 2 }}>
+        {t("home.messageCount", { count: String(liveRowPopoverSession.messageCount) })}
+      </div>
+      <div style={{ color: "var(--text-dim)", marginBottom: 8 }}>
+        {t("sidebar.columnStatus")}: {t(`sidebar.status.${liveRowPopoverSession.status ?? "unknown"}`)}
+      </div>
+      <div style={{
+        color: "var(--text-dim)",
+        fontSize: 12,
+        lineHeight: 1.4,
+        overflow: "hidden",
+        display: "-webkit-box",
+        WebkitBoxOrient: "vertical",
+        WebkitLineClamp: 3,
+        wordBreak: "break-word",
+      }}>
+        {liveRowPopoverSession.firstMessage}
+      </div>
+    </div>
+  ) : null;
+
+  if (!isMobile && sidebarMode === "strip") {
+    return (
+      <SessionStrip
+        sessions={sessionsForDisplay}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={handleSelectSessionFromList}
+        onExpand={() => onSidebarModeChange("table")}
+      />
+    );
+  }
+
+  const treeMode: "table" | "drawer" = !isMobile && sidebarMode === "drawer" ? "drawer" : "table";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -980,6 +1142,40 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           </svg>
         </button>
         )}
+        {!isMobile && (
+          <button
+            type="button"
+            onClick={() => onSidebarModeChange(sidebarMode === "drawer" ? "table" : "drawer")}
+            title={t(sidebarMode === "drawer" ? "sidebar.closeDrawer" : "sidebar.openDrawer")}
+            aria-label={t(sidebarMode === "drawer" ? "sidebar.closeDrawer" : "sidebar.openDrawer")}
+            aria-pressed={sidebarMode === "drawer"}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 28,
+              height: 28,
+              padding: 0,
+              border: "none",
+              borderRadius: 6,
+              background: sidebarMode === "drawer" ? "var(--bg-selected)" : "var(--bg-hover)",
+              color: sidebarMode === "drawer" ? "var(--accent)" : "var(--text-muted)",
+              cursor: "pointer",
+              transition: "background 0.12s, color 0.12s",
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.color = "var(--accent)";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.color = sidebarMode === "drawer" ? "var(--accent)" : "var(--text-muted)";
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <line x1="15" y1="4" x2="15" y2="20" />
+            </svg>
+          </button>
+        )}
       </div>
         <label style={{ position: "relative", display: "block", margin: "0 8px 8px" }}>
           <svg
@@ -1023,6 +1219,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
             }}
           />
         </label>
+      {treeMode === "drawer" && <SessionColumnHeader />}
 
       <div style={{ flex: "1 1 auto", overflowY: "auto", minHeight: 80, padding: "0 6px 10px" }}>
         {loading && (
@@ -1582,6 +1779,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                         refreshSessions(false);
                       }}
                       depth={0}
+                      mode={treeMode}
+                      onHover={openRowPopover}
+                      isMobile={isMobile}
+                      onHoverEnd={closeRowPopover}
                     />
                   ))}
                 </div>
@@ -1616,7 +1817,77 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           );
         })}
       </div>
+      {rowPopoverElement}
 
+    </div>
+  );
+}
+
+function IssueTitleLines({ session, issueTitles }: { session: SessionInfo; issueTitles: IssueTitleResolver }) {
+  const { t } = useI18n();
+  const title = sessionDisplayTitle(session);
+  const { annotations } = useMemo(() => parseTitleAnnotations(title), [title]);
+  const numbers = useMemo(
+    () => (annotations ? [...annotations.main, ...annotations.related] : []),
+    [annotations],
+  );
+  const projectRoot = session.projectRoot ?? session.cwd;
+
+  useEffect(() => {
+    for (const issueNumber of numbers) issueTitles.resolve(projectRoot, issueNumber);
+  }, [numbers, projectRoot, issueTitles]);
+
+  if (numbers.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 6 }}>
+      {numbers.map((issueNumber) => {
+        const entry = issueTitles.get(projectRoot, issueNumber);
+        const label = entry === undefined
+          ? `#${issueNumber} — ${t("sidebar.issueTitleResolving")}`
+          : entry.title
+            ? `#${issueNumber} — ${entry.title}`
+            : `#${issueNumber}`;
+        return (
+          <div
+            key={issueNumber}
+            style={{ color: "var(--text-dim)", fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {label}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const DRAWER_COLUMN_WIDTHS = {
+  modified: 78,
+  created: 78,
+  messages: 40,
+  status: 78,
+  size: 56,
+  branch: 92,
+  actions: 100,
+};
+
+/** Column header row, drawer mode only — aligns with each row's fixed-width
+ *  metadata cells (the flexible title cell intentionally does not align
+ *  across depths, matching how tree-structured tables commonly only indent
+ *  the label column). */
+function SessionColumnHeader() {
+  const { t } = useI18n();
+  const cellStyle: CSSProperties = { flexShrink: 0, fontSize: 10.5, fontWeight: 600, color: "var(--text-dim)", textAlign: "right", padding: "0 4px" };
+  return (
+    <div style={{ display: "flex", alignItems: "center", height: 24, padding: "0 4px 0 8px", flexShrink: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 600, color: "var(--text-dim)" }}>{t("sidebar.columnTitle")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.modified }}>{t("home.modifiedAt")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.created }}>{t("home.startedAt")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.messages }}>{t("sidebar.columnMessages")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.status, textAlign: "center" }}>{t("sidebar.columnStatus")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.size }}>{t("sidebar.columnSize")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.branch, textAlign: "left" }}>{t("sidebar.columnBranch")}</div>
+      <div style={{ ...cellStyle, width: DRAWER_COLUMN_WIDTHS.actions, textAlign: "center" }}>{t("sidebar.columnActions")}</div>
     </div>
   );
 }
@@ -1630,6 +1901,10 @@ function SessionTreeItem({
   onRenamed,
   onSessionDeleted,
   depth,
+  mode,
+  onHover,
+  onHoverEnd,
+  isMobile,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -1639,6 +1914,10 @@ function SessionTreeItem({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
+  mode: "table" | "drawer";
+  onHover: (session: SessionInfo, element: HTMLElement) => void;
+  onHoverEnd: () => void;
+  isMobile: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
@@ -1669,6 +1948,10 @@ function SessionTreeItem({
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={() => setCollapsed((v) => !v)}
+          mode={mode}
+          onHover={onHover}
+          onHoverEnd={onHoverEnd}
+          isMobile={isMobile}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -1684,6 +1967,10 @@ function SessionTreeItem({
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               depth={depth + 1}
+              mode={mode}
+              onHover={onHover}
+              onHoverEnd={onHoverEnd}
+              isMobile={isMobile}
             />
           ))}
         </div>
@@ -1811,6 +2098,10 @@ function SessionItem({
   hasChildren = false,
   collapsed = false,
   onToggleCollapse,
+  mode,
+  onHover,
+  onHoverEnd,
+  isMobile,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -1823,13 +2114,18 @@ function SessionItem({
   hasChildren?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  mode: "table" | "drawer";
+  onHover: (session: SessionInfo, element: HTMLElement) => void;
+  onHoverEnd: () => void;
+  isMobile: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [resummarizing, setResummarizing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Select the whole name once the rename input is mounted (startRename's
@@ -1841,19 +2137,15 @@ function SessionItem({
     }
   }, [renaming]);
 
-  // A stored first message may be an SDK-expanded <skill> block; collapse it
-  // back to the compact /skill:name args command the user typed before using
-  // it as the auto-name fallback, mirroring MessageView's rendering.
-  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
-  const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const title = sessionDisplayTitle(session);
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     // Transient sessions have no file yet, so renaming would fail.
     if (session.transient) return;
-    setRenameValue(session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12));
+    setRenameValue(title);
     setRenaming(true);
-  }, [session.name, session.transient, displayFirstMessage, session.id]);
+  }, [session.transient, title]);
 
   const commitRename = useCallback(async () => {
     const name = renameValue.trim();
@@ -1921,22 +2213,53 @@ function SessionItem({
     e.stopPropagation();
   }, [onRenamed, session.cwd, session.id, session.name, session.path]);
 
+  // Re-summarize (issue #22 drawer action): forces the title auto-name
+  // route to regenerate, then the row picks up the new name via onRenamed.
+  const handleResummarize = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (session.transient || resummarizing) return;
+    setResummarizing(true);
+    try {
+      const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(session.id)}/auto-name`), { method: "POST" });
+      if (res.ok) onRenamed?.();
+    } catch {
+      // ignore — the row simply keeps its previous title.
+    } finally {
+      setResummarizing(false);
+    }
+  }, [session.id, session.transient, resummarizing, onRenamed]);
+
+  const busy = confirmDelete || renaming;
+
+  const handleMouseEnter = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    setHovered(true);
+    onHover(session, e.currentTarget);
+  }, [onHover, session]);
+  const handleMouseLeave = useCallback(() => {
+    setHovered(false);
+    onHoverEnd();
+  }, [onHoverEnd]);
+
   // Fixed height keeps hover and confirmation states from reflowing the list.
   const ITEM_HEIGHT = 40;
+  const status = session.status ?? "unknown";
+  const modifiedRelative = formatRelativeTime(new Date(session.modified), locale);
+  const createdRelative = formatRelativeTime(new Date(session.created), locale);
+  const metaCellStyle: CSSProperties = { flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: "0 4px" };
 
   return (
     <div
-      onClick={confirmDelete || renaming ? undefined : onClick}
-      onContextMenu={confirmDelete || renaming ? undefined : handleContextMenu}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); }}
+      onClick={busy ? undefined : onClick}
+      onContextMenu={busy ? undefined : handleContextMenu}
+      onMouseEnter={busy || isMobile ? undefined : handleMouseEnter}
+      onMouseLeave={busy || isMobile ? undefined : handleMouseLeave}
       style={{
         height: ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
         paddingLeft: depth > 0 ? depth * 10 + 8 : 8,
         paddingRight: 4,
-        cursor: confirmDelete || renaming ? "default" : "pointer",
+        cursor: busy ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
@@ -2041,11 +2364,11 @@ function SessionItem({
             }}
           >
             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {title}
+              {isMobile ? title : <IssueChips name={title} />}
             </span>
             {isRunning && <RunningSessionIndicator />}
             {!isRunning && isUnread && <UnreadSessionIndicator />}
-            {session.worktreeBranch && (
+            {session.worktreeBranch && mode !== "drawer" && (
               <span title={t("sidebar.worktreePath", { path: session.cwd })} style={{ display: "flex", color: "var(--accent)", flexShrink: 0 }}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <line x1="6" y1="3" x2="6" y2="15" />
@@ -2077,8 +2400,81 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && (
+          {mode === "drawer" ? (
+            /* ── Drawer columns: modified, created, messages, status, size, branch, actions ── */
+            <>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.modified, textAlign: "right" }} title={fullStamp(new Date(session.modified))}>
+                {modifiedRelative}
+              </div>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.created, textAlign: "right" }} title={fullStamp(new Date(session.created))}>
+                {createdRelative}
+              </div>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.messages, textAlign: "right" }}>
+                {session.messageCount}
+              </div>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.status, textAlign: "center" }}>
+                {t(`sidebar.status.${status}`)}
+              </div>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.size, textAlign: "right" }}>
+                {session.size !== undefined ? formatSize(session.size) : "—"}
+              </div>
+              <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.branch, textAlign: "left" }} title={session.worktreeBranch}>
+                {session.worktreeBranch ?? "—"}
+              </div>
+              <div style={{ display: "flex", gap: 2, flexShrink: 0, width: DRAWER_COLUMN_WIDTHS.actions, justifyContent: "center" }}>
+                <button
+                  onClick={startRename}
+                  disabled={session.transient}
+                  title={t("sidebar.rename")}
+                  style={drawerActionButtonStyle}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={handleResummarize}
+                  disabled={session.transient || resummarizing}
+                  title={t("sidebar.resummarizeTitle")}
+                  style={drawerActionButtonStyle}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    {resummarizing ? (
+                      <g>
+                        <path d="M21 12a9 9 0 1 1-3.8-7.4" />
+                        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+                      </g>
+                    ) : (
+                      <>
+                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                        <path d="M3 3v5h5" />
+                      </>
+                    )}
+                  </svg>
+                </button>
+                <button
+                  onClick={handleDeleteClick}
+                  disabled={session.transient}
+                  title={t("sidebar.deleteWithShiftClick")}
+                  style={drawerActionButtonStyle}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path d="M10 11v6M14 11v6" />
+                    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                  </svg>
+                </button>
+              </div>
+            </>
+          ) : isMobile ? null : hovered && !session.transient ? (
+            /* ── Table mode: action buttons replace the time badge on hover ── */
             <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
               <button
                 onClick={startRename}
@@ -2136,9 +2532,23 @@ function SessionItem({
                 </svg>
               </button>
             </div>
+          ) : (
+            /* ── Table mode: smart relative modified time ── */
+            <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", whiteSpace: "nowrap", paddingRight: 2 }} title={fullStamp(new Date(session.modified))}>
+              {modifiedRelative}
+            </span>
           )}
         </>
       )}
     </div>
   );
 }
+
+const drawerActionButtonStyle: CSSProperties = {
+  display: "flex", alignItems: "center", justifyContent: "center",
+  width: 24, height: 24, padding: 0,
+  background: "transparent", border: "none",
+  borderRadius: 5, color: "var(--text-muted)",
+  cursor: "pointer", flexShrink: 0,
+  transition: "color 0.12s",
+};

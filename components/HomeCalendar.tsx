@@ -51,7 +51,7 @@ const chipBase: React.CSSProperties = {
   textDecoration: "none",
 };
 
-function IssueChips({ name }: { name: string }) {
+export function IssueChips({ name }: { name: string }) {
   const { t } = useI18n();
   const { text, annotations } = useMemo(() => parseTitleAnnotations(name), [name]);
   return (
@@ -101,7 +101,7 @@ function IssueChips({ name }: { name: string }) {
   );
 }
 
-const pad2 = (n: number) => `${n}`.padStart(2, "0");
+export const pad2 = (n: number) => `${n}`.padStart(2, "0");
 
 /** `MM-DD HH:MM:SS`, local, deterministic across locales. */
 function metaStamp(date: Date): string {
@@ -109,7 +109,7 @@ function metaStamp(date: Date): string {
 }
 
 /** `YYYY-MM-DD HH:MM:SS` for the popover's labeled rows. */
-function fullStamp(date: Date): string {
+export function fullStamp(date: Date): string {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 

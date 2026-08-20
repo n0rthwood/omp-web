@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, realpathSync, statSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
@@ -40,6 +40,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionMessageEntry,
+  SessionStatus,
   SubagentSnapshot,
 } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
@@ -1462,6 +1463,47 @@ function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefine
   return Number.isNaN(timestamp) ? undefined : timestamp;
 }
 
+function statOrUndefined(filePath: string): number | undefined {
+  try {
+    return statSync(filePath).size;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Coarse {@link SessionStatus} for a live in-memory session, mirroring the
+ * SDK's file-tail classification (session-listing.ts) without any extra
+ * disk I/O — the messages are already in memory. A running session is
+ * always "pending" (it has accepted work with no reply persisted yet, by
+ * definition of being mid-turn); otherwise the status is derived from the
+ * last message's role/stopReason exactly as the SDK derives it from a
+ * session file's tail window.
+ */
+function runtimeSessionStatus(messages: SessionMessageEntry[], isRunning: boolean): SessionStatus {
+  if (isRunning) return "pending";
+  const last = messages[messages.length - 1]?.message;
+  if (!last) return "unknown";
+  switch (last.role) {
+    case "assistant":
+      if (last.stopReason === "error") return "error";
+      if (last.stopReason === "aborted") return "aborted";
+      if (last.stopReason === "length") return "interrupted";
+      // A turn that ends without unanswered tool calls means the agent
+      // yielded control back to the user; trailing tool calls with no
+      // result after them mean the loop was cut off before running them.
+      return last.content.some((block) => block.type === "toolCall") ? "interrupted" : "complete";
+    case "toolResult":
+      // Tools ran but the agent never produced the following assistant turn.
+      return "interrupted";
+    case "user":
+      // User message with no assistant reply persisted after it.
+      return "pending";
+    default:
+      return "unknown";
+  }
+}
+
 /**
  * Return live sessions that should be visible in the session list. Pi delays
  * the first JSONL flush until an assistant message exists, so an accepted new
@@ -1506,6 +1548,10 @@ export function getRpcSessionInfos(): SessionInfo[] {
       messageCount: messages.length,
       firstMessage: firstUserMessage ? runtimeMessageText(firstUserMessage) || "(no messages)" : "(no messages)",
       transient: !persisted,
+      status: runtimeSessionStatus(messages, session.isRunning()),
+      // `existsSync` above already paid for one stat-class syscall on this
+      // file; one more `statSync` for its size is the same order of cost.
+      size: persisted && sessionFile ? statOrUndefined(sessionFile) : undefined,
     });
   }
   return sessions;

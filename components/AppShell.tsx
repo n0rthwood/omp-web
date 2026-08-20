@@ -43,7 +43,9 @@ import { SessionListProvider, useSessionList } from "@/lib/session-list-context"
 import { NavigationProvider, useNavigation } from "./NavigationProvider";
 import { buildUrl, type NavigationTarget } from "@/lib/nav-url";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
+import { loadSidebarMode, saveSidebarMode, type SidebarMode } from "@/lib/sidebar-mode";
 import {
+  clampPanelWidth,
   getDefaultRightPanelWidth,
   getRightPanelMaxWidth,
   getSidebarMaxWidth,
@@ -51,8 +53,12 @@ import {
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
   SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_DRAWER_DEFAULT_WIDTH,
+  SIDEBAR_DRAWER_MAX_WIDTH,
+  SIDEBAR_DRAWER_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  SIDEBAR_STRIP_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode, SubagentSnapshot } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
@@ -127,6 +133,18 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
+  // Tri-state sidebar width mode (issue #22): "table" (default), "strip"
+  // (auto-collapse, desktop-only), "drawer" (expanded detail view,
+  // desktop-only). Read from storage after mount so the server render stays
+  // deterministic, matching the terminalFontSize pattern above.
+  const [sidebarMode, setSidebarModeState] = useState<SidebarMode>("table");
+  useEffect(() => {
+    setSidebarModeState(loadSidebarMode());
+  }, []);
+  const handleSidebarModeChange = useCallback((mode: SidebarMode) => {
+    setSidebarModeState(mode);
+    saveSidebarMode(mode);
+  }, []);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
   const getResponsiveRightPanelWidth = useCallback(
@@ -180,6 +198,39 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   });
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
+  // Mobile always renders the sidebar as today's overlay drawer — strip and
+  // drawer modes are desktop-only (owner steering on issue #22) — so force
+  // "table" regardless of the persisted preference while isMobile is true.
+  const effectiveSidebarMode: SidebarMode = isMobile ? "table" : sidebarMode;
+  // Tracks the viewport width for the drawer-width formula below (a fixed
+  // width, not wired through useResizablePanel's own resize handling) so a
+  // bare window resize while in drawer mode doesn't leave it stale.
+  const [viewportWidth, setViewportWidth] = useState<number | null>(null);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // Drawer width is fixed (not user-resizable), but still respects the
+  // "leave room for chat + file panel" formula via a taller cap.
+  const drawerWidth = viewportWidth === null
+    ? SIDEBAR_DRAWER_DEFAULT_WIDTH
+    : clampPanelWidth(
+      SIDEBAR_DRAWER_DEFAULT_WIDTH,
+      SIDEBAR_DRAWER_MIN_WIDTH,
+      getSidebarMaxWidth({
+        viewportWidth,
+        rightPanelOpen,
+        rightPanelWidth: rightPanelWidthRef.current,
+        cap: SIDEBAR_DRAWER_MAX_WIDTH,
+      }),
+    );
+  const effectiveSidebarWidth = effectiveSidebarMode === "strip"
+    ? SIDEBAR_STRIP_WIDTH
+    : effectiveSidebarMode === "drawer"
+      ? drawerWidth
+      : sidebarResizer.width;
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -611,8 +662,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     setSystemPrompt(null);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
     if (isMobile) setSidebarOpen(false);
+    // Opening a conversation auto-collapses the sidebar to the strip
+    // (issue #22); desktop-only per owner steering.
+    if (!isMobile) handleSidebarModeChange("strip");
     nav.navigate({ machineId: machines.machineId, project: session.projectRoot ?? session.cwd, session: session.id }, { history: "push" });
-  }, [nav, machines.machineId, isMobile, selectedSession]);
+  }, [nav, machines.machineId, isMobile, selectedSession, handleSidebarModeChange]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     setSelectedSession(null);
@@ -623,8 +677,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     setSystemPrompt(null);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
+    // A brand-new session is a conversation opening too — auto-collapse to
+    // the strip, matching handleSelectSession (issue #22 review finding).
+    if (!isMobile) handleSidebarModeChange("strip");
     nav.navigate({ machineId: machines.machineId, project: cwd, session: null }, { history: "push" });
-  }, [nav, machines.machineId, isMobile]);
+  }, [nav, machines.machineId, isMobile, handleSidebarModeChange]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -1018,6 +1075,9 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         onCwdChange={handleCwdChange}
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onOpenMachinesSettings={() => { setSettingsInitialSection("machines"); setSettingsConfigOpen(true); }}
+        sidebarMode={effectiveSidebarMode}
+        onSidebarModeChange={handleSidebarModeChange}
+        isMobile={isMobile}
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpUpdateIndicator />
@@ -1144,11 +1204,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
 
       {/* Left sidebar */}
       <div
-        ref={sidebarResizer.panelRef}
+        ref={effectiveSidebarMode === "table" ? sidebarResizer.panelRef : undefined}
         id="session-sidebar"
         className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
         style={{
-          "--sidebar-width": `${sidebarResizer.width}px`,
+          "--sidebar-width": `${effectiveSidebarWidth}px`,
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
           display: "flex",
@@ -1161,7 +1221,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       >
         {sidebarContent}
       </div>
-      {sidebarOpen && (
+      {sidebarOpen && effectiveSidebarMode === "table" && (
         <div
           {...sidebarResizer.separatorProps}
           aria-controls="session-sidebar"

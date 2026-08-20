@@ -49,7 +49,7 @@ test("offers the downstream context-menu hook only on a normal session row", () 
   assert.match(sessionItemSource, /const handleContextMenu[\s\S]*?dispatchSessionRowContextMenu\(\{/);
   assert.match(
     sessionItemSource,
-    /onContextMenu=\{confirmDelete \|\| renaming \? undefined : handleContextMenu\}/,
+    /onContextMenu=\{busy \? undefined : handleContextMenu\}/,
   );
 });
 test("manual refresh and the completion notification both go through SessionListProvider", () => {
@@ -60,7 +60,7 @@ test("manual refresh and the completion notification both go through SessionList
 
 test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
-  assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+  assert.match(sessionItemSource, /hovered && !session\.transient \? \(/);
 });
 
 test("unread markers prune against the loaded list — never while loading, never after a failed (empty-but-errored) fetch", () => {
