@@ -57,3 +57,50 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
 
   return { conflicts, nonReplaceable };
 }
+
+const BINARY_UPLOAD_EXTENSIONS: Record<string, true> = {
+  zip: true, png: true, jpg: true, jpeg: true, gif: true, webp: true, bmp: true, ico: true, tiff: true,
+  pdf: true, exe: true, dll: true, so: true, dylib: true, jar: true, class: true, war: true, ear: true,
+  woff: true, woff2: true, ttf: true, otf: true, eot: true, mp3: true, wav: true, flac: true, ogg: true,
+  mp4: true, mov: true, avi: true, mkv: true, webm: true, sqlite: true, db: true, wasm: true, bin: true,
+  iso: true, dmg: true, pkg: true, deb: true, rar: true, "7z": true, gz: true, xz: true, bz2: true, zst: true,
+};
+
+const UPLOAD_BINARY_HEADER_SNIFF_BYTES = 8192;
+
+/** Extension-based pre-judgment: known-binary file types, checked before reading content. */
+export function isBinaryUploadName(name: string): boolean {
+  const ext = path.extname(name).slice(1).toLowerCase();
+  return ext in BINARY_UPLOAD_EXTENSIONS;
+}
+
+/**
+ * Content-based binary check for files an extension does not already flag.
+ * A NUL byte anywhere in the first 8KB marks the file binary; encoding
+ * validity is never checked, so non-UTF-8 text (GBK, Shift-JIS, ...) passes.
+ */
+export function looksBinaryHeader(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length, UPLOAD_BINARY_HEADER_SNIFF_BYTES);
+  for (let i = 0; i < limit; i++) {
+    if (bytes[i] === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * First filesystem path in `dir` not already occupied by `name`, suffixing
+ * before the extension on collision: file.txt -> file-1.txt -> file-2.txt.
+ * The caller still writes with an exclusive flag — this only picks the
+ * first guess; a losing race falls back to recomputing from the taken name.
+ */
+export function nextAvailableUploadPath(dir: string, name: string): string {
+  const ext = path.extname(name);
+  const base = ext ? name.slice(0, -ext.length) : name;
+  let candidate = name;
+  let suffix = 0;
+  while (fs.existsSync(path.join(dir, candidate))) {
+    suffix += 1;
+    candidate = `${base}-${suffix}${ext}`;
+  }
+  return path.join(dir, candidate);
+}

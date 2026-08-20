@@ -4,6 +4,7 @@ import { memo, useState, useRef, useEffect, useMemo } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs, vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { MarkdownBody } from "./MarkdownBody";
+import { getFileIcon } from "./FileIcons";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
@@ -11,6 +12,8 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { resolveLocalFilePath } from "@/lib/file-links";
+import { getFileName } from "@/lib/file-paths";
 import { apiPath } from "@/lib/api-path";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
@@ -21,6 +24,8 @@ import type {
   CustomMessage,
   ToolResultMessage,
   BashExecutionMessage,
+  FileMentionMessage,
+  FileMentionFile,
   AssistantContentBlock,
   TextContent,
   ImageContent,
@@ -248,6 +253,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   }
   if (message.role === "bashExecution") {
     return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
+  }
+  if (message.role === "fileMention") {
+    return <FileMentionView message={message as FileMentionMessage} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   return null;
 }, (prev, next) => {
@@ -1635,6 +1643,163 @@ function PairedResult({ text, isEmpty, isError }: {
       >
          {isEmpty ? t("i18n.noOutput") : text}
       </pre>
+    </div>
+  );
+}
+
+function FileMentionView({ message, cwd, onOpenFile }: { message: FileMentionMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const { t } = useI18n();
+  const files = message.files ?? [];
+  const time = formatTime(message.timestamp);
+  if (files.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          overflow: "hidden",
+          background: "var(--bg)",
+          maxWidth: "85%",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 10px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+          }}
+        >
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+             {t("chat.fileMentionHeader")}
+          </span>
+          {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+        </div>
+
+        <div style={{ padding: "9px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {files.map((file, i) => (
+            <FileMentionRow key={`${file.path}-${i}`} file={file} cwd={cwd} onOpenFile={onOpenFile} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileMentionRow({ file, cwd, onOpenFile }: { file: FileMentionFile; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const name = getFileName(file.path);
+  const hasContent = !!file.content;
+  const metaText = file.lineCount !== undefined
+    ? t("chat.fileMentionLines", { count: file.lineCount })
+    : file.byteSize !== undefined
+      ? formatMessageBytes(file.byteSize)
+      : null;
+  const skippedText = file.skippedReason === "tooLarge"
+    ? t("chat.fileMentionSkippedTooLarge")
+    : file.skippedReason === "binary"
+      ? t("chat.fileMentionSkippedBinary")
+      : null;
+  const imageSrc = file.image ? imageSource(file.image) : "";
+
+  const handleOpen = () => {
+    if (!onOpenFile) return;
+    onOpenFile(resolveLocalFilePath(file.path, cwd) ?? file.path);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        {imageSrc && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageSrc}
+            alt=""
+            style={{ maxWidth: 64, maxHeight: 64, borderRadius: 4, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
+          />
+        )}
+        <button
+          type="button"
+          title={file.path}
+          aria-label={t("chat.openWrittenFile", { name })}
+          onClick={handleOpen}
+          disabled={!onOpenFile}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "2px 8px",
+            fontSize: 12,
+            fontFamily: "var(--font-mono)",
+            color: "var(--text)",
+            background: "var(--bg-subtle)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            cursor: onOpenFile ? "pointer" : "default",
+          }}
+        >
+          {getFileIcon(name, 12)}
+          <span>{name}</span>
+        </button>
+        {skippedText && (
+          <span style={{ fontSize: 11, color: "var(--text-dim)", fontStyle: "italic" }}>{skippedText}</span>
+        )}
+        {metaText && (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{metaText}</span>
+        )}
+        {hasContent && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-label={expanded ? t("i18n.collapse") : t("i18n.expand")}
+            title={expanded ? t("i18n.collapse") : t("i18n.expand")}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 18,
+              height: 18,
+              padding: 0,
+              background: "none",
+              border: "none",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+              <polyline points="2 3.5 5 6.5 8 3.5" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {expanded && hasContent && (
+        <pre
+          style={{
+            margin: "4px 0 0",
+            padding: "8px 10px",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: "var(--text-muted)",
+            background: "var(--bg-subtle)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            maxHeight: 240,
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {file.content}
+        </pre>
+      )}
     </div>
   );
 }

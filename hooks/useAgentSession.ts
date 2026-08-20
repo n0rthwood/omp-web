@@ -335,6 +335,11 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
+export interface SessionUploadResult {
+  files: Array<{ name: string; path: string; size: number }>;
+  errors?: Array<{ name: string; error: string }>;
+}
+
 type SelectedModel = { provider: string; modelId: string };
 type ModelEntry = { id: string; name: string; provider: string };
 type ModelsResponse = {
@@ -646,6 +651,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ensuringNewSessionRef.current = null;
     }
   }, [isNew, newSessionCwd, toolPreset]);
+
+  const uploadSessionFiles = useCallback(async (files: File[]): Promise<SessionUploadResult> => {
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) throw new Error("Unable to create a session for file upload");
+    const formData = new FormData();
+    for (const file of files) formData.append("files", file);
+    const res = await fetch(apiPath(`/api/agent/${encodeURIComponent(sid)}/uploads`), {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json().catch(() => null) as (SessionUploadResult & { error?: string }) | null;
+    if (res.status >= 400) throw new Error(data?.error ?? `HTTP ${res.status}`);
+    if (!data) throw new Error(`HTTP ${res.status}`);
+    return data;
+  }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -2130,6 +2150,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    uploadSessionFiles,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions

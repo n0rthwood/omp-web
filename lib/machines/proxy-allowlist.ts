@@ -20,6 +20,7 @@ interface RouteRule {
 const ALLOWED_ROUTES: readonly RouteRule[] = [
   { template: "/api/agent/:id/bash-output", methods: ["GET"] },
   { template: "/api/agent/:id/events", methods: ["GET"] },
+  { template: "/api/agent/:id/uploads", methods: ["POST"] },
   { template: "/api/agent/:id", methods: ["GET", "POST"] },
   { template: "/api/agent/new", methods: ["POST"] },
   { template: "/api/agent/running/events", methods: ["GET"] },

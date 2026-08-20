@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
-import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SessionUploadResult } from "@/hooks/useAgentSession";
 import type { ModelRoleAssignment, SkillsResponse } from "@/lib/api-types";
 import type { ContextUsage, SlashCommandInfo } from "@/lib/omp-types";
 import type { TextContent, UserMessage } from "@/lib/types";
@@ -20,7 +20,7 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
-  buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
+  buildEntriesFromFiles, buildAtInsertText, buildAtMentionText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
 import { apiPath } from "@/lib/api-path";
@@ -86,6 +86,7 @@ interface Props {
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
   contextUsage?: ContextUsage | null;
+  onUploadFiles?: (files: File[]) => Promise<SessionUploadResult>;
 }
 
 export interface ChatInputHandle {
@@ -94,6 +95,7 @@ export interface ChatInputHandle {
   replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
   addImages: (files: File[]) => void;
+  addFiles: (files: File[]) => void;
   rekeyDraft: (previousKey: string, nextKey: string) => void;
   restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: string) => void;
 }
@@ -105,6 +107,23 @@ const FULL_TOOL_ADDITIONS = PRESET_FULL.filter((name) => !PRESET_DEFAULT.include
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const MODEL_FILTER_THRESHOLD = 8;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+const UPLOAD_CONFIRM_BYTES = 1024 * 1024;
+const UPLOAD_NO_AUTOREAD_BYTES = 5 * 1024 * 1024;
+const UPLOAD_ERROR_BANNER_MS = 6000;
+const TEXT_UPLOAD_ACCEPT = [
+  ".txt", ".md", ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+  ".log", ".csv", ".tsv", ".xml", ".html", ".htm", ".css", ".scss", ".less", ".js", ".jsx", ".mjs", ".cjs",
+  ".ts", ".tsx", ".py", ".rb", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cs",
+  ".php", ".swift", ".m", ".mm", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".sql", ".graphql",
+  ".proto", ".dockerfile", ".editorconfig", ".gitignore", ".diff", ".patch", ".lock",
+].join(",");
+
+function formatUploadSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
 
 function compareModelOptions(a: ModelOption, b: ModelOption): number {
   return MODEL_OPTION_COLLATOR.compare(a.name || a.modelId, b.name || b.modelId)
@@ -387,6 +406,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   draftKey,
   cwd,
   contextUsage,
+  onUploadFiles,
 }: Props, ref) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -400,6 +420,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [uploadErrorBanner, setUploadErrorBanner] = useState<{ id: number; text: string } | null>(null);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -429,6 +451,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textFileInputRef = useRef<HTMLInputElement>(null);
+  const uploadingFilesRef = useRef(false);
+  const uploadErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
@@ -597,33 +622,86 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
     },
     insertText(text: string) {
-      const ta = textareaRef.current;
-      if (!ta) {
-        setValue((v) => v + (v ? " " : "") + text);
-        return;
-      }
-      const start = ta.selectionStart ?? ta.value.length;
-      const end = ta.selectionEnd ?? ta.value.length;
-      const before = ta.value.slice(0, start);
-      const after = ta.value.slice(end);
-      const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
-      const newVal = before + sep + text + after;
-      valueRef.current = newVal;
-      setValue(newVal);
-      setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        const pos = start + sep.length + text.length;
-        ta.setSelectionRange(pos, pos);
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
+      insertTextAtCursor(text);
     },
     addImages(files: File[]) {
       processImageFiles(files);
     },
+    addFiles(files: File[]) {
+      const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+      const textFiles = files.filter((f) => !f.type.startsWith("image/"));
+      if (imageFiles.length) processImageFiles(imageFiles);
+      if (textFiles.length) uploadTextFiles(textFiles);
+    },
   }));
+
+  const insertTextAtCursor = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setValue((v) => v + (v ? " " : "") + text);
+      return;
+    }
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+    const newVal = before + sep + text + after;
+    valueRef.current = newVal;
+    setValue(newVal);
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      const pos = start + sep.length + text.length;
+      ta.setSelectionRange(pos, pos);
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, []);
+
+  const showUploadError = useCallback((text: string) => {
+    clearTimeout(uploadErrorTimeoutRef.current ?? undefined);
+    setUploadErrorBanner({ id: Date.now(), text });
+    uploadErrorTimeoutRef.current = setTimeout(() => setUploadErrorBanner(null), UPLOAD_ERROR_BANNER_MS);
+  }, []);
+
+  useEffect(() => () => {
+    clearTimeout(uploadErrorTimeoutRef.current ?? undefined);
+  }, []);
+
+  const uploadTextFiles = useCallback(async (files: File[]) => {
+    if (!onUploadFiles || files.length === 0 || uploadingFilesRef.current) return;
+    const accepted: File[] = [];
+    for (const file of files) {
+      if (file.size > UPLOAD_CONFIRM_BYTES) {
+        let message = t("chat.uploadConfirmLarge", { name: file.name, size: formatUploadSize(file.size) });
+        if (file.size > UPLOAD_NO_AUTOREAD_BYTES) {
+          message = `${message}\n${t("chat.uploadNoAutoInline")}`;
+        }
+        if (!window.confirm(message)) continue;
+      }
+      accepted.push(file);
+    }
+    if (!accepted.length) return;
+    uploadingFilesRef.current = true;
+    setIsUploadingFiles(true);
+    try {
+      const result = await onUploadFiles(accepted);
+      for (const uploaded of result.files) {
+        insertTextAtCursor(buildAtMentionText(uploaded.path, false));
+      }
+      for (const failure of result.errors ?? []) {
+        showUploadError(`${t("chat.uploadFailed", { name: failure.name })}: ${failure.error}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showUploadError(`${t("chat.uploadFailed", { name: accepted.map((f) => f.name).join(", ") })}: ${message}`);
+    } finally {
+      uploadingFilesRef.current = false;
+      setIsUploadingFiles(false);
+    }
+  }, [onUploadFiles, t, insertTextAtCursor, showUploadError]);
 
   const processImageFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -1178,11 +1256,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
+    const fileItems = items.filter((item) => item.kind === "file" && !item.type.startsWith("image/"));
+    if (!imageItems.length && !fileItems.length) return;
     e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    processImageFiles(files);
-  }, [processImageFiles]);
+    if (imageItems.length) {
+      const imageFiles = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+      processImageFiles(imageFiles);
+    }
+    if (fileItems.length) {
+      const textFiles = fileItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+      uploadTextFiles(textFiles);
+    }
+  }, [processImageFiles, uploadTextFiles]);
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1344,6 +1429,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />
+      {/* Hidden text file input */}
+      <input
+        ref={textFileInputRef}
+        type="file"
+        accept={TEXT_UPLOAD_ACCEPT}
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          uploadTextFiles(files);
+          e.target.value = "";
+        }}
+      />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
@@ -1461,6 +1559,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             {compactError}
+          </div>
+        )}
+        {uploadErrorBanner && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8, padding: "5px 10px",
+              background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6, fontSize: 12, color: "#ef4444",
+              display: "flex", alignItems: "center", gap: 6,
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            {uploadErrorBanner.text}
           </div>
         )}
         {/* Image previews */}
@@ -2026,6 +2142,43 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
+            {onUploadFiles && (
+              <button
+                onClick={() => { if (!isUploadingFiles) textFileInputRef.current?.click(); }}
+                disabled={isUploadingFiles}
+               title={isUploadingFiles ? t("chat.uploading") : t("chat.attachFile")}
+                style={{
+                  flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "none", border: "none",
+                  borderRadius: 9,
+                  color: "var(--text-muted)",
+                  cursor: isUploadingFiles ? "not-allowed" : "pointer",
+                  opacity: isUploadingFiles ? 0.5 : 1,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  if (isUploadingFiles) return;
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = "var(--text-muted)";
+                }}
+              >
+                {isUploadingFiles ? (
+                  <svg className="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" opacity="0.25" />
+                    <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  </svg>
+                )}
+              </button>
+            )}
             {/* Model selector — visible always, disabled while the session or switch is busy */}
             {(modelOptions.length > 0 || currentName || modelError) && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative", flex: isMobile ? "1 1 auto" : undefined, minWidth: 0 }}>
