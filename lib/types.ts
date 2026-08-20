@@ -391,6 +391,8 @@ export interface SessionTreeNode {
   branchPreview?: BranchPreview;
 }
 
+export type SessionStatus = "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
+
 export interface SessionInfo {
   path: string;
   id: string;
@@ -410,6 +412,13 @@ export interface SessionInfo {
   /** True while the runtime session exists only in memory and its JSONL file
    *  has not been created yet. Disk-backed actions must wait until this clears. */
   transient?: boolean;
+  /** Coarse lifecycle status derived from the session's last message (issue #22).
+   *  Unset when the source snapshot did not compute it (e.g. some synthetic
+   *  runtime sessions before their first assistant reply). */
+  status?: SessionStatus;
+  /** File size in bytes on disk (issue #22, sidebar detail drawer). Unset for
+   *  transient sessions with no JSONL file yet. */
+  size?: number;
 }
 
 export interface SessionContext {

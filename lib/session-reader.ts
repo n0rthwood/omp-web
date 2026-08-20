@@ -64,6 +64,10 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
       transient: false,
+      // Already computed by the SDK's file scan (session-listing.ts) — no
+      // extra I/O to surface these (issue #22).
+      status: s.status,
+      size: s.size,
     };
   });
   return attachSessionProjectInfo(sessions);
