@@ -139,10 +139,11 @@ export async function GET(
             const request = getManualInputRequest();
             send(controller, {
               type: "auth",
-              // `launchUrl` is the truncation-safe loopback redirect when the
-              // flow hosts one; fall back to the full authorization URL.
-              url: info.launchUrl ?? info.url,
-              fullUrl: info.url,
+              // The provider authorization URL, always safe for a remote
+              // browser. The SDK's optional same-machine loopback shortcut
+              // (bound to this server's own localhost callback listener) is
+              // deliberately never sent here or opened client-side.
+              url: info.url,
               instructions: info.instructions ?? null,
               token: request.token,
             });
