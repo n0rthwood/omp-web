@@ -34,7 +34,7 @@ function basename(path: string): string {
 }
 
 export function HomePage() {
-  const { locale, t } = useI18n();
+  const { locale, t, setLocale, supportedLocales } = useI18n();
   const { machines, loading: machinesLoading } = useMachines();
   const { fetchSessionsFor } = useSessionList();
   const [groups, setGroups] = useState<MachineProjects[] | null>(null);
@@ -42,7 +42,8 @@ export function HomePage() {
   const loadGenerationRef = useRef(0);
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
-
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
+  const languageWrapperRef = useRef<HTMLDivElement | null>(null);
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
     const generation = ++loadGenerationRef.current;
@@ -126,6 +127,25 @@ export function HomePage() {
     [selectedGroup, selectedProject],
   );
 
+  // Close the language dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!languageMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (languageWrapperRef.current && !languageWrapperRef.current.contains(e.target as Node)) {
+        setLanguageMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLanguageMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [languageMenuOpen]);
+
   const chipRowStyle: React.CSSProperties = {
     display: "flex",
     gap: 6,
@@ -165,6 +185,85 @@ export function HomePage() {
             {t("home.title")}
           </h1>
           <div style={{ flex: 1 }} />
+          <div ref={languageWrapperRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() => setLanguageMenuOpen((open) => !open)}
+              title={t("common.language")}
+              aria-label={t("common.language")}
+              aria-haspopup="menu"
+              aria-expanded={languageMenuOpen}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28, height: 28, padding: 0, borderRadius: 7,
+                background: languageMenuOpen ? "var(--bg-selected)" : "var(--bg-hover)",
+                border: "1px solid var(--border)",
+                color: languageMenuOpen ? "var(--text)" : "var(--text-muted)",
+                cursor: "pointer",
+              }}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m5 8 6 6" />
+                <path d="m4 14 6-6 2-3" />
+                <path d="M2 5h12" />
+                <path d="M7 2h1" />
+                <path d="m22 22-5-10-5 10" />
+                <path d="M14 18h6" />
+              </svg>
+            </button>
+            {languageMenuOpen && (
+              <div
+                role="menu"
+                aria-label={t("common.language")}
+                style={{
+                  position: "absolute", top: "calc(100% + 4px)", right: 0,
+                  minWidth: 160, maxWidth: "calc(100vw - 40px)",
+                  background: "var(--bg-panel)", border: "1px solid var(--border)",
+                  borderRadius: 7, overflow: "hidden", padding: 4, zIndex: 200,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+                }}
+              >
+                {supportedLocales.map((plugin) => (
+                  <button
+                    key={plugin.id}
+                    type="button"
+                    onClick={() => {
+                      setLocale(plugin.id as typeof locale);
+                      setLanguageMenuOpen(false);
+                    }}
+                    role="menuitemradio"
+                    aria-checked={locale === plugin.id}
+                    style={{
+                      display: "flex", alignItems: "center",
+                      width: "100%", height: 34, padding: "0 10px",
+                      border: "none", borderRadius: 4,
+                      background: locale === plugin.id ? "var(--bg-selected)" : "transparent",
+                      color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 12,
+                      transition: "background 0.1s",
+                    }}
+                    onMouseEnter={(e) => {
+                      if (locale !== plugin.id) e.currentTarget.style.background = "var(--bg-hover)";
+                    }}
+                    onMouseLeave={(e) => {
+                      if (locale !== plugin.id) e.currentTarget.style.background = "transparent";
+                    }}
+                  >
+                    <span>{plugin.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setReloadKey((k) => k + 1)}
