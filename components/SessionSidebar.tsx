@@ -5,14 +5,12 @@ import type { SessionInfo } from "@/lib/types";
 import { apiPath, machineStorageKey } from "@/lib/api-path";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
 import { loadRemovedProjects, normalizeProjectKey, saveRemovedProjects } from "@/lib/removed-projects";
-import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { useI18n } from "@/hooks/useI18n";
 import { useWebUser } from "@/hooks/useWebUser";
 import { useSessionList } from "@/lib/session-list-context";
 import { DirectoryPicker } from "./DirectoryPicker";
-import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
 import { MachineSwitcher } from "./MachineSwitcher";
 import { AccessNotice } from "./AccessNotice";
@@ -26,7 +24,7 @@ declare global {
   }
 }
 
-function ToolbarIconButton({
+export function ToolbarIconButton({
   onClick,
   title,
   disabled,
@@ -94,11 +92,6 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
-  onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
-  explorerRefreshKey?: number;
-  onExplorerRefresh?: () => void;
-  onAtMention?: (relativePath: string, isDir: boolean) => void;
-  onAtMentions?: (relativePaths: string[]) => void;
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
@@ -395,7 +388,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onBackgroundTaskDone, onOpenMachinesSettings }: Props) {
   const { t } = useI18n();
   const { goHome } = useNavigation();
   const { user: webUser } = useWebUser();
@@ -435,25 +428,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
   const wtDropdownRef = useRef<HTMLDivElement>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
-  const [explorerOpen, setExplorerOpen] = useState(true);
-  const [explorerKey, setExplorerKey] = useState(0);
-  const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
-  const [changesCount, setChangesCount] = useState(0);
-  const [changesCollapsed, setChangesCollapsed] = useState(true);
-  const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
-  const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fileExplorerRef = useRef<FileExplorerHandle>(null);
   useEffect(() => {
     setCollapsedProjects(loadCollapsedProjects());
     setRemovedProjects(loadRemovedProjects());
-  }, []);
-
-  // Browser storage is unavailable during server rendering. Restore the panel
-  // preference after hydration so a collapsed explorer stays collapsed on reload.
-  useEffect(() => {
-    setExplorerOpen(loadExplorerOpen());
   }, []);
 
   // Persist unread markers so they survive a browser refresh before the user
@@ -506,10 +485,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       return next.size === prev.size ? prev : next;
     });
   }, [allSessions, loading, error]);
-
-  useEffect(() => {
-    if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
-  }, [explorerRefreshKey]);
 
   useEffect(() => {
     fetch(apiPath("/api/home")).then((r) => r.json()).then((d: { home?: string }) => {
@@ -1049,7 +1024,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           />
         </label>
 
-      <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", minHeight: 80, padding: "0 6px 10px" }}>
+      <div style={{ flex: "1 1 auto", overflowY: "auto", minHeight: 80, padding: "0 6px 10px" }}>
         {loading && (
           <div style={{ padding: "12px 8px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.loading")}
@@ -1642,123 +1617,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         })}
       </div>
 
-      {/* File Explorer section */}
-      {(selectedCwdProp || selectedCwd) && (
-        <div
-          style={{
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
-            flex: explorerOpen ? "1 1 0" : "0 0 auto",
-            minHeight: 0,
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
-            <button
-              onClick={() => setExplorerOpen((open) => {
-                const next = !open;
-                saveExplorerOpen(next);
-                return next;
-              })}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                flex: 1,
-                padding: "6px 10px",
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                textTransform: "uppercase",
-                textAlign: "left",
-              }}
-            >
-              <svg
-                width="9" height="9" viewBox="0 0 10 10" fill="none"
-                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-                style={{ transform: explorerOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}
-              >
-                <polyline points="3 2 7 5 3 8" />
-              </svg>
-              {t("files.explorer")}
-            </button>
-            {explorerOpen && changesCount > 0 && (
-              <ToolbarIconButton
-                onClick={() => setChangesCollapsed((v) => !v)}
-                title={t("sidebar.changedFiles", { count: changesCount })}
-                ariaPressed={!changesCollapsed}
-                color={changesCollapsed ? "var(--text-dim)" : "var(--accent)"}
-                background={changesCollapsed ? "none" : "var(--bg-selected)"}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M3 12h6" />
-                  <path d="M15 12h6" />
-                </svg>
-              </ToolbarIconButton>
-            )}
-            {explorerOpen && (
-              <ToolbarIconButton
-                onClick={() => fileExplorerRef.current?.openUploadPicker()}
-                disabled={explorerUploadBusy}
-                title={t("sidebar.uploadFilesTitle")}
-                color="var(--text-dim)"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <path d="m17 8-5-5-5 5" />
-                  <path d="M12 3v12" />
-                </svg>
-              </ToolbarIconButton>
-            )}
-            <ToolbarIconButton
-              onClick={() => {
-                if (onExplorerRefresh) onExplorerRefresh();
-                else setExplorerKey((k) => k + 1);
-                setExplorerRefreshDone(true);
-                if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
-                explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
-              }}
-              title={t("sidebar.refreshExplorer")}
-              skipHover={explorerRefreshDone}
-              color={explorerRefreshDone ? "#4ade80" : "var(--text-dim)"}
-              background={explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none"}
-              marginRight={6}
-            >
-              {explorerRefreshDone ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
-              )}
-            </ToolbarIconButton>
-          </div>
-          {explorerOpen && (
-            <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-              <FileExplorer
-                ref={fileExplorerRef}
-                cwd={selectedCwd ?? selectedCwdProp!}
-                onOpenFile={onOpenFile ?? (() => {})}
-                refreshKey={explorerKey}
-                onAtMention={onAtMention}
-                onAtMentions={onAtMentions}
-                onUploadBusyChange={setExplorerUploadBusy}
-                changesCollapsed={changesCollapsed}
-                onChangesCountChange={setChangesCount}
-              />
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
