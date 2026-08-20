@@ -107,7 +107,22 @@ export interface BashExecutionMessage {
   timestamp?: number;
 }
 
-export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;
+export interface FileMentionFile {
+  path: string;
+  content: string;
+  lineCount?: number;
+  byteSize?: number;
+  skippedReason?: "tooLarge" | "binary";
+  image?: ImageContent;
+}
+
+export interface FileMentionMessage {
+  role: "fileMention";
+  files: FileMentionFile[];
+  timestamp: number;
+}
+
+export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage | FileMentionMessage;
 export interface ExtensionAskDialogOption {
   label: string;
   description?: string;

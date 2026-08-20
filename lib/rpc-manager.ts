@@ -1447,7 +1447,7 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
 }
 
 function runtimeMessageText(entry: SessionMessageEntry): string {
-  if (entry.message.role === "bashExecution") return "";
+  if (entry.message.role === "bashExecution" || entry.message.role === "fileMention") return "";
   const content = entry.message.content;
   if (typeof content === "string") return content;
   return content

@@ -229,7 +229,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, uploadSessionFiles,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -329,7 +329,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
-    chatInputRef?.current?.addImages(files);
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    const others = files.filter((f) => !f.type.startsWith("image/"));
+    if (images.length) chatInputRef?.current?.addImages(images);
+    if (others.length) chatInputRef?.current?.addFiles(others);
   }, [sessionBusy, chatInputRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
@@ -415,6 +418,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      onUploadFiles={uploadSessionFiles}
     />
   );
 
@@ -630,6 +634,17 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 }
 
                 rendered.push(renderMessage(userIdx));
+
+                // fileMention messages are context injected directly after the
+                // prompt (SDK @-mention auto-read). They must stay visible
+                // beside the user message, not fold into the process group —
+                // hasDisplayableProcessMessage() excludes them, so without
+                // this they would never render on a loaded session.
+                for (let mentionIdx = userIdx + 1; mentionIdx < finalAssistantIdx; mentionIdx++) {
+                  if (messages[mentionIdx].role === "fileMention") {
+                    rendered.push(renderMessage(mentionIdx));
+                  }
+                }
 
                 const processIndices: number[] = [];
                 for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
