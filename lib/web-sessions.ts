@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
+import { isIP } from "net";
 import { dirname, join } from "path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -74,13 +75,17 @@ function writeSessions(store: SessionsFile): void {
     ? { value: store, mtimeMs: statSync(path).mtimeMs }
     : undefined;
 }
-
 /**
- * True only for loopback-literal hosts (`localhost`, `127.0.0.1`, `::1`),
- * optionally with a port or IPv6 brackets. Everything else — including an
- * unknown host — is treated as public, so `Secure` stays on.
+ * True for hosts that are reachable over plain HTTP in practice and must NOT
+ * get the `Secure` cookie flag (a browser rejects a `Secure` cookie sent over
+ * HTTP, which breaks login):
+ * - loopback literals (`localhost`, `127.0.0.1`, `::1`),
+ * - RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16),
+ * - IPv6 unique-local (fc00::/7).
+ * Everything else — a public hostname/IP, or an unknown host — is treated as
+ * public, so `Secure` stays on.
  */
-function isLoopbackHost(host: string): boolean {
+function isNonPublicHost(host: string): boolean {
   let h = host.trim().toLowerCase();
   if (h.startsWith("[")) {
     const end = h.indexOf("]");
@@ -90,7 +95,13 @@ function isLoopbackHost(host: string): boolean {
     // A single colon separates host from port; more colons mean a bare IPv6 literal.
     if (colon !== -1 && h.indexOf(":", colon + 1) === -1) h = h.slice(0, colon);
   }
-  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
+  if (isIP(h) === 4) {
+    const [a, b] = h.split(".").map(Number);
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (isIP(h) === 6) return /^f[cd]/.test(h);
+  return false;
 }
 
 /**
@@ -102,7 +113,7 @@ export function cookieAttrs(
   ttlDays: number = DEFAULT_SESSION_TTL_DAYS,
 ): string {
   const attrs = `Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(ttlDays * 86_400)}`;
-  return host !== null && host !== undefined && isLoopbackHost(host) ? attrs : `${attrs}; Secure`;
+  return host !== null && host !== undefined && isNonPublicHost(host) ? attrs : `${attrs}; Secure`;
 }
 
 /**
