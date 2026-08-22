@@ -1,0 +1,23 @@
+#!/bin/bash
+# debian/postrm — omp-web
+# Only ever touches /opt/omp-web (this package's own tree). Never removes
+# anything under a user's $HOME: ~/omp/ompweb (synced app copy),
+# ~/.config/systemd/user/omp-web.service{,.d/}, ~/omp/ops/env/5010.env, or
+# ~/.omp/agent/{.env,config.yml,models.yml,sessions,...} — those are the
+# user's live data and configuration, not package-owned files, and survive
+# both `apt remove` and `apt purge`. An operator who wants those gone runs
+# `rm -rf ~/omp/ompweb ~/.config/systemd/user/omp-web.service*` explicitly.
+set -e
+
+ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
+
+case "$1" in
+  purge)
+    rm -rf "${ROOT_PREFIX}/opt/omp-web"
+    ;;
+  remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    :
+    ;;
+esac
+
+exit 0
