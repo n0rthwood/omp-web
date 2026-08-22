@@ -23,7 +23,8 @@ find_running_user() {
 case "$1" in
   remove)
     TARGET_USER="$(find_running_user)" || exit 0
-    runuser -l "$TARGET_USER" -c 'systemctl --user stop omp-web.service' 2>/dev/null || true
+    TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || echo 0)"
+    runuser -l "$TARGET_USER" -c "export XDG_RUNTIME_DIR=/run/user/$TARGET_UID; systemctl --user stop omp-web.service" 2>/dev/null || true
     ;;
   upgrade|deconfigure|failed-upgrade)
     :

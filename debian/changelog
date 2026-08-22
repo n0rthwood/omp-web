@@ -1,11 +1,11 @@
 omp-web (0.3.4) jammy; urgency=medium
 
-  * postinst: export XDG_RUNTIME_DIR explicitly in run_as_target so
-    `systemctl --user` resolves the user's private socket on hosts where
-    `runuser -l` does not populate it (fixes upgrade/install on pre-existing
-    legacy users; LXC fresh-install was unaffected) (refs #25).
+  * postinst/prerm: export XDG_RUNTIME_DIR explicitly so `systemctl --user`
+    resolves the user's private socket on hosts where `runuser -l` does not
+    populate it (fixes install/upgrade/remove on pre-existing legacy users;
+    LXC fresh-install was unaffected) (refs #25).
 
- -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 22:40:00 +0000
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 22:45:00 +0000
 
 omp-web (0.3.3) jammy; urgency=medium
 
