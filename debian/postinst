@@ -1,0 +1,260 @@
+#!/bin/bash
+# debian/postinst — omp-web
+#
+# Fresh install / resumed-after-interruption (completion marker absent):
+# creates the joysort account if absent (never $SUDO_USER — Design
+# decision 10), resolves/installs omp, writes the unit + env file +
+# ~/.omp/agent seeds + merged secrets (every sub-step idempotent, so a
+# resumed interrupted install converges safely instead of erroring or
+# duplicating state — Design decision 9), enables the service, then writes
+# the completion marker as the LAST step via mktemp+mv (atomic rename).
+#
+# Upgrade/reinstall (marker present): NEVER touches the unit, env file, or
+# anything under ~/.omp/agent/. Only overlays /opt/omp-web/current onto
+# ~/omp/ompweb via a non-destructive tar-pipe, refreshes bundled runtimes
+# if stale, restarts the service if it was running (restart interrupting a
+# live in-process AgentSession is accepted — Design decision 12), and
+# creates/refreshes a PATH drop-in only if the existing unit's PATH does
+# not already cover the resolved omp directory (Design decision 11).
+set -e
+
+ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
+OMP_WEB_SRC="${ROOT_PREFIX}/opt/omp-web/current"
+RUNTIME_DIR="${ROOT_PREFIX}/opt/omp-web/runtime"
+CONFIG_DIR="${ROOT_PREFIX}/opt/omp-web/config"
+SECRETS_DIR="${ROOT_PREFIX}/opt/omp-web/secrets"
+SYSTEMD_SEED="${ROOT_PREFIX}/opt/omp-web/systemd/omp-web.service"
+
+resolve_target_user() {
+  if [ -n "${OMP_WEB_TARGET_USER:-}" ]; then
+    echo "$OMP_WEB_TARGET_USER"
+  else
+    echo joysort
+  fi
+}
+
+case "$1" in
+  configure)
+    TARGET_USER="$(resolve_target_user)"
+
+    if ! getent passwd "$TARGET_USER" >/dev/null 2>&1; then
+      echo "omp-web: account '$TARGET_USER' does not exist; creating it (unconditional fresh-install default, never \$SUDO_USER — Design decision 10)" >&2
+      useradd -m -s /bin/bash "$TARGET_USER"
+      loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
+    fi
+
+    TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+    if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+      echo "omp-web: no home directory for user $TARGET_USER after creation" >&2
+      exit 1
+    fi
+
+    run_as_target() { runuser -l "$TARGET_USER" -c "$1"; }
+
+    MARKER_DIR="$TARGET_HOME/.local/state/omp-web"
+    MARKER="$MARKER_DIR/install.complete"
+    UNIT_PATH="$TARGET_HOME/.config/systemd/user/omp-web.service"
+    DEST="$TARGET_HOME/omp/ompweb"
+    DROPIN_DIR="$TARGET_HOME/.config/systemd/user/omp-web.service.d"
+    DROPIN="$DROPIN_DIR/10-omp-path.conf"
+
+    sync_bun() {
+      BUN_BIN="$TARGET_HOME/.bun/bin/bun"
+      if [ ! -x "$BUN_BIN" ]; then
+        install -D -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
+          "$RUNTIME_DIR/bun" "$BUN_BIN"
+        echo "omp-web: installed bun $(cat "$RUNTIME_DIR/bun.version") at $BUN_BIN" >&2
+      fi
+    }
+
+    # Resolves omp on the target user's full login PATH (not one hardcoded
+    # location, per addendum §8: "using ... that user's full effective
+    # login PATH"). Found -> leave it alone, return its directory. Absent
+    # -> install the bundled binary to ~/.local/bin (postinst only) and
+    # return that directory.
+    resolve_or_install_omp() {
+      local found_path found_dir
+      found_path="$(run_as_target 'command -v omp' 2>/dev/null || true)"
+      if [ -n "$found_path" ]; then
+        found_dir="$(dirname "$found_path")"
+        echo "omp-web: found existing omp at $found_path (preserved, not overwritten)" >&2
+        echo "$found_dir"
+        return 0
+      fi
+      local omp_bin="$TARGET_HOME/.local/bin/omp"
+      install -D -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
+        "$RUNTIME_DIR/omp" "$omp_bin"
+      echo "omp-web: installed bundled omp $(cat "$RUNTIME_DIR/omp.version") at $omp_bin" >&2
+      echo "$TARGET_HOME/.local/bin"
+    }
+
+    sync_app() {
+      local was_active=0
+      if run_as_target 'systemctl --user is-active --quiet omp-web.service' 2>/dev/null; then
+        was_active=1
+        run_as_target 'systemctl --user stop omp-web.service'
+      fi
+
+      mkdir -p "$DEST"
+      chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/omp" "$DEST"
+      # tar -cf - | tar -xf -: adds/overwrites every file from the new
+      # release, never deletes a file the release doesn't ship (unlike
+      # `rsync --delete`) — Design decision 5.
+      tar -cf - -C "$OMP_WEB_SRC" . \
+        | runuser -l "$TARGET_USER" -c "tar -xf - -C '$DEST'"
+
+      if [ "$was_active" = 1 ]; then
+        run_as_target 'systemctl --user daemon-reload && systemctl --user restart omp-web.service'
+      fi
+    }
+
+    write_fresh_unit() {
+      local omp_dir="$1"
+      mkdir -p "$TARGET_HOME/.config/systemd/user"
+      # Same-directory mktemp + mv (atomic rename): a kill mid-write
+      # leaves only a stray temp file, never a truncated omp-web.service —
+      # so a marker-absent resume never mistakes a corrupt partial unit
+      # for "already written".
+      local tmp_unit
+      tmp_unit="$(mktemp "$TARGET_HOME/.config/systemd/user/.omp-web.service.XXXXXX")"
+      sed \
+        -e "s|__HOME__|$TARGET_HOME|g" \
+        -e "s|^Environment=PATH=.*|Environment=PATH=$TARGET_HOME/.bun/bin:$omp_dir:/usr/local/bin:/usr/bin:/bin|" \
+        "$SYSTEMD_SEED" > "$tmp_unit"
+      chmod 0644 "$tmp_unit"
+      mv "$tmp_unit" "$UNIT_PATH"
+      chown "$TARGET_USER:$TARGET_USER" "$UNIT_PATH"
+    }
+
+    # Existing unit: NEVER rewritten. If its PATH= line covers neither the
+    # bun dir nor the resolved omp dir, create/refresh the drop-in — the
+    # only mechanism allowed to fix PATH on an already-deployed host
+    # (Design decision 11 / addendum §8).
+    ensure_unit_path_covers_omp() {
+      local omp_dir="$1"
+      local bun_dir="$TARGET_HOME/.bun/bin"
+      local unit_path_line
+      unit_path_line="$(grep -m1 '^Environment=PATH=' "$UNIT_PATH" 2>/dev/null || true)"
+      if printf '%s' "$unit_path_line" | grep -qF "$bun_dir" \
+        && { printf '%s' "$unit_path_line" | grep -qF "$omp_dir" \
+             || printf '%s' "$unit_path_line" | grep -qF "$TARGET_HOME/.local/bin"; }; then
+        return 0
+      fi
+
+      local desired
+      desired="Environment=PATH=$bun_dir:$omp_dir:/usr/local/bin:/usr/bin:/bin"
+      mkdir -p "$DROPIN_DIR"
+      local wanted
+      wanted="$(printf '[Service]\n%s\n' "$desired")"
+      local existing=""
+      [ -f "$DROPIN" ] && existing="$(cat "$DROPIN")"
+      if [ "$existing" != "$wanted" ]; then
+        printf '%s' "$wanted" > "$DROPIN"
+        chown -R "$TARGET_USER:$TARGET_USER" "$DROPIN_DIR"
+        echo "omp-web: wrote $DROPIN (existing unit's PATH did not cover $omp_dir)" >&2
+        run_as_target 'systemctl --user daemon-reload'
+        if run_as_target 'systemctl --user is-active --quiet omp-web.service' 2>/dev/null; then
+          run_as_target 'systemctl --user restart omp-web.service'
+        fi
+      fi
+    }
+
+    seed_env_file() {
+      local env_dir="$TARGET_HOME/omp/ops/env"
+      mkdir -p "$env_dir"
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/omp"
+      local env_file="$env_dir/5010.env"
+      if [ ! -f "$env_file" ]; then
+        local host_ip
+        host_ip="$(run_as_target "hostname -I | awk '{print \$1}'")"
+        local password
+        password="$(python3 "$DEST/tools/xor-secrets.py" get \
+          --cipher "$SECRETS_DIR/secrets.env.xorb64" \
+          --key "$SECRETS_DIR/xor.key" \
+          --var OMP_WEB_PASSWORD)"
+        # Same-directory mktemp + mv: a kill mid-write leaves only a stray
+        # temp file, never a truncated 5010.env — a marker-absent resume
+        # never mistakes a half-written env file for "already seeded".
+        local tmp_env
+        tmp_env="$(mktemp "$env_dir/.5010.env.XXXXXX")"
+        {
+          echo "OMP_WEB_HOSTNAME=$host_ip"
+          echo "OMP_WEB_USERNAME=omp"
+          echo "OMP_WEB_PASSWORD=$password"
+          echo "OMP_WEB_TERMINALS=1"
+        } > "$tmp_env"
+        chmod 0600 "$tmp_env"
+        mv "$tmp_env" "$env_file"
+        chown "$TARGET_USER:$TARGET_USER" "$env_file"
+        echo "omp-web: wrote $env_file (OMP_WEB_HOSTNAME=$host_ip)" >&2
+      fi
+    }
+
+    seed_agent_dir() {
+      local agent_dir="$TARGET_HOME/.omp/agent"
+      mkdir -p "$agent_dir"
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.omp"
+
+      local env_target="$agent_dir/.env"
+      [ -f "$env_target" ] || : > "$env_target"
+      chmod 0600 "$env_target"
+      python3 "$DEST/tools/xor-secrets.py" merge \
+        --cipher "$SECRETS_DIR/secrets.env.xorb64" \
+        --key "$SECRETS_DIR/xor.key" \
+        --target "$env_target" \
+        --skip-var OMP_WEB_PASSWORD
+      chown "$TARGET_USER:$TARGET_USER" "$env_target"
+
+      [ -f "$agent_dir/models.yml" ] \
+        || install -m 0644 -o "$TARGET_USER" -g "$TARGET_USER" \
+             "$CONFIG_DIR/models.yml.default" "$agent_dir/models.yml"
+      [ -f "$agent_dir/config.yml" ] \
+        || install -m 0644 -o "$TARGET_USER" -g "$TARGET_USER" \
+             "$CONFIG_DIR/config.yml.default" "$agent_dir/config.yml"
+    }
+
+    write_marker() {
+      mkdir -p "$MARKER_DIR"
+      chown "$TARGET_USER:$TARGET_USER" "$MARKER_DIR"
+      local tmp
+      tmp="$(mktemp "$MARKER_DIR/.install.complete.XXXXXX")"
+      date -u +%FT%TZ > "$tmp"
+      mv "$tmp" "$MARKER"
+      chown "$TARGET_USER:$TARGET_USER" "$MARKER"
+    }
+
+    if [ ! -f "$MARKER" ]; then
+      echo "omp-web: no completion marker at $MARKER — running fresh-install-or-resume (every step below is idempotent)" >&2
+      sync_bun
+      OMP_DIR="$(resolve_or_install_omp)"
+      sync_app
+      if [ -f "$UNIT_PATH" ]; then
+        # Interrupted a previous run after the unit was written but before
+        # the marker: never overwrite it, same as a normal upgrade would.
+        ensure_unit_path_covers_omp "$OMP_DIR"
+      else
+        write_fresh_unit "$OMP_DIR"
+      fi
+      seed_env_file
+      seed_agent_dir
+      run_as_target 'systemctl --user daemon-reload && systemctl --user enable --now omp-web.service'
+      write_marker
+    else
+      echo "omp-web: completion marker present — upgrade path (unit/env/agent dir untouched)" >&2
+      sync_bun
+      OMP_DIR="$(resolve_or_install_omp)"
+      sync_app
+      ensure_unit_path_covers_omp "$OMP_DIR"
+    fi
+
+    sleep 1
+    if run_as_target 'systemctl --user is-active --quiet omp-web.service'; then
+      echo "omp-web: omp-web.service is active for $TARGET_USER (port 5010)" >&2
+    else
+      echo "omp-web: omp-web.service is not active; check:" >&2
+      echo "  runuser -l $TARGET_USER -c 'systemctl --user status omp-web.service --no-pager'" >&2
+    fi
+    ;;
+esac
+
+exit 0

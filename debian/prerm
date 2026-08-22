@@ -1,0 +1,33 @@
+#!/bin/bash
+# debian/prerm — omp-web
+# Stops the user service on `apt remove` (not on upgrade — postinst's
+# sync_app already stops/restarts as needed there) so no orphaned process
+# keeps running against files this package is about to delete.
+set -e
+
+ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
+
+find_running_user() {
+  if [ -n "${OMP_WEB_TARGET_USER:-}" ]; then
+    echo "$OMP_WEB_TARGET_USER"
+    return 0
+  fi
+  for home in "${ROOT_PREFIX}"/home/*; do
+    [ -f "$home/.config/systemd/user/omp-web.service" ] || continue
+    basename "$home"
+    return 0
+  done
+  return 1
+}
+
+case "$1" in
+  remove)
+    TARGET_USER="$(find_running_user)" || exit 0
+    runuser -l "$TARGET_USER" -c 'systemctl --user stop omp-web.service' 2>/dev/null || true
+    ;;
+  upgrade|deconfigure|failed-upgrade)
+    :
+    ;;
+esac
+
+exit 0

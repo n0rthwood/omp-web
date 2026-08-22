@@ -1,0 +1,8 @@
+omp-web (0.3.0) jammy; urgency=medium
+
+  * Initial Debian packaging: build-deb.sh, debhelper rules, XOR-obfuscated
+    provider-secret seeding, crash-safe fresh-install-or-resume postinst,
+    mandatory omp CLI PATH handling, and systemd --user service
+    installation (closes #25).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 20 Aug 2026 12:00:00 +0000

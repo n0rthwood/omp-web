@@ -1,0 +1,40 @@
+#!/bin/bash
+# debian/preinst — omp-web
+#
+# Read-only prerequisite checks ONLY. The bundled omp/bun binaries are not
+# yet unpacked when preinst runs (dpkg unpacks the new package's files
+# between preinst and postinst) — installing the bundled omp CLI happens
+# in postinst, never here. See
+# docs/plans/2026-08-20-omp-web-release-pipeline.md, Design decision 11.
+set -e
+
+ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
+
+case "$1" in
+  install|upgrade)
+    if [ -d "${ROOT_PREFIX}/opt/omp-web/current" ] && [ ! -w "${ROOT_PREFIX}/opt/omp-web/current" ]; then
+      echo "omp-web: ${ROOT_PREFIX}/opt/omp-web/current exists but is not writable by root; aborting." >&2
+      exit 1
+    fi
+
+    AVAIL_KB="$(df --output=avail -k "${ROOT_PREFIX:-/opt}" 2>/dev/null | tail -1 | tr -d ' ')"
+    if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt 512000 ]; then
+      echo "omp-web: less than 500MB free (${AVAIL_KB}KB) at ${ROOT_PREFIX:-/opt} — the package payload plus a fresh ~/omp/ompweb copy needs more headroom; aborting." >&2
+      exit 1
+    fi
+
+    TARGET_USER="${OMP_WEB_TARGET_USER:-joysort}"
+    if getent passwd "$TARGET_USER" >/dev/null 2>&1; then
+      EXISTING_OMP="$(runuser -l "$TARGET_USER" -c 'command -v omp' 2>/dev/null || true)"
+      if [ -n "$EXISTING_OMP" ]; then
+        echo "omp-web: preinst check — $TARGET_USER already has omp at $EXISTING_OMP; postinst will preserve it." >&2
+      else
+        echo "omp-web: preinst check — $TARGET_USER has no omp on PATH yet; postinst will install the bundled one." >&2
+      fi
+    else
+      echo "omp-web: preinst check — account '$TARGET_USER' does not exist yet; postinst will create it." >&2
+    fi
+    ;;
+esac
+
+exit 0

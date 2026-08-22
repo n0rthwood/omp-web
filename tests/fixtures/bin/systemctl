@@ -1,0 +1,21 @@
+#!/bin/bash
+# systemctl --user SUBCOMMAND [unit] — records invocations; is-active
+# reflects a state file the test can pre-seed so postinst's
+# active/inactive branching is exercisable.
+LOG="${OMP_WEB_TEST_ROOT}/systemctl.log"
+echo "$*" >> "$LOG"
+STATE_FILE="${OMP_WEB_TEST_ROOT}/omp-web.service.state"
+case "$2" in
+  is-active)
+    [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE")" = active ] && exit 0
+    exit 3
+    ;;
+  enable|start|restart)
+    echo active > "$STATE_FILE"
+    ;;
+  stop)
+    echo inactive > "$STATE_FILE"
+    ;;
+  daemon-reload) ;;
+esac
+exit 0

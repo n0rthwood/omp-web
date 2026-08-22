@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+
+FAIL=0
+assert_eq() {
+  local desc="$1" expected="$2" actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    echo "ok - $desc"
+  else
+    echo "FAIL - $desc: expected [$expected] got [$actual]"
+    FAIL=1
+  fi
+}
+assert_file_exists() {
+  local desc="$1" path="$2"
+  if [ -f "$path" ]; then
+    echo "ok - $desc"
+  else
+    echo "FAIL - $desc: missing $path"
+    FAIL=1
+  fi
+}
+
+new_fixture_root() { mktemp -d "${TMPDIR:-/tmp}/omp-web-fixture.XXXXXX"; }
+
+build_fake_payload() {
+  local root="$1"
+  mkdir -p "$root/opt/omp-web/current/tools" "$root/opt/omp-web/runtime" \
+    "$root/opt/omp-web/config" "$root/opt/omp-web/secrets" "$root/opt/omp-web/systemd"
+  cp "$REPO_ROOT/tools/xor-secrets.py" "$root/opt/omp-web/current/tools/"
+  printf '#!/bin/bash\necho bun-fake "$@"\n' > "$root/opt/omp-web/runtime/bun"
+  printf '#!/bin/bash\necho omp-fake "$@"\n' > "$root/opt/omp-web/runtime/omp"
+  chmod +x "$root/opt/omp-web/runtime/bun" "$root/opt/omp-web/runtime/omp"
+  echo "1.3.14" > "$root/opt/omp-web/runtime/bun.version"
+  echo "17.3.4" > "$root/opt/omp-web/runtime/omp.version"
+  printf 'modelRoles:\n  plan: {}\n' > "$root/opt/omp-web/config/config.yml.default"
+  printf 'providers:\n  deepseek: {}\n' > "$root/opt/omp-web/config/models.yml.default"
+  cp "$REPO_ROOT/release/systemd/omp-web.service" "$root/opt/omp-web/systemd/omp-web.service"
+
+  mkdir -p "$root/secrets-plain"
+  cat > "$root/secrets-plain/secrets.env.plain" <<'EOF'
+DEEPSEEK_API_KEY=fixture-deepseek
+XAI_API_KEY=fixture-xai
+OMP_WEB_PASSWORD=fixture-password
+EOF
+  python3 "$REPO_ROOT/tools/xor-secrets.py" seal \
+    --plain "$root/secrets-plain/secrets.env.plain" \
+    --out-cipher "$root/opt/omp-web/secrets/secrets.env.xorb64" \
+    --out-key "$root/opt/omp-web/secrets/xor.key"
+}
+
+run_preinst() {
+  local root="$1"
+  OMP_WEB_TEST_ROOT="$root" PATH="$HERE/fixtures/bin:$PATH" \
+    bash "$REPO_ROOT/debian/preinst" install
+}
+
+run_postinst() {
+  local root="$1"; shift
+  OMP_WEB_TEST_ROOT="$root" PATH="$HERE/fixtures/bin:$PATH" \
+    bash "$REPO_ROOT/debian/postinst" configure "$@"
+}
+
+# --- Test 1: preinst is read-only and never installs the payload ---
+ROOT0="$(new_fixture_root)"
+build_fake_payload "$ROOT0"
+run_preinst "$ROOT0"
+OMP_INSTALLED_BY_PREINST="$( [ -f "$ROOT0/home/joysort/.local/bin/omp" ] && echo 1 || echo 0 )"
+assert_eq "preinst: never installs the bundled omp binary" "0" "$OMP_INSTALLED_BY_PREINST"
+
+# --- Test 2: fresh install provisions everything and writes the marker ---
+ROOT1="$(new_fixture_root)"
+build_fake_payload "$ROOT1"
+run_postinst "$ROOT1"
+HOME1="$ROOT1/home/joysort"
+assert_file_exists "fresh install: marker written" "$HOME1/.local/state/omp-web/install.complete"
+assert_file_exists "fresh install: unit written" "$HOME1/.config/systemd/user/omp-web.service"
+assert_file_exists "fresh install: env file written" "$HOME1/omp/ops/env/5010.env"
+assert_file_exists "fresh install: agent .env written" "$HOME1/.omp/agent/.env"
+DEEPSEEK_VAL="$(grep '^DEEPSEEK_API_KEY=' "$HOME1/.omp/agent/.env" | cut -d= -f2)"
+assert_eq "fresh install: provider secret merged" "fixture-deepseek" "$DEEPSEEK_VAL"
+PW_COUNT="$(grep -c OMP_WEB_PASSWORD "$HOME1/.omp/agent/.env" || true)"
+assert_eq "fresh install: password kept out of agent .env" "0" "$PW_COUNT"
+
+# --- Test 3: re-running fresh install is idempotent ---
+BEFORE_LINES="$(wc -l < "$HOME1/.omp/agent/.env")"
+run_postinst "$ROOT1"
+AFTER_LINES="$(wc -l < "$HOME1/.omp/agent/.env")"
+assert_eq "idempotent re-run: agent .env unchanged" "$BEFORE_LINES" "$AFTER_LINES"
+UNIT_SUM_BEFORE="$(sha256sum "$HOME1/.config/systemd/user/omp-web.service" | cut -d' ' -f1)"
+run_postinst "$ROOT1"
+UNIT_SUM_AFTER="$(sha256sum "$HOME1/.config/systemd/user/omp-web.service" | cut -d' ' -f1)"
+assert_eq "idempotent re-run: unit unchanged" "$UNIT_SUM_BEFORE" "$UNIT_SUM_AFTER"
+
+# --- Test 4: crash-safe resume — a kill mid-write leaves only a stray
+# temp file (write_fresh_unit's mktemp target), never a truncated final
+# unit — confirms the atomic-write model actually prevents the corrupt
+# resume scenario, then confirms resume still completes fully. ---
+ROOT3="$(new_fixture_root)"
+build_fake_payload "$ROOT3"
+PATH="$HERE/fixtures/bin:$PATH" OMP_WEB_TEST_ROOT="$ROOT3" \
+  "$HERE/fixtures/bin/useradd" -m -s /bin/bash joysort
+HOME3="$ROOT3/home/joysort"
+mkdir -p "$HOME3/.config/systemd/user"
+echo "leftover-temp-from-a-killed-write_fresh_unit" > "$HOME3/.config/systemd/user/.omp-web.service.ab12cd"
+FINAL_UNIT_PRESENT_BEFORE="$( [ -f "$HOME3/.config/systemd/user/omp-web.service" ] && echo 1 || echo 0 )"
+assert_eq "crash-safe: killed mktemp write left no final unit file" "0" "$FINAL_UNIT_PRESENT_BEFORE"
+MARKER_PRESENT_BEFORE="$( [ -f "$HOME3/.local/state/omp-web/install.complete" ] && echo 1 || echo 0 )"
+assert_eq "crash-safe: no marker before resume" "0" "$MARKER_PRESENT_BEFORE"
+run_postinst "$ROOT3"
+assert_file_exists "crash-safe: resume completes and writes marker" "$HOME3/.local/state/omp-web/install.complete"
+assert_file_exists "crash-safe: resume writes a real final unit file" "$HOME3/.config/systemd/user/omp-web.service"
+UNIT_HAS_SECTION="$(grep -c '^\[Unit\]' "$HOME3/.config/systemd/user/omp-web.service" || true)"
+assert_eq "crash-safe: resumed unit is well-formed, not the stray temp content" "1" "$UNIT_HAS_SECTION"
+assert_file_exists "crash-safe: resume still seeds env file" "$HOME3/omp/ops/env/5010.env"
+assert_file_exists "crash-safe: resume still seeds agent .env" "$HOME3/.omp/agent/.env"
+
+# --- Test 5: upgrade path never rewrites the unit or env file, preserves operator files ---
+ROOT4="$(new_fixture_root)"
+build_fake_payload "$ROOT4"
+run_postinst "$ROOT4"
+HOME4="$ROOT4/home/joysort"
+echo "operator-customized-value" >> "$HOME4/omp/ops/env/5010.env"
+UNIT_SUM_BEFORE4="$(sha256sum "$HOME4/.config/systemd/user/omp-web.service" | cut -d' ' -f1)"
+ENV_SUM_BEFORE4="$(sha256sum "$HOME4/omp/ops/env/5010.env" | cut -d' ' -f1)"
+mkdir -p "$HOME4/omp/ompweb"
+echo "operator-added-file" > "$HOME4/omp/ompweb/operator-note.txt"
+run_postinst "$ROOT4"
+UNIT_SUM_AFTER4="$(sha256sum "$HOME4/.config/systemd/user/omp-web.service" | cut -d' ' -f1)"
+ENV_SUM_AFTER4="$(sha256sum "$HOME4/omp/ops/env/5010.env" | cut -d' ' -f1)"
+assert_eq "upgrade: unit byte-identical" "$UNIT_SUM_BEFORE4" "$UNIT_SUM_AFTER4"
+assert_eq "upgrade: env file byte-identical" "$ENV_SUM_BEFORE4" "$ENV_SUM_AFTER4"
+assert_file_exists "upgrade: non-destructive overlay preserves operator file" "$HOME4/omp/ompweb/operator-note.txt"
+
+# --- Test 6: PATH drop-in only created when the existing unit's PATH misses omp/bun ---
+ROOT5="$(new_fixture_root)"
+build_fake_payload "$ROOT5"
+run_postinst "$ROOT5"
+HOME5="$ROOT5/home/joysort"
+sed -i 's|^Environment=PATH=.*|Environment=PATH=/usr/local/bin:/usr/bin:/bin|' \
+  "$HOME5/.config/systemd/user/omp-web.service"
+run_postinst "$ROOT5"
+DROPIN="$HOME5/.config/systemd/user/omp-web.service.d/10-omp-path.conf"
+assert_file_exists "drop-in created when unit PATH lacks omp/bun dirs" "$DROPIN"
+DROPIN_SUM_BEFORE5="$(sha256sum "$DROPIN" | cut -d' ' -f1)"
+run_postinst "$ROOT5"
+DROPIN_SUM_AFTER5="$(sha256sum "$DROPIN" | cut -d' ' -f1)"
+assert_eq "drop-in: idempotent re-run does not duplicate/rewrite" "$DROPIN_SUM_BEFORE5" "$DROPIN_SUM_AFTER5"
+
+# --- Test 7: prerm stops the service on remove; postrm purge only deletes /opt/omp-web ---
+ROOT6="$(new_fixture_root)"
+build_fake_payload "$ROOT6"
+run_postinst "$ROOT6"
+HOME6="$ROOT6/home/joysort"
+OMP_WEB_TEST_ROOT="$ROOT6" PATH="$HERE/fixtures/bin:$PATH" bash "$REPO_ROOT/debian/prerm" remove
+assert_eq "prerm: service stopped on remove" "inactive" "$(cat "$ROOT6/omp-web.service.state")"
+OMP_WEB_TEST_ROOT="$ROOT6" PATH="$HERE/fixtures/bin:$PATH" bash "$REPO_ROOT/debian/postrm" purge
+PKG_DIR_GONE="$( [ -d "$ROOT6/opt/omp-web" ] && echo 1 || echo 0 )"
+AGENT_DIR_KEPT="$( [ -d "$HOME6/.omp/agent" ] && echo 1 || echo 0 )"
+APP_DIR_KEPT="$( [ -d "$HOME6/omp/ompweb" ] && echo 1 || echo 0 )"
+assert_eq "postrm purge: package tree removed" "0" "$PKG_DIR_GONE"
+assert_eq "postrm purge: user's agent dir untouched" "1" "$AGENT_DIR_KEPT"
+assert_eq "postrm purge: user's app dir untouched" "1" "$APP_DIR_KEPT"
+
+echo "---"
+if [ "$FAIL" = "1" ]; then
+  echo "FIXTURE TESTS FAILED"
+  exit 1
+fi
+echo "ALL FIXTURE TESTS PASSED"

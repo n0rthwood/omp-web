@@ -1,0 +1,3 @@
+#!/bin/bash
+# No-op — the fixture user isn't a real OS account, so real chown would fail.
+exit 0
