@@ -88,17 +88,32 @@ jobs:
           name: omp-web-deb-${{ needs.build.outputs.version }}
           path: .
 
-      # joysort-release-tools is pre-cloned at /home/joysort/joysort-release-tools
-      # on the self-hosted runner. Copy it into the workspace so the composite
-      # action resolves via a relative path (GitHub Actions requires
-      # `uses: ./path` for local composite actions). This avoids the cross-org
-      # private-action resolution problem entirely — no GH_PAT, no
-      # repo-visibility change.
-      - name: Stage local joysort-release-tools into workspace
+      # joysort-release-tools holds the canonical update-apt-repo composite
+      # action. On the self-hosted runner it lives at
+      # /home/joysort/joysort-release-tools (a pre-existing git clone). This
+      # step self-heals: git-pull if present, git-clone if absent, then copies
+      # into the workspace so the action resolves via `./joysort-release-tools`.
+      # This avoids the cross-org private-action resolution problem entirely —
+      # no GH_PAT, no repo-visibility change — and survives a runner rebuild.
+      # If the runner loses SSH access to JoySort org repos, the clone step
+      # will fail loudly here (before the publish step), not silently use stale
+      # release logic.
+      - name: Stage joysort-release-tools (self-healing clone or pull)
         shell: bash
         run: |
+          set -eu
+          SRC="/home/joysort/joysort-release-tools"
+          if [ -d "$SRC/.git" ]; then
+            git -C "$SRC" pull --ff-only --quiet || true
+          else
+            rm -rf "$SRC"
+            git clone --depth 1 https://github.com/JoySort/joysort-release-tools "$SRC"
+          fi
+          # Verify the composite action actually exists (fail loudly if stale)
+          test -f "$SRC/.github/actions/update-apt-repo/action.yml" \
+            || { echo "ERROR: update-apt-repo action.yml not found in $SRC" >&2; exit 1; }
           rm -rf ./joysort-release-tools
-          cp -a /home/joysort/joysort-release-tools ./joysort-release-tools
+          cp -a "$SRC" ./joysort-release-tools
 
       - name: Update APT repository metadata
         uses: ./joysort-release-tools/.github/actions/update-apt-repo
