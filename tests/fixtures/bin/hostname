@@ -1,0 +1,3 @@
+#!/bin/bash
+[ "$1" = "-I" ] && { echo "10.0.0.99 "; exit 0; }
+exec /usr/bin/hostname "$@"

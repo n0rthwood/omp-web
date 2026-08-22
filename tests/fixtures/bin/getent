@@ -1,0 +1,8 @@
+#!/bin/bash
+# getent passwd NAME
+if [ "$1" = "passwd" ] && [ -n "${OMP_WEB_TEST_ROOT:-}" ]; then
+  PASSWD_FILE="${OMP_WEB_TEST_ROOT}/etc/passwd.fixture"
+  [ -f "$PASSWD_FILE" ] && grep "^$2:" "$PASSWD_FILE"
+  exit $?
+fi
+exec /usr/bin/getent "$@"

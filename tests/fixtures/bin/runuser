@@ -1,0 +1,10 @@
+#!/bin/bash
+# runuser -l NAME -c CMD — the fixture "target user" isn't a real OS
+# account, so execute CMD as the current (real) user with HOME repointed
+# at the fixture home directory and the fixture bin/ still first on PATH.
+shift # drop -l
+NAME="$1"; shift
+shift # drop -c
+CMD="$1"
+HOME_DIR="$(getent passwd "$NAME" | cut -d: -f6)"
+HOME="$HOME_DIR" bash -c "$CMD"

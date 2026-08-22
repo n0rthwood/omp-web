@@ -1,0 +1,10 @@
+#!/bin/bash
+# useradd -m -s /bin/bash NAME — records a synthetic passwd entry under
+# OMP_WEB_TEST_ROOT instead of touching the real system.
+NAME="${@: -1}"
+HOME_DIR="${OMP_WEB_TEST_ROOT}/home/$NAME"
+mkdir -p "$HOME_DIR"
+PASSWD_FILE="${OMP_WEB_TEST_ROOT}/etc/passwd.fixture"
+mkdir -p "$(dirname "$PASSWD_FILE")"
+grep -q "^$NAME:" "$PASSWD_FILE" 2>/dev/null || \
+  echo "$NAME:x:9999:9999:fixture:$HOME_DIR:/bin/bash" >> "$PASSWD_FILE"
