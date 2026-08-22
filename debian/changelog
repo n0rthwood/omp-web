@@ -1,3 +1,10 @@
+omp-web (0.3.5) jammy; urgency=medium
+
+  * web-sessions: omit the Secure cookie flag for RFC1918 private IPv4/IPv6
+    hosts so login over plain HTTP on fleet remotes works (closes #28).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 23:30:00 +0000
+
 omp-web (0.3.4) jammy; urgency=medium
 
   * postinst/prerm: export XDG_RUNTIME_DIR explicitly so `systemctl --user`
