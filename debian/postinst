@@ -178,7 +178,7 @@ case "$1" in
         local host_ip
         host_ip="$(run_as_target "hostname -I | awk '{print \$1}'")"
         local password
-        password="$(python3 "$DEST/tools/xor-secrets.py" get \
+        password="$(python3 "$OMP_WEB_SRC/tools/xor-secrets.py" get \
           --cipher "$SECRETS_DIR/secrets.env.xorb64" \
           --key "$SECRETS_DIR/xor.key" \
           --var OMP_WEB_PASSWORD)"
@@ -208,7 +208,7 @@ case "$1" in
       local env_target="$agent_dir/.env"
       [ -f "$env_target" ] || : > "$env_target"
       chmod 0600 "$env_target"
-      python3 "$DEST/tools/xor-secrets.py" merge \
+      python3 "$OMP_WEB_SRC/tools/xor-secrets.py" merge \
         --cipher "$SECRETS_DIR/secrets.env.xorb64" \
         --key "$SECRETS_DIR/xor.key" \
         --target "$env_target" \
@@ -240,7 +240,13 @@ case "$1" in
       echo "omp-web: no completion marker at $MARKER — running fresh-install-or-resume (every step below is idempotent)" >&2
       sync_bun
       OMP_DIR="$(resolve_or_install_omp)"
-      sync_app
+      # Seed env/config FIRST, from the package's own /opt/omp-web copy, so
+      # the service can always (re)start below. A resume after an interrupted
+      # install may find the service still active but the env file missing —
+      # syncing the app (and its restart) before re-seeding the env file would
+      # fail to start the service.
+      seed_env_file
+      seed_agent_dir
       if [ -f "$UNIT_PATH" ]; then
         # Interrupted a previous run after the unit was written but before
         # the marker: never overwrite it, same as a normal upgrade would.
@@ -248,8 +254,7 @@ case "$1" in
       else
         write_fresh_unit "$OMP_DIR"
       fi
-      seed_env_file
-      seed_agent_dir
+      sync_app
       run_as_target 'systemctl --user daemon-reload && systemctl --user enable --now omp-web.service'
       write_marker
     else

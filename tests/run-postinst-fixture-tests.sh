@@ -164,6 +164,21 @@ assert_eq "postrm purge: package tree removed" "0" "$PKG_DIR_GONE"
 assert_eq "postrm purge: user's agent dir untouched" "1" "$AGENT_DIR_KEPT"
 assert_eq "postrm purge: user's app dir untouched" "1" "$APP_DIR_KEPT"
 
+# --- Test 8: resume re-seeds env before restarting a still-active service ---
+# A kill after `enable --now` but before `write_marker` leaves the service
+# running with the marker absent; if the env file is then missing, the resume
+# path must re-seed it BEFORE sync_app restarts the service (regression: the
+# original order restarted first and the start failed on the missing env file).
+ROOT8="$(new_fixture_root)"
+build_fake_payload "$ROOT8"
+run_postinst "$ROOT8"
+HOME8="$ROOT8/home/joysort"
+rm -f "$HOME8/.local/state/omp-web/install.complete"
+rm -f "$HOME8/omp/ops/env/5010.env"
+run_postinst "$ROOT8"
+assert_file_exists "resume: env file re-seeded before restart" "$HOME8/omp/ops/env/5010.env"
+assert_file_exists "resume: marker re-written after resume" "$HOME8/.local/state/omp-web/install.complete"
+assert_eq "resume: service still active after re-seed+restart" "active" "$(cat "$ROOT8/omp-web.service.state")"
 echo "---"
 if [ "$FAIL" = "1" ]; then
   echo "FIXTURE TESTS FAILED"

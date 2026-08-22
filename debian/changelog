@@ -1,3 +1,11 @@
+omp-web (0.3.2) jammy; urgency=medium
+
+  * postinst: re-seed env/config before restarting a still-active service on
+    resume, fixing interrupted-install recovery when the env file is missing
+    (refs #25).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 14:00:00 +0000
+
 omp-web (0.3.1) jammy; urgency=medium
 
   * postinst: chown ~/.config, ~/.bun, ~/.local trees after creating them
