@@ -1,3 +1,11 @@
+omp-web (0.3.1) jammy; urgency=medium
+
+  * postinst: chown ~/.config, ~/.bun, ~/.local trees after creating them
+    as root so `systemctl --user enable` and the target user's own install
+    dirs work on a fresh host (LXC-test fix) (refs #25).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 12:00:00 +0000
+
 omp-web (0.3.0) jammy; urgency=medium
 
   * Initial Debian packaging: build-deb.sh, debhelper rules, XOR-obfuscated

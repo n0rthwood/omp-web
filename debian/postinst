@@ -63,6 +63,10 @@ case "$1" in
       if [ ! -x "$BUN_BIN" ]; then
         install -D -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
           "$RUNTIME_DIR/bun" "$BUN_BIN"
+        # install -D creates the intermediate ~/.bun dirs as root; chown
+        # them so the target user owns its own bun install dir (self-update,
+        # future installs, and service-invoked bun all need write access).
+        chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.bun"
         echo "omp-web: installed bun $(cat "$RUNTIME_DIR/bun.version") at $BUN_BIN" >&2
       fi
     }
@@ -84,6 +88,9 @@ case "$1" in
       local omp_bin="$TARGET_HOME/.local/bin/omp"
       install -D -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" \
         "$RUNTIME_DIR/omp" "$omp_bin"
+      # install -D creates ~/.local and ~/.local/bin as root; chown the
+      # tree so the target user owns its own local bin dir.
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.local"
       echo "omp-web: installed bundled omp $(cat "$RUNTIME_DIR/omp.version") at $omp_bin" >&2
       echo "$TARGET_HOME/.local/bin"
     }
@@ -111,6 +118,9 @@ case "$1" in
     write_fresh_unit() {
       local omp_dir="$1"
       mkdir -p "$TARGET_HOME/.config/systemd/user"
+      # mkdir -p runs as root, leaving ~/.config/systemd/user root-owned;
+      # systemctl --user enable needs write access there (default.target.wants/).
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config"
       # Same-directory mktemp + mv (atomic rename): a kill mid-write
       # leaves only a stray temp file, never a truncated omp-web.service —
       # so a marker-absent resume never mistakes a corrupt partial unit
@@ -215,7 +225,10 @@ case "$1" in
 
     write_marker() {
       mkdir -p "$MARKER_DIR"
-      chown "$TARGET_USER:$TARGET_USER" "$MARKER_DIR"
+      # mkdir -p runs as root; chown the ~/.local/state tree so the marker
+      # dir (and anything the app writes under ~/.local/state later) is
+      # owned by the target user.
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.local/state"
       local tmp
       tmp="$(mktemp "$MARKER_DIR/.install.complete.XXXXXX")"
       date -u +%FT%TZ > "$tmp"
