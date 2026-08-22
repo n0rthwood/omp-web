@@ -1,0 +1,106 @@
+name: Release Debian package
+
+on:
+  push:
+    tags:
+      - "omp-web-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-deb-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build omp-web .deb
+    runs-on: [self-hosted, Linux, X64, omp-web]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          changelog_version="$(dpkg-parsechangelog -S Version)"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#omp-web-v}"
+            if [[ "$tag_version" != "$changelog_version" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match debian/changelog version ${changelog_version}" >&2
+              exit 1
+            fi
+            echo "version=$changelog_version" >> "$GITHUB_OUTPUT"
+          else
+            # workflow_dispatch: a distinct, non-colliding test version per
+            # docs/workspace/joysort2026 release-hardening-rules.md ("Do not
+            # use ~ for test builds"; apt sorts a bare +suffix higher, never
+            # replacing a formal tagged version in the repo). This build job
+            # produces an artifact only — the publish job below never runs
+            # for workflow_dispatch, so this version never reaches the apt
+            # repo (Design decision 3).
+            echo "version=${changelog_version}+github.action.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved build version: $(cat "$GITHUB_OUTPUT" | tail -1)"
+
+      - name: Apply resolved version to debian/changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "1s/(${CHANGELOG_VER:-$(dpkg-parsechangelog -S Version)})/($VERSION)/" debian/changelog
+          head -3 debian/changelog
+
+      - name: Build .deb
+        env:
+          OMP_WEB_OWNER_SECRETS: /home/joysort/joysort-release-credential/omp-web-secrets.env.plain
+          OMP_WEB_ASSEMBLED_SECRETS: /home/joysort/joysort-release-credential/omp-web-secrets.assembled.env.plain
+        run: ./build-deb.sh
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-web-deb-${{ steps.version.outputs.version }}
+          path: debian_dist/*.deb
+          retention-days: 30
+
+  publish:
+    name: Publish to the R2 apt repository
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: [self-hosted, Linux, X64, omp-web]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Download .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omp-web-deb-${{ needs.build.outputs.version }}
+          path: .
+
+      # Prerequisite: see docs/plans/2026-08-20-omp-web-release-pipeline.md,
+      # Design decision 8 / Task 15. This step references the canonical
+      # action verbatim, with no PAT of any kind declared in this workflow.
+      - name: Update APT repository metadata
+        uses: JoySort/joysort-release-tools/.github/actions/update-apt-repo@main
+        with:
+          r2-account-id: ${{ vars.R2_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ vars.R2_BUCKET }}
+          gpg-private-key: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.REPO_GPG_PASSPHRASE }}
+          codename: jammy
+
+      - name: Verify the package landed in the apt repo
+        shell: bash
+        run: |
+          curl -fsS "https://repo.joysort.cc/apt/dists/jammy/main/binary-amd64/Packages" \
+            | grep -A2 "^Package: omp-web$"
+          curl -fsS "https://repo.joysort.cc/apt/dists/jammy/main/binary-amd64/Packages" \
+            | grep -A2 "^Package: omp-web$" | grep -q "Version: ${{ needs.build.outputs.version }}"
