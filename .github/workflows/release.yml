@@ -17,6 +17,11 @@ jobs:
   build:
     name: Build omp-web .deb
     runs-on: [self-hosted, Linux, X64, omp-web]
+    # A hung `next build --webpack` (transient provider/fleet network stall
+    # during "collecting page data") must fail fast instead of blocking the
+    # runner for hours. 40 minutes is comfortably above the observed ~25 min
+    # successful build.
+    timeout-minutes: 40
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
