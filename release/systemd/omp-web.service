@@ -1,0 +1,27 @@
+[Unit]
+Description=omp-web production (port 5010, authenticated, Terminal tab enabled)
+Documentation=https://github.com/n0rthwood/omp-web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/omp/ompweb
+
+EnvironmentFile=__HOME__/omp/ops/env/5010.env
+Environment=NODE_ENV=production
+Environment=PORT=5010
+Environment=PATH=__HOME__/.bun/bin:__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SHELL=/bin/bash
+
+ExecStart=__HOME__/.bun/bin/bun --bun __HOME__/omp/ompweb/node_modules/next/dist/bin/next start -H 0.0.0.0 -p 5010
+
+Restart=always
+RestartSec=2
+
+KillSignal=SIGTERM
+TimeoutStopSec=20
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
