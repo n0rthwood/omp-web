@@ -1,0 +1,21 @@
+Source: omp-web
+Section: web
+Priority: optional
+Maintainer: JoySort Release Bot <release@joysort.cc>
+Build-Depends: debhelper-compat (= 13), rsync
+Standards-Version: 4.6.2
+Homepage: https://github.com/n0rthwood/omp-web
+Rules-Requires-Root: no
+
+Package: omp-web
+Architecture: amd64
+Depends: ${misc:Depends}, python3, systemd
+Description: Web view for the omp (oh-my-pi) coding agent CLI
+ omp-web serves a Next.js UI over the oh-my-pi coding-agent SDK. This
+ package installs a self-contained application bundle under /opt/omp-web,
+ provisions a per-user systemd --user service (creating the joysort
+ account if it does not already exist) on first install, and on upgrade
+ only re-syncs the application code and restarts that service — the unit
+ file, its environment file, and the user's
+ ~/.omp/agent/{.env,config.yml,models.yml} are never touched after the
+ first install.
