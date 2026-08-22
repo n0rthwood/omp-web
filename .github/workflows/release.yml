@@ -84,12 +84,19 @@ jobs:
           path: .
 
       # joysort-release-tools is pre-cloned at /home/joysort/joysort-release-tools
-      # on the self-hosted runner (the same host that runs this workflow).
-      # Using it directly via a relative path avoids the cross-org private-action
-      # resolution problem entirely — no GH_PAT, no repo-visibility change, no
-      # remote checkout of a private repo from a different owner's workflow.
+      # on the self-hosted runner. Copy it into the workspace so the composite
+      # action resolves via a relative path (GitHub Actions requires
+      # `uses: ./path` for local composite actions). This avoids the cross-org
+      # private-action resolution problem entirely — no GH_PAT, no
+      # repo-visibility change.
+      - name: Stage local joysort-release-tools into workspace
+        shell: bash
+        run: |
+          rm -rf ./joysort-release-tools
+          cp -a /home/joysort/joysort-release-tools ./joysort-release-tools
+
       - name: Update APT repository metadata
-        uses: /home/joysort/joysort-release-tools/.github/actions/update-apt-repo
+        uses: ./joysort-release-tools/.github/actions/update-apt-repo
         with:
           r2-account-id: ${{ vars.R2_ACCOUNT_ID }}
           r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
