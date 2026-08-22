@@ -1,10 +1,18 @@
 #!/bin/bash
 # runuser -l NAME -c CMD — the fixture "target user" isn't a real OS
 # account, so execute CMD as the current (real) user with HOME repointed
-# at the fixture home directory and the fixture bin/ still first on PATH.
+# at the fixture home directory. PATH is deliberately sanitized to the
+# fixture bin plus system dirs ONLY — excluding the real user's
+# ~/.local/bin and ~/.bun/bin — so `command -v omp`/`command -v bun`
+# genuinely report "absent" in a fresh fixture and the postinst's
+# "install the bundled binary" branch is actually exercised, rather than
+# leaking the host's own omp/bun through the inherited PATH.
+FIXBIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 shift # drop -l
 NAME="$1"; shift
 shift # drop -c
 CMD="$1"
 HOME_DIR="$(getent passwd "$NAME" | cut -d: -f6)"
-HOME="$HOME_DIR" bash -c "$CMD"
+HOME="$HOME_DIR" \
+PATH="$FIXBIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+bash -c "$CMD"
