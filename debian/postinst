@@ -48,8 +48,17 @@ case "$1" in
       echo "omp-web: no home directory for user $TARGET_USER after creation" >&2
       exit 1
     fi
+    TARGET_UID="$(id -u "$TARGET_USER")"
 
-    run_as_target() { runuser -l "$TARGET_USER" -c "$1"; }
+    # `runuser -l` does not always populate $XDG_RUNTIME_DIR (PAM/systemd
+    # differences across hosts), and `systemctl --user` needs it to find the
+    # user's private systemd socket. Export it explicitly so every `&&`-chained
+    # sub-command inherits it — without this, an upgrade on a pre-existing
+    # user (legacy manual deployment) fails with "DBUS_SESSION_BUS_ADDRESS and
+    # XDG_RUNTIME_DIR not defined".
+    run_as_target() {
+      runuser -l "$TARGET_USER" -c "export XDG_RUNTIME_DIR=/run/user/$TARGET_UID; $1"
+    }
 
     MARKER_DIR="$TARGET_HOME/.local/state/omp-web"
     MARKER="$MARKER_DIR/install.complete"
