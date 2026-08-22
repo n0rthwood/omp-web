@@ -2,12 +2,26 @@
 export BUN := $(HOME)/.bun/bin/bun
 export OMP := $(HOME)/.local/bin/omp
 
+# next build ("collecting page data") reads the runner's real $HOME, including
+# ~/.omp/agent (fleet machine registry + provider config), and then makes live
+# network calls that intermittently hang the build. Isolate the build into an
+# empty HOME/XDG dir so it is hermetic — the app bundle does not need any
+# runtime config or network during build. Bun/omp keep their absolute paths.
+export BUILD_HOME := $(CURDIR)/debian/.build-home
+
 %:
 	dh $@
 
 override_dh_auto_build:
 	$(BUN) install --frozen-lockfile
+	mkdir -p $(BUILD_HOME)
+	HOME=$(BUILD_HOME) \
+	XDG_CONFIG_HOME=$(BUILD_HOME)/.config \
+	XDG_CACHE_HOME=$(BUILD_HOME)/.cache \
+	XDG_DATA_HOME=$(BUILD_HOME)/.local/share \
+	NEXT_TELEMETRY_DISABLED=1 \
 	PATH=$(HOME)/.bun/bin:$$PATH $(BUN) run build
+	rm -rf $(BUILD_HOME)
 	$(BUN) install --frozen-lockfile --production
 
 override_dh_auto_install:

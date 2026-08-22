@@ -1,3 +1,13 @@
+omp-web (0.3.3) jammy; urgency=medium
+
+  * debian/rules: isolate the next build into an empty HOME/XDG so
+    "collecting page data" never reads the runner's real ~/.omp/agent
+    (fleet machine registry + provider config) and makes live network
+    calls that intermittently hang the build; also disable Next.js
+    telemetry. Bun/omp keep their absolute runner paths (refs #25).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 22 Aug 2026 15:30:00 +0000
+
 omp-web (0.3.2) jammy; urgency=medium
 
   * postinst: re-seed env/config before restarting a still-active service on
