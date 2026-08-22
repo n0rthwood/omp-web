@@ -1,0 +1,56 @@
+#!/usr/bin/make -f
+export BUN := $(HOME)/.bun/bin/bun
+export OMP := $(HOME)/.local/bin/omp
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(BUN) install --frozen-lockfile
+	PATH=$(HOME)/.bun/bin:$$PATH $(BUN) run build
+	$(BUN) install --frozen-lockfile --production
+
+override_dh_auto_install:
+	mkdir -p debian/omp-web/opt/omp-web/current
+	rsync -a \
+		--exclude='.git' \
+		--exclude='.worktrees' \
+		--exclude='docs' \
+		--exclude='.gh-issue' \
+		--exclude='debian' \
+		--exclude='debian_dist' \
+		--exclude='release/seeds' \
+		--exclude='tests' \
+		./ debian/omp-web/opt/omp-web/current/
+
+	mkdir -p debian/omp-web/opt/omp-web/runtime
+	install -m 0755 $(BUN) debian/omp-web/opt/omp-web/runtime/bun
+	install -m 0755 $(OMP) debian/omp-web/opt/omp-web/runtime/omp
+	$(BUN) --version > debian/omp-web/opt/omp-web/runtime/bun.version
+	$(OMP) --version | sed 's#.*/##' > debian/omp-web/opt/omp-web/runtime/omp.version
+
+	mkdir -p debian/omp-web/opt/omp-web/config
+	install -m 0644 release/seeds/models.yml debian/omp-web/opt/omp-web/config/models.yml.default
+	install -m 0644 release/seeds/config.yml debian/omp-web/opt/omp-web/config/config.yml.default
+
+	mkdir -p debian/omp-web/opt/omp-web/secrets
+	install -m 0644 release/seeds/omp-web-secrets.env.xorb64 debian/omp-web/opt/omp-web/secrets/secrets.env.xorb64
+	install -m 0644 release/seeds/omp-web-xor.key debian/omp-web/opt/omp-web/secrets/xor.key
+
+	mkdir -p debian/omp-web/opt/omp-web/systemd
+	install -m 0644 release/systemd/omp-web.service debian/omp-web/opt/omp-web/systemd/omp-web.service
+
+override_dh_auto_test:
+	true
+
+override_dh_auto_clean:
+	rm -rf .next
+
+override_dh_strip:
+	true
+
+override_dh_shlibdeps:
+	true
+
+override_dh_dwz:
+	true
