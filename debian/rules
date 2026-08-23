@@ -15,12 +15,21 @@ export BUILD_HOME := $(CURDIR)/debian/.build-home
 override_dh_auto_build:
 	$(BUN) install --frozen-lockfile
 	mkdir -p $(BUILD_HOME)
-	HOME=$(BUILD_HOME) \
-	XDG_CONFIG_HOME=$(BUILD_HOME)/.config \
-	XDG_CACHE_HOME=$(BUILD_HOME)/.cache \
-	XDG_DATA_HOME=$(BUILD_HOME)/.local/share \
-	NEXT_TELEMETRY_DISABLED=1 \
-	PATH=$(HOME)/.bun/bin:$$PATH $(BUN) run build
+	# Fully hermetic build: `env -i` clears ALL inherited environment
+	# (OMP_WEB_*, proxy, machine/credential vars, etc.) so `next build`
+	# "collecting page data" can never read the runner's fleet/provider
+	# state or make a live network call that hangs the build. Only the
+	# minimal vars the build needs are re-supplied; Bun keeps its absolute
+	# path.
+	env -i \
+		HOME=$(BUILD_HOME) \
+		XDG_CONFIG_HOME=$(BUILD_HOME)/.config \
+		XDG_CACHE_HOME=$(BUILD_HOME)/.cache \
+		XDG_DATA_HOME=$(BUILD_HOME)/.local/share \
+		NEXT_TELEMETRY_DISABLED=1 \
+		NODE_ENV=production \
+		PATH=$(HOME)/.bun/bin:/usr/local/bin:/usr/bin:/bin \
+		$(BUN) run build
 	rm -rf $(BUILD_HOME)
 	$(BUN) install --frozen-lockfile --production
 
