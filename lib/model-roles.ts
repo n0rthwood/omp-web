@@ -1,4 +1,4 @@
-import type { Settings } from "@oh-my-pi/pi-coding-agent";
+import type { ModelRegistry, Settings } from "@oh-my-pi/pi-coding-agent";
 import {
   getKnownRoleIds,
   getRoleInfo,
@@ -7,10 +7,23 @@ import {
   type ModelRole,
 } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+  getRetryFallbackChains,
+  isKnownProvider,
+  isRetryFallbackWildcardKey,
+  parseRetryFallbackSelector,
+  parseRetryFallbackWildcard,
+  validateRetryFallbackChains,
+} from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import type { ModelRoleAssignment, ModelRoleModelRef, ModelRoleScope } from "./api-types";
+import type {
+  ModelRoleAssignment,
+  ModelRoleModelRef,
+  ModelRoleScope,
+  RoleFallbackChain,
+} from "./api-types";
 
-export type { ModelRoleAssignment, ModelRoleModelRef, ModelRoleScope };
+export type { ModelRoleAssignment, ModelRoleModelRef, ModelRoleScope, RoleFallbackChain };
 
 /**
  * omp's model roles, projected onto the web UI.
@@ -128,4 +141,101 @@ export function formatRoleSelector(
 ): string {
   const base = `${model.provider}/${model.modelId}`;
   return thinkingLevel && thinkingLevel !== "off" ? `${base}:${thinkingLevel}` : base;
+}
+
+/**
+ * Every role's backup models.
+ *
+ * `retry.fallbackChains` is keyed by role name, by exact `provider/modelId`, by
+ * `provider/*` wildcard, or by `default`. This projection covers only the role
+ * keys, because that is what the panel edits; the other key kinds are read and
+ * written back untouched by {@link writeRoleFallbackChain}.
+ *
+ * `effective` is what omp actually uses — omp's own
+ * `getRetryFallbackChains` folds the `default` chain onto every role that has
+ * no entry of its own. An explicitly empty array is preserved and means "no
+ * backups", which is deliberately distinct from an absent key.
+ */
+export function listRoleFallbackChains(settings: Settings): RoleFallbackChain[] {
+  const configured = settings.get("retry.fallbackChains") ?? {};
+  const effective = getRetryFallbackChains(settings);
+  return getKnownRoleIds(settings).map((role) => {
+    const own = configured[role];
+    return {
+      role,
+      ...(Array.isArray(own) ? { configured: [...own] } : {}),
+      effective: [...(effective[role] ?? [])],
+      inherited: !Array.isArray(own) && Array.isArray(effective[role]),
+    };
+  });
+}
+
+/**
+ * Rewrite one role's chain, leaving every other key alone.
+ *
+ * Preserving the rest matters: the live config also carries exact-selector and
+ * `provider/*` keys that this role-centric panel never shows, and dropping them
+ * on write would silently delete failover routing the TUI depends on. Passing
+ * `null` removes the role's key so the `default` chain takes over again.
+ */
+export function writeRoleFallbackChain(
+  settings: Settings,
+  role: string,
+  chain: readonly string[] | null,
+): void {
+  const existing = settings.get("retry.fallbackChains") ?? {};
+  const next: Record<string, string[]> = {};
+  for (const key in existing) {
+    const value = existing[key];
+    if (key !== role && Array.isArray(value)) next[key] = [...value];
+  }
+  if (chain !== null) next[role] = [...chain];
+  settings.set("retry.fallbackChains", next);
+}
+
+/**
+ * Reject a chain entry omp could not route to, before it reaches config.
+ *
+ * Uses omp's own selector parser and provider check rather than a second
+ * validator, so the browser accepts exactly what `validateRetryFallbackChains`
+ * accepts. Returns one message per bad entry; empty means the chain is good.
+ */
+export function checkFallbackChainEntries(
+  chain: readonly string[],
+  modelRegistry: ModelRegistry,
+): string[] {
+  const problems: string[] = [];
+  for (const entry of chain) {
+    if (typeof entry !== "string" || !entry.trim()) {
+      problems.push("Empty selector in chain.");
+      continue;
+    }
+    if (isRetryFallbackWildcardKey(entry)) {
+      const { provider } = parseRetryFallbackWildcard(entry, (candidate) =>
+        isKnownProvider(modelRegistry, candidate));
+      if (!isKnownProvider(modelRegistry, provider)) {
+        problems.push(`Unknown provider: ${entry}`);
+      }
+      continue;
+    }
+    const parsed = parseRetryFallbackSelector(entry, modelRegistry);
+    if (!parsed) {
+      problems.push(`Invalid model selector: ${entry}`);
+      continue;
+    }
+    if (!modelRegistry.find(parsed.provider, parsed.id)) {
+      problems.push(`Unknown model: ${entry}`);
+    }
+  }
+  return problems;
+}
+
+/** Warnings omp itself reports for the whole persisted record. */
+export function collectFallbackChainWarnings(
+  settings: Settings,
+  modelRegistry: ModelRegistry,
+): string[] {
+  const warnings: string[] = [];
+  validateRetryFallbackChains(settings, modelRegistry, (message) => warnings.push(message));
+  return warnings;
 }

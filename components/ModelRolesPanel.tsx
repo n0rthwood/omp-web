@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type { ModelRoleAssignment, ModelRoleScope } from "@/lib/api-types";
+import type { ModelRoleAssignment, ModelRoleScope, RoleFallbackChain } from "@/lib/api-types";
 import { apiPath } from "@/lib/api-path";
 import {
   formatModelRoleSelector,
@@ -36,6 +36,22 @@ function selectorFor(model: ModelEntry): string {
   return `${model.provider}/${model.id}`;
 }
 
+/** Compact affordance sized to sit inside a backup chip without changing its height. */
+function chipButtonStyle(disabled: boolean, wide = false): React.CSSProperties {
+  return {
+    padding: wide ? "2px 6px" : "0 3px",
+    border: wide ? "1px dashed var(--border)" : "none",
+    borderRadius: 3,
+    background: "transparent",
+    color: "var(--text-dim)",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontFamily: "var(--font-mono)",
+    fontSize: 10,
+    lineHeight: 1.2,
+    opacity: disabled ? 0.4 : 1,
+  };
+}
+
 /**
  * Assign a model to each of omp's roles.
  *
@@ -54,10 +70,12 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
+  const [chains, setChains] = useState<RoleFallbackChain[]>([]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     if (!cwd) {
       setRoles([]);
+      setChains([]);
       setModels([]);
       setThinkingLevels({});
       setLoading(false);
@@ -72,11 +90,16 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
         fetch(apiPath(`/api/models${query}`), signal ? { signal } : undefined),
       ]);
       if (!rolesRes.ok) throw new Error(`HTTP ${rolesRes.status}`);
-      const rolesData = await rolesRes.json() as { roles?: ModelRoleAssignment[]; error?: string };
+      const rolesData = await rolesRes.json() as {
+        roles?: ModelRoleAssignment[];
+        fallbackChains?: RoleFallbackChain[];
+        error?: string;
+      };
       if (rolesData.error) throw new Error(rolesData.error);
       if (!modelsRes.ok) throw new Error(`HTTP ${modelsRes.status}`);
       const modelsData = await modelsRes.json() as ModelsResponse;
       setRoles(rolesData.roles ?? []);
+      setChains(rolesData.fallbackChains ?? []);
       setModels(modelsData.modelList ?? []);
       setThinkingLevels(modelsData.thinkingLevels ?? {});
     } catch (e) {
@@ -113,6 +136,45 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
       setPendingRole(null);
     }
   }, [cwd, scope, onRolesChanged]);
+
+  /**
+   * Rewrite one role's backup chain.
+   *
+   * `chain: null` drops the role's key so omp's `default` chain covers it
+   * again; `[]` persists "no backups", which omp treats as a real value rather
+   * than an absent one.
+   */
+  const writeChain = useCallback(async (role: string, chain: string[] | null) => {
+    if (!cwd) return;
+    setPendingRole(role);
+    setError(null);
+    try {
+      const res = await fetch(apiPath("/api/model-roles/fallbacks"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, role, chain }),
+      });
+      const data = await res.json() as {
+        roles?: ModelRoleAssignment[];
+        fallbackChains?: RoleFallbackChain[];
+        error?: string;
+      };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setRoles(data.roles ?? []);
+      setChains(data.fallbackChains ?? []);
+      onRolesChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPendingRole(null);
+    }
+  }, [cwd, onRolesChanged]);
+
+  const chainByRole = useMemo(() => {
+    const byRole: Record<string, RoleFallbackChain> = {};
+    for (const entry of chains) byRole[entry.role] = entry;
+    return byRole;
+  }, [chains]);
 
   const visibleRoles = useMemo(() => roles.filter((role) => !role.hidden), [roles]);
 
@@ -170,6 +232,10 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
             const currentThinkingLevel = getModelRoleThinkingLevel(role.selector);
             const thinkingKey = role.resolved ? `${role.resolved.provider}:${role.resolved.modelId}` : "";
             const thinkingOptions = getModelRoleThinkingOptions(thinkingLevels[thinkingKey]);
+            const chain = chainByRole[role.role];
+            const backups = chain?.effective ?? [];
+            const inherited = chain?.inherited ?? false;
+            const busy = pendingRole === role.role;
             return (
               <div
                 key={role.role}
@@ -296,6 +362,141 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
                     </div>
                   </div>
                 )}
+
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexWrap: "wrap", paddingLeft: 72 }}>
+                  <span
+                    title={t("roles.backupsHint")}
+                    style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap", paddingTop: 4 }}
+                  >
+                    {t("roles.backups")}
+                  </span>
+
+                  <div style={{ display: "flex", flex: "1 1 auto", minWidth: 0, flexWrap: "wrap", gap: 3, alignItems: "center" }}>
+                    {backups.length === 0 && (
+                      <span style={{ fontSize: 10, color: "var(--text-dim)", fontStyle: "italic" }}>
+                        {t("roles.backupsNone")}
+                      </span>
+                    )}
+                    {backups.map((entry, index) => (
+                      <span
+                        key={`${entry}-${index}`}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 3,
+                          padding: "2px 4px 2px 6px",
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          background: inherited ? "transparent" : "var(--bg-subtle)",
+                          color: inherited ? "var(--text-dim)" : "var(--text-muted)",
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 10,
+                          opacity: busy ? 0.55 : 1,
+                        }}
+                      >
+                        <span style={{ color: "var(--text-dim)" }}>{index + 1}.</span>
+                        {entry}
+                        {!inherited && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={busy || index === 0}
+                              title={t("roles.backupsUp")}
+                              aria-label={`${t("roles.backupsUp")}: ${entry}`}
+                              onClick={() => {
+                                const next = [...backups];
+                                const prev = next[index - 1];
+                                const cur = next[index];
+                                if (prev === undefined || cur === undefined) return;
+                                next[index - 1] = cur;
+                                next[index] = prev;
+                                void writeChain(role.role, next);
+                              }}
+                              style={chipButtonStyle(busy || index === 0)}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy || index === backups.length - 1}
+                              title={t("roles.backupsDown")}
+                              aria-label={`${t("roles.backupsDown")}: ${entry}`}
+                              onClick={() => {
+                                const next = [...backups];
+                                const after = next[index + 1];
+                                const cur = next[index];
+                                if (after === undefined || cur === undefined) return;
+                                next[index + 1] = cur;
+                                next[index] = after;
+                                void writeChain(role.role, next);
+                              }}
+                              style={chipButtonStyle(busy || index === backups.length - 1)}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              title={t("roles.backupsRemove")}
+                              aria-label={`${t("roles.backupsRemove")}: ${entry}`}
+                              onClick={() => void writeChain(role.role, backups.filter((_, i) => i !== index))}
+                              style={chipButtonStyle(busy)}
+                            >
+                              ×
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    ))}
+
+                    {inherited && backups.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={t("roles.backupsOverrideHint")}
+                        onClick={() => void writeChain(role.role, backups)}
+                        style={chipButtonStyle(busy, true)}
+                      >
+                        {t("roles.backupsInherited")} — {t("roles.backupsOverride")}
+                      </button>
+                    )}
+
+                    {!inherited && chain?.configured !== undefined && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={t("roles.backupsResetHint")}
+                        onClick={() => void writeChain(role.role, null)}
+                        style={chipButtonStyle(busy, true)}
+                      >
+                        {t("roles.backupsReset")}
+                      </button>
+                    )}
+                  </div>
+
+                  <SearchableSelect
+                    value=""
+                    disabled={busy}
+                    ariaLabel={`${role.name} — ${t("roles.backupsAdd")}`}
+                    style={{ flex: "0 0 auto", width: 190 }}
+                    onChange={(value) => {
+                      if (!value) return;
+                      // Editing an inherited chain forks it onto this role first,
+                      // which is exactly what appending to it should mean.
+                      void writeChain(role.role, [...backups, value]);
+                    }}
+                    options={[
+                      { value: "", label: t("roles.backupsAdd") },
+                      ...models
+                        .filter((model) => !backups.includes(selectorFor(model)))
+                        .map((model) => ({
+                          value: selectorFor(model),
+                          label: `${model.name} — ${model.provider}`,
+                          searchText: selectorFor(model),
+                        })),
+                    ]}
+                  />
+                </div>
               </div>
             );
           })}
