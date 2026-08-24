@@ -11,6 +11,7 @@ import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-com
 import { BUILTIN_SLASH_COMMAND_DEFS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { executeAcpBuiltinSlashCommand, type AcpBuiltinSlashCommandResult } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { discoverCustomToolPaths } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { readPlanFile } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-files";
 import {
@@ -1401,6 +1402,43 @@ declare global {
   var __ompRunningListeners: Set<(ids: string[]) => void> | undefined;
 }
 
+/**
+ * omp-web owns the process-wide `AsyncJobManager`, and no AgentSession does.
+ *
+ * omp's own wiring gives the manager to the *first* top-level session in a
+ * process and hands every later one `undefined`, because delivery sinks are
+ * keyed by agent id and every session that does not name itself is
+ * `MAIN_AGENT_ID` (issue #1923 upstream). A Next.js server runs one top-level
+ * session per browser conversation, so under that rule conversation #2 onwards
+ * silently lost async execution: `TaskTool` falls back to `#executeSyncFanout`
+ * and blocks the turn until every subagent finishes, and async `bash` plus
+ * `hub jobs`/`wait`/`cancel` stop working. We give each conversation a distinct
+ * `agentId` (see `startRpcSession`) so routing is unambiguous, and a patch to
+ * the SDK lets a session with its own `agentId` share this singleton.
+ *
+ * Installing it here rather than letting a session construct it is what makes
+ * sharing safe: `ownedAsyncJobManager` stays undefined for every session, so no
+ * session's teardown disposes it. Otherwise the first conversation's 10-minute
+ * idle timeout would cancel every other conversation's running jobs.
+ */
+function ensureAsyncJobManager(maxRunningJobs: number): void {
+  if (AsyncJobManager.instance()) return;
+  const manager = new AsyncJobManager({ maxRunningJobs });
+  AsyncJobManager.setInstance(manager);
+  const cleanup = () => {
+    if (AsyncJobManager.instance() === manager) AsyncJobManager.setInstance(undefined);
+    void manager.dispose({ timeoutMs: 3_000 });
+  };
+  process.once("exit", cleanup);
+  process.once("SIGINT", cleanup);
+  process.once("SIGTERM", cleanup);
+}
+
+/** Stable, collision-free agent id for one browser conversation. */
+function webAgentId(sessionId: string): string {
+  return `web-${sessionId}`;
+}
+
 function getRegistry(): Map<string, AgentSessionWrapper> {
   if (!globalThis.__ompSessions) {
     globalThis.__ompSessions = new Map();
@@ -1700,6 +1738,14 @@ export async function startRpcSession(
           ...(defaultRole ? { defaultModel: defaultRole } : {}),
           ...(thinkingLevel ? { thinkingLevel } : {}),
         });
+      // Every browser conversation names itself. Two purposes: async job
+      // deliveries are routed by agent id (an unnamed session would be
+      // `MAIN_AGENT_ID` and would steal another conversation's results), and the
+      // patched SDK only shares the process AsyncJobManager with a session that
+      // supplies a distinct id. Derived from the session id, so a conversation
+      // reloaded after an idle teardown keeps the same identity and any pending
+      // delivery still reaches it.
+      ensureAsyncJobManager(Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100)));
       const { session: inner, eventBus, setToolUIContext } = await createAgentSession({
         cwd: sessionCwd,
         agentDir,
@@ -1707,6 +1753,7 @@ export async function startRpcSession(
         sessionManager,
         modelRegistry,
         hasUI: true,
+        agentId: webAgentId(sessionManager.getSessionId()),
         ...(initial.model ? { model: initial.model } : {}),
         ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
         ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),

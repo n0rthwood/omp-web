@@ -90,5 +90,8 @@
     "remark-math": "^6.0.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@17.3.0": "patches/@oh-my-pi%2Fpi-coding-agent@17.3.0.patch"
   }
 }
