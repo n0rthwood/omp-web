@@ -28,6 +28,7 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { untrustedProjectSessionOptions } from "./project-trust";
 import { readDefaultModelRole } from "./model-roles";
+import { applyConversationRotation } from "./model-rotation";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
@@ -1702,7 +1703,7 @@ export async function startRpcSession(
 
     try {
       const runtime = await getOmpRuntime();
-      const settings = await getSettingsForCwd(sessionCwd);
+      const sessionSettings = await getSettingsForCwd(sessionCwd);
 
       // Determine which tools to pass based on requested toolNames.
       let toolsOption: string[] | undefined;
@@ -1722,15 +1723,42 @@ export async function startRpcSession(
       // lib/project-trust.ts). Discovery still runs — only project-local entries
       // are dropped, so user-level extensions keep working.
       const [extensionPaths, customToolPaths] = await Promise.all([
-        discoverSessionExtensionPaths({}, sessionCwd, settings),
+        discoverSessionExtensionPaths({}, sessionCwd, sessionSettings),
         discoverCustomToolPaths([], sessionCwd),
       ]);
       const untrusted = untrustedProjectSessionOptions(sessionCwd, agentDir, { extensionPaths, customToolPaths });
 
       const { modelRegistry } = runtime;
+
+      // Rotate this conversation's roles, then never again for its lifetime.
+      //
+      // Only on creation: a conversation reloaded after an idle teardown must
+      // come back on the model it was already using, or a 10-minute gap would
+      // silently switch models mid-conversation and throw away the provider's
+      // prompt cache — the exact cost rotation exists to avoid. `default` is
+      // skipped when the browser named a model, because an explicit pick must
+      // win and must not burn a rotation slot.
+      //
+      // `getSettingsForCwd` hands back the SHARED process-wide Settings when the
+      // cwd already matches, so the override has to go on a clone or it leaks
+      // into every other conversation and into the TUI-facing config.
+      let settings = sessionSettings;
+      const hasExistingMessages = sessionManager.buildSessionContext().messages.length > 0;
+      if (!hasExistingMessages) {
+        const own = await sessionSettings.cloneForCwd(sessionCwd);
+        const rotated = applyConversationRotation(own, agentDir, {
+          skipRoles: initialModel ? ["default"] : [],
+        });
+        if (rotated.length > 0) {
+          settings = own;
+          console.log(`[omp-web] rotated models for new session: ${
+            rotated.map((r) => `${r.role}=${r.primary} (${r.index + 1}/${r.poolSize})`).join(", ")
+          }`);
+        }
+      }
+
       const scope = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
       const defaultRole = readDefaultModelRole(settings);
-      const hasExistingMessages = sessionManager.buildSessionContext().messages.length > 0;
       const initial = hasExistingMessages
         ? { scopedModels: [...scope.scopedModels], model: undefined, thinkingLevel: undefined }
         : selectInitialModelScope(scope, {

@@ -42,6 +42,7 @@ const ALLOWED_ROUTES: readonly RouteRule[] = [
   { template: "/api/issue-title", methods: ["GET"] },
   { template: "/api/mcp", methods: ["GET", "PATCH", "PUT"] },
   { template: "/api/model-roles/fallbacks", methods: ["PUT"] },
+  { template: "/api/model-roles/rotation", methods: ["GET", "PUT"] },
   { template: "/api/model-roles", methods: ["GET", "PUT"] },
   { template: "/api/models-config/catalog", methods: ["GET"] },
   { template: "/api/models-config/discover", methods: ["POST"] },

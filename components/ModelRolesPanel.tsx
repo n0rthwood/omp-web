@@ -70,6 +70,10 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
+  const [rotation, setRotation] = useState<{ enabled: boolean; roles: Record<string, boolean> }>({
+    enabled: false,
+    roles: {},
+  });
   const [chains, setChains] = useState<RoleFallbackChain[]>([]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -85,9 +89,10 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
     setError(null);
     try {
       const query = `?cwd=${encodeURIComponent(cwd)}`;
-      const [rolesRes, modelsRes] = await Promise.all([
+      const [rolesRes, modelsRes, rotationRes] = await Promise.all([
         fetch(apiPath(`/api/model-roles${query}`), signal ? { signal } : undefined),
         fetch(apiPath(`/api/models${query}`), signal ? { signal } : undefined),
+        fetch(apiPath("/api/model-roles/rotation"), signal ? { signal } : undefined),
       ]);
       if (!rolesRes.ok) throw new Error(`HTTP ${rolesRes.status}`);
       const rolesData = await rolesRes.json() as {
@@ -102,6 +107,15 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
       setChains(rolesData.fallbackChains ?? []);
       setModels(modelsData.modelList ?? []);
       setThinkingLevels(modelsData.thinkingLevels ?? {});
+      if (rotationRes.ok) {
+        const rotationData = await rotationRes.json() as {
+          rotation?: { enabled?: boolean; roles?: Record<string, boolean> };
+        };
+        setRotation({
+          enabled: rotationData.rotation?.enabled === true,
+          roles: rotationData.rotation?.roles ?? {},
+        });
+      }
     } catch (e) {
       if ((e as Error).name === "AbortError") return;
       setError(e instanceof Error ? e.message : String(e));
@@ -115,6 +129,25 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
+
+  const writeRotation = useCallback(async (patch: { enabled?: boolean; role?: string; rotate?: boolean }) => {
+    setError(null);
+    try {
+      const res = await fetch(apiPath("/api/model-roles/rotation"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json() as {
+        rotation?: { enabled?: boolean; roles?: Record<string, boolean> };
+        error?: string;
+      };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setRotation({ enabled: data.rotation?.enabled === true, roles: data.rotation?.roles ?? {} });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
 
   const assign = useCallback(async (role: string, selector: string | null) => {
     if (!cwd) return;
@@ -218,6 +251,21 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
           {scope === "global" ? "~/.omp/agent/config.yml" : ".omp/config.yml"}
         </span>
       </div>
+
+      <label
+        title={t("roles.rotationHint")}
+        style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-muted)", cursor: "pointer" }}
+      >
+        <input
+          type="checkbox"
+          checked={rotation.enabled}
+          onChange={(event) => void writeRotation({ enabled: event.target.checked })}
+        />
+        {t("roles.rotation")}
+        <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+          ~/.omp/agent/omp-web-model-rotation.json
+        </span>
+      </label>
 
       {error && (
         <div style={{ fontSize: 12, color: "var(--danger, #ff4757)" }}>{error}</div>
@@ -370,6 +418,31 @@ export function ModelRolesPanel({ cwd, onRolesChanged }: Props) {
                   >
                     {t("roles.backups")}
                   </span>
+
+                  <label
+                    title={backups.length === 0 ? t("roles.rotationNeedsPool") : t("roles.rotationHint")}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 3,
+                      paddingTop: 3,
+                      fontSize: 10,
+                      color: rotation.enabled && backups.length > 0 ? "var(--text-muted)" : "var(--text-dim)",
+                      cursor: rotation.enabled && backups.length > 0 ? "pointer" : "not-allowed",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={rotation.roles[role.role] === true}
+                      disabled={!rotation.enabled || backups.length === 0}
+                      aria-label={`${role.name}: ${
+                        rotation.roles[role.role] === true ? t("roles.rotationOff") : t("roles.rotationOn")
+                      }`}
+                      onChange={(event) => void writeRotation({ role: role.role, rotate: event.target.checked })}
+                    />
+                    ⟳
+                  </label>
 
                   <div style={{ display: "flex", flex: "1 1 auto", minWidth: 0, flexWrap: "wrap", gap: 3, alignItems: "center" }}>
                     {backups.length === 0 && (
