@@ -1,3 +1,16 @@
+omp-web (0.3.6) jammy; urgency=medium
+
+  * rpc-manager: give every browser conversation its own agent id and share the
+    process AsyncJobManager, so subagents run as background jobs in every
+    conversation instead of blocking the turn from the second one onward
+    (refs #29). Carries a bun patch against @oh-my-pi/pi-coding-agent 17.3.0.
+  * model-roles: configure per-role backup models (retry.fallbackChains) from
+    the browser, with inherited chains shown distinctly (refs #30).
+  * model-rotation: per-conversation sticky round-robin across a role pool,
+    opt-in per role, off by default (refs #31).
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 24 Aug 2026 22:43:36 +0000
+
 omp-web (0.3.5) jammy; urgency=medium
 
   * web-sessions: omit the Secure cookie flag for RFC1918 private IPv4/IPv6
