@@ -5,6 +5,7 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages } fro
 import type { ModelRoleAssignment, SkillsResponse } from "@/lib/api-types";
 import type { ContextUsage, SlashCommandInfo } from "@/lib/omp-types";
 import type { TextContent, UserMessage } from "@/lib/types";
+import type { TranslationParams } from "@/lib/i18n/types";
 import {
   clearDraft,
   getDraft,
@@ -242,6 +243,41 @@ function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): Atta
     .map(draftImageToAttachedImage);
 }
 
+const MAX_IMAGE_ATTACH_ERROR_NAMES = 3;
+
+function formatSkippedNames(names: string[]): string {
+  if (names.length <= MAX_IMAGE_ATTACH_ERROR_NAMES) return names.join(", ");
+  const shown = names.slice(0, MAX_IMAGE_ATTACH_ERROR_NAMES).join(", ");
+  return `${shown} +${names.length - MAX_IMAGE_ATTACH_ERROR_NAMES}`;
+}
+
+/** Builds the user-facing message for images silently rejected by processImageFiles (#too-large, wrong type, over the per-message limit). */
+export function buildImageAttachErrorMessage(
+  t: (key: string, params?: TranslationParams) => string,
+  tooLarge: string[],
+  unsupported: string[],
+  truncatedCount: number,
+): string | null {
+  const parts: string[] = [];
+  if (tooLarge.length) {
+    parts.push(t("chat.imageAttachTooLarge", {
+      count: tooLarge.length,
+      maxMB: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024),
+      names: formatSkippedNames(tooLarge),
+    }));
+  }
+  if (unsupported.length) {
+    parts.push(t("chat.imageAttachUnsupported", {
+      count: unsupported.length,
+      names: formatSkippedNames(unsupported),
+    }));
+  }
+  if (truncatedCount > 0) {
+    parts.push(t("chat.imageAttachLimit", { max: MAX_ATTACHED_IMAGES, count: truncatedCount }));
+  }
+  return parts.length ? parts.join(" ") : null;
+}
+
 export function canRestoreUserMessage(
   value: string,
   attachedImageCount: number,
@@ -400,6 +436,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  const [imageAttachError, setImageAttachError] = useState<string | null>(null);
+  const imageAttachErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -630,9 +668,31 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       0,
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
     );
-    const imageFiles = files
-      .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, remaining);
+    const validFiles: File[] = [];
+    const tooLarge: string[] = [];
+    const unsupported: string[] = [];
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) {
+        unsupported.push(file.name);
+      } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
+        tooLarge.push(file.name);
+      } else {
+        validFiles.push(file);
+      }
+    }
+    const imageFiles = validFiles.slice(0, remaining);
+    const truncatedCount = validFiles.length - imageFiles.length;
+
+    if (imageAttachErrorTimerRef.current) {
+      clearTimeout(imageAttachErrorTimerRef.current);
+      imageAttachErrorTimerRef.current = null;
+    }
+    const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
+    setImageAttachError(errorMessage);
+    if (errorMessage) {
+      imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
+    }
+
     if (!imageFiles.length) return;
     pendingImageCountRef.current += imageFiles.length;
     try {
@@ -662,7 +722,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -680,6 +740,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       prev.forEach(revokeImagePreview);
       return [];
     });
+    if (imageAttachErrorTimerRef.current) {
+      clearTimeout(imageAttachErrorTimerRef.current);
+      imageAttachErrorTimerRef.current = null;
+    }
+    setImageAttachError(null);
+  }, []);
+
+  useEffect(() => () => {
+    if (imageAttachErrorTimerRef.current) clearTimeout(imageAttachErrorTimerRef.current);
   }, []);
 
   const clearInput = useCallback(() => {
@@ -1461,6 +1530,49 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             {compactError}
+          </div>
+        )}
+        {imageAttachError && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              background: "rgba(239,68,68,0.07)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6,
+              color: "#ef4444",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            <span style={{ flex: 1 }}>{imageAttachError}</span>
+            <button
+              onClick={() => {
+                if (imageAttachErrorTimerRef.current) {
+                  clearTimeout(imageAttachErrorTimerRef.current);
+                  imageAttachErrorTimerRef.current = null;
+                }
+                setImageAttachError(null);
+              }}
+              style={{
+                flexShrink: 0,
+                width: 16, height: 16, borderRadius: "50%",
+                background: "transparent", border: "none",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", padding: 0, color: "#ef4444",
+              }}
+            >
+              <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+              </svg>
+            </button>
           </div>
         )}
         {/* Image previews */}
