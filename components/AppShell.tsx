@@ -12,7 +12,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { TerminalIcon } from "./FileIcons";
 import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
-import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
+import { OmpVersionBadge } from "./OmpVersionBadge";
 import { HomePage } from "./HomePage";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
@@ -1080,7 +1080,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         isMobile={isMobile}
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
-        <OmpUpdateIndicator />
+        <OmpVersionBadge />
       </div>
       <div style={{ padding: "8px", flexShrink: 0 }}>
         <button
