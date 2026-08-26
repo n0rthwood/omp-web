@@ -1,3 +1,16 @@
+omp-web (0.3.7) jammy; urgency=medium
+
+  * chat: surface an error when an image attachment is skipped for being
+    oversized, an unsupported type, or over the per-message cap, instead of
+    dropping it silently (closes #34).
+  * release: stamp package.json's version from debian/changelog at build time,
+    so /api/health and NEXT_PUBLIC_APP_VERSION match the installed package and
+    update detection compares real versions (closes #32).
+  * sidebar: replace the update-check banner with a small current-version
+    readout sized for the drawer's strip mode (closes #33).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 26 Aug 2026 17:27:37 +0000
+
 omp-web (0.3.6) jammy; urgency=medium
 
   * rpc-manager: give every browser conversation its own agent id and share the
