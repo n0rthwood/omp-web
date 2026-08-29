@@ -74,6 +74,13 @@ function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, 
   return null;
 }
 
+// Matches SessionSidebar.tsx's project-group label convention: last path
+// segment, trailing slashes trimmed, falling back to the full path.
+export function projectBasename(path: string): string {
+  const segments = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return segments.at(-1) || path;
+}
+
 const CHAT_COLUMN_PADDING = 16;
 
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
@@ -499,6 +506,30 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <div className="w-full max-w-[820px]">
+            {messageCwd && (
+              <div
+                title={messageCwd}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  marginLeft: 16,
+                  marginRight: 52,
+                  marginBottom: 6,
+                  fontSize: 12.5,
+                  fontWeight: 500,
+                  color: "var(--text-muted)",
+                  minWidth: 0,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }}>
+                  <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z" />
+                </svg>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {projectBasename(messageCwd)}
+                </span>
+              </div>
+            )}
             <div
               className="mb-3"
               style={{
