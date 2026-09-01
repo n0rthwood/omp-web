@@ -1,3 +1,13 @@
+omp-web (0.3.7) jammy; urgency=medium
+
+  * Home: default to a fleet-wide aggregate view merging every registered
+    machine's sessions, grouped by project. Each session row is tagged
+    with its project name, origin machine, and an approximate turn count;
+    the original single-machine chip-selector view remains available via
+    a toggle (closes #38).
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 01 Sep 2026 04:28:47 +0000
+
 omp-web (0.3.6) jammy; urgency=medium
 
   * ChatWindow: show the target project's basename as a label (with the
