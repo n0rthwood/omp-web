@@ -152,6 +152,27 @@ export interface ModelRoleAssignment {
   /** Resolver complaint, e.g. a selector that matches nothing available. */
   warning?: string;
 }
+
+/**
+ * One role's backup models — omp's `retry.fallbackChains` projected per role.
+ *
+ * omp fails a role over to the next entry when the primary's retry budget is
+ * spent or it hits a hard error, so a chain is what keeps a role working when
+ * one provider rate-limits or drops. A role with no entry of its own inherits
+ * the `default` chain; an explicitly empty chain means "no backups" and is a
+ * different thing from "not configured".
+ */
+export interface RoleFallbackChain {
+  /** Role id the chain belongs to, e.g. `slow`. */
+  role: string;
+  /** Entry written for this exact role key, absent when nothing is configured. */
+  configured?: string[];
+  /** What omp actually uses, after the `default` chain is expanded onto it. */
+  effective: string[];
+  /** True when `effective` came from the `default` chain rather than this role. */
+  inherited: boolean;
+}
+
 export interface OmpWebReleaseInfo {
   version: string;
   tagName: string;

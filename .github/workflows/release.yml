@@ -125,6 +125,11 @@ jobs:
           gpg-private-key: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
           gpg-passphrase: ${{ secrets.REPO_GPG_PASSPHRASE }}
           codename: jammy
+          # R2 apt-repo retention (issue #40): keep the most recent 20
+          # versions of each package in the pool, pruning older ones after
+          # every successful publish. Does not retroactively delete
+          # anything outside this step's own prune pass.
+          max-versions: '20'
 
       - name: Verify the package landed in the apt repo
         shell: bash

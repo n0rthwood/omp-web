@@ -52,6 +52,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@17.3.0": "patches/@oh-my-pi%2Fpi-coding-agent@17.3.0.patch",
+  },
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
 

@@ -1,3 +1,28 @@
+omp-web (0.3.8) jammy; urgency=medium
+
+  * release: reconcile the `release/0.3.7` fleet-deployed lineage (issues
+    #29-#34: async subagents for every browser conversation, per-role
+    backup models, sticky per-conversation model rotation, package.json
+    version stamped from debian/changelog at build time, sidebar version
+    readout, chat image-attachment error surfacing) with `main`'s
+    independently-diverged history, fixing a version collision where both
+    lineages had separately published a package as "0.3.7" (closes #40).
+  * ChatWindow: show the target project's basename as a label (with the
+    full path as a tooltip) on the new-conversation empty state, so a
+    project is visible before the first message is sent (closes #36).
+  * Home: default to a fleet-wide aggregate view merging every registered
+    machine's sessions, grouped by project. Each session row is tagged
+    with its project name, origin machine, and an approximate turn count;
+    the original single-machine chip-selector view remains available via
+    a toggle (closes #38).
+  * ops: add a standing omp-web-restart-service daemon (systemd unit +
+    supervised HTTP endpoint) enabling a safe, gated self-restart/upgrade
+    of the gateway service (closes #39).
+  * release: keep the most recent 20 versions of omp-web per publish in the
+    R2-backed apt repo, pruning older ones after each successful publish.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 01 Sep 2026 06:57:43 +0000
+
 omp-web (0.3.7) jammy; urgency=medium
 
   * Home: default to a fleet-wide aggregate view merging every registered
@@ -8,6 +33,19 @@ omp-web (0.3.7) jammy; urgency=medium
 
  -- JoySort Release Bot <release@joysort.cc>  Tue, 01 Sep 2026 04:28:47 +0000
 
+omp-web (0.3.7) jammy; urgency=medium
+
+  * chat: surface an error when an image attachment is skipped for being
+    oversized, an unsupported type, or over the per-message cap, instead of
+    dropping it silently (closes #34).
+  * release: stamp package.json's version from debian/changelog at build time,
+    so /api/health and NEXT_PUBLIC_APP_VERSION match the installed package and
+    update detection compares real versions (closes #32).
+  * sidebar: replace the update-check banner with a small current-version
+    readout sized for the drawer's strip mode (closes #33).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 26 Aug 2026 17:27:37 +0000
+
 omp-web (0.3.6) jammy; urgency=medium
 
   * ChatWindow: show the target project's basename as a label (with the
@@ -15,6 +53,19 @@ omp-web (0.3.6) jammy; urgency=medium
     project is visible before the first message is sent (closes #36).
 
  -- JoySort Release Bot <release@joysort.cc>  Sat, 29 Aug 2026 10:46:05 +0000
+
+omp-web (0.3.6) jammy; urgency=medium
+
+  * rpc-manager: give every browser conversation its own agent id and share the
+    process AsyncJobManager, so subagents run as background jobs in every
+    conversation instead of blocking the turn from the second one onward
+    (refs #29). Carries a bun patch against @oh-my-pi/pi-coding-agent 17.3.0.
+  * model-roles: configure per-role backup models (retry.fallbackChains) from
+    the browser, with inherited chains shown distinctly (refs #30).
+  * model-rotation: per-conversation sticky round-robin across a role pool,
+    opt-in per role, off by default (refs #31).
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 24 Aug 2026 22:43:36 +0000
 
 omp-web (0.3.5) jammy; urgency=medium
 
@@ -66,3 +117,5 @@ omp-web (0.3.0) jammy; urgency=medium
     installation (closes #25).
 
  -- JoySort Release Bot <release@joysort.cc>  Thu, 20 Aug 2026 12:00:00 +0000
+</content>
+<parameter name="i">Write reconciled changelog with new 0.3.8 top entry
