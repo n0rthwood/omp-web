@@ -173,6 +173,126 @@ differ:
   in the Machines UI (`MachinesConfig.tsx`) compares `ompVersion` /
   `ompWebVersion` **across machines**, not against the host's CLI.
 
+## Gateway self-upgrade: `omp-web-restart-service`
+
+### The problem
+
+The gateway's `omp-web.service` unit sets `KillMode=control-group`, so
+`systemctl --user restart omp-web` sends `SIGTERM` to every process in that
+cgroup — including any shell that issued the restart command from inside
+it. A browser-driven agent session hosted by that very service (see the
+warning under [Topology](#topology)) cannot reliably self-upgrade the
+gateway this way: the restart command dies along with everything else
+before it's guaranteed to complete.
+
+The fix is a second, completely independent `systemd --user` unit —
+`omp-web-restart-service` — with its own cgroup, started by systemd
+directly rather than forked from any caller's shell. It exposes a minimal
+loopback-only HTTP trigger that runs a fixed shell script **detached** (its
+own session, `start_new_session=True`) so the triggering HTTP call can
+return immediately (`202`) and the actual restart survives even though the
+process that issued the call may die moments later when the real restart
+lands. Any future host running agent sessions in-process for its own
+omp-web instance (the "gateway" role) should get the same unit.
+
+### Protocol
+
+Source: [`ops/restart-service/server.py`](../ops/restart-service/server.py)
+— Python 3 stdlib only (`http.server`, `subprocess`, `threading`), no
+dependencies to install. Binds `127.0.0.1` only, port from
+`RESTART_SERVICE_PORT` (gateway uses **8799**).
+
+| Endpoint | Auth | Behavior |
+| --- | --- | --- |
+| `GET /health` | none | `200 ok` |
+| `POST /run` | `X-Restart-Token` header must match `RESTART_SERVICE_TOKEN` | Missing/wrong token → `401`. A run already in flight → `409` (never starts a second concurrent run). Script file missing → `500`, daemon does not crash. Otherwise spawns `bash <script>` detached, stdout+stderr to a timestamped log under `RESTART_SERVICE_LOG_DIR`, and returns `202` with `{"status": "started", "run_id", "pid"}` immediately — before the script has necessarily finished, or even necessarily succeeded. |
+| `GET /status` | none (read-only, loopback-only anyway) | JSON: `run_id`, `pid`, `running`, `exit_code`, `started_at`, `ended_at`, `log_path`, `log_tail` (last 50 lines) for the most recent run. |
+
+This is intentionally a single fixed-script trigger, not a generic
+multi-tenant task runner. It has no TLS and is never exposed off loopback.
+
+### Install (gateway only, `172.30.3.123`, user `joysort`)
+
+```
+mkdir -p ~/omp/ops/env ~/omp/ops/scripts ~/omp/ops/logs/restart-service
+
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+cat > ~/omp/ops/env/restart-service.env <<EOF
+RESTART_SERVICE_TOKEN=$TOKEN
+RESTART_SERVICE_PORT=8799
+RESTART_SERVICE_SCRIPT=/home/joysort/omp/ops/scripts/restart-payload.sh
+RESTART_SERVICE_LOG_DIR=/home/joysort/omp/ops/logs/restart-service
+EOF
+chmod 600 ~/omp/ops/env/restart-service.env
+unset TOKEN
+
+# The real deploy recipe this service exists to run:
+cat > ~/omp/ops/scripts/restart-payload.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/joysort/omp/ompweb
+git fetch origin
+git checkout main
+git pull
+export PATH="$HOME/.bun/bin:$PATH"
+bun install
+bun run build
+systemctl --user restart omp-web
+EOF
+chmod +x ~/omp/ops/scripts/restart-payload.sh
+
+mkdir -p ~/.config/systemd/user
+cp ~/omp/ompweb/ops/restart-service/omp-web-restart-service.service \
+   ~/.config/systemd/user/omp-web-restart-service.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now omp-web-restart-service
+curl 127.0.0.1:8799/health
+```
+
+Confirm it is loopback-only, not `0.0.0.0`/`*`:
+
+```
+ss -ltnp | grep 8799
+```
+
+### Triggering a real gateway self-upgrade
+
+Run from **any** session (it does not need to be, and for the reason above
+*should not need to be*, the session that dies with the restart):
+
+```
+TOKEN=$(grep -oP '(?<=^RESTART_SERVICE_TOKEN=).*' ~/omp/ops/env/restart-service.env)
+curl -s -X POST -H "X-Restart-Token: $TOKEN" http://127.0.0.1:8799/run
+unset TOKEN
+```
+
+This returns `202` immediately. The gateway's `omp-web.service` restarts
+partway through the script; if you triggered this from a session hosted by
+`omp-web.service` itself, **that session dies at that point** — this is
+expected, not a failure. From a **new** session (a fresh terminal, or a new
+browser-driven agent session once the gateway is back), poll:
+
+```
+curl -s http://127.0.0.1:8799/status
+```
+
+until `running` is `false`, then check `exit_code` (`0` = success) and
+`log_tail` for the `bun install`/`bun run build` output.
+
+### Verifying the loop without touching the live service
+
+Never point `RESTART_SERVICE_SCRIPT` at anything real to test the daemon
+itself. Swap the env file to a harmless throwaway script (sleeps briefly,
+touches a marker file), `systemctl --user restart
+omp-web-restart-service` (safe — it is not `omp-web.service`), drive the
+full `401` → `202` → `409` → `GET /status` (`running: false`, `exit_code:
+0`) loop against it, confirm the marker file, then point
+`RESTART_SERVICE_SCRIPT` back at the real
+`~/omp/ops/scripts/restart-payload.sh` and restart
+`omp-web-restart-service` once more. `omp-web.service`'s own PID/uptime
+must be unchanged before and after this whole exercise.
+
 ## Day-2 operations
 
 **Redeploy a remote** (run on that host, or `ssh <host> '...'` with absolute
