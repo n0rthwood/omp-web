@@ -11,6 +11,11 @@ Typecheck: `bun run typecheck`
 Lint: `bun run lint`
 Tests: `bun test`
 **Never run `bun run build` during dev** — pollutes `.next/` and breaks `bun run dev`.
+This same command is CI's release build (`debian/rules` -> `override_dh_auto_build`)
+and intermittently stalls dead there (zero CPU, zero output) independent of
+source changes; `debian/retry-build.sh` wraps it with an output-inactivity
+retry (omp-web#41) — that wrapper only runs in the packaging build, not `bun
+run dev`.
 
 ### Everything runs on Bun
 

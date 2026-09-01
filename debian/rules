@@ -22,6 +22,17 @@ override_dh_auto_build:
 	# state or make a live network call that hangs the build. Only the
 	# minimal vars the build needs are re-supplied; Bun keeps its absolute
 	# path.
+	#
+	# This exact command intermittently stalls dead (zero CPU, zero
+	# output) independent of source changes (omp-web#41). retry-build.sh
+	# detects that OUTPUT INACTIVITY (no stdout/stderr for 6 min by
+	# default) and retries, up to 3 attempts of up to 35 min each — see
+	# debian/retry-build.sh's header for the full mechanism and the
+	# worst-case time budget, mirrored in the `timeout-minutes` comment in
+	# .github/workflows/release.yml. `.next` is cleared before each retry
+	# (never before the first attempt) since a killed mid-build `next
+	# build` has no documented safe-resume-in-place guarantee.
+	BUILD_RETRY_CLEAN_PATHS=.next debian/retry-build.sh -- \
 	env -i \
 		HOME=$(BUILD_HOME) \
 		XDG_CONFIG_HOME=$(BUILD_HOME)/.config \
