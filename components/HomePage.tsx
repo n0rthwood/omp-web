@@ -17,6 +17,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useMachines } from "@/lib/machine-context";
 import { useSessionList } from "@/lib/session-list-context";
 import { HomeCalendar } from "./HomeCalendar";
+import { useNavigation } from "./NavigationProvider";
 
 interface MachineProjects {
   machineId: string;
@@ -27,10 +28,55 @@ interface MachineProjects {
   lastActivityByProject: Map<string, string>;
 }
 
+interface AggregateSessionEntry {
+  session: SessionInfo;
+  machineId: string;
+  machineName: string;
+  machineOffline: boolean;
+  projectRoot: string;
+}
+
+interface AggregateProjectGroup {
+  /** Project basename — the visual grouping key. Session buckets stay keyed
+   *  by (machineId, projectRoot) via `AggregateSessionEntry`, so two
+   *  machines sharing a path are never merged into one session array (issue
+   *  #38) — only clustered under a shared heading, disambiguated per-row by
+   *  the machine tag. */
+  key: string;
+  displayName: string;
+  sessions: AggregateSessionEntry[];
+  machineCount: number;
+  lastActivity: string;
+}
+
 function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const slash = trimmed.lastIndexOf("/");
   return slash === -1 ? trimmed : trimmed.slice(slash + 1) || trimmed;
+}
+
+function Tag({ children, title }: { children: React.ReactNode; title?: string }) {
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        flexShrink: 0,
+        padding: "1px 6px",
+        borderRadius: 4,
+        fontSize: 10.5,
+        fontWeight: 500,
+        lineHeight: 1.6,
+        background: "var(--bg-hover)",
+        border: "1px solid var(--border)",
+        color: "var(--text-muted)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
 }
 
 export function HomePage() {
@@ -38,12 +84,15 @@ export function HomePage() {
   const { machines, loading: machinesLoading } = useMachines();
   const { fetchSessionsFor } = useSessionList();
   const [groups, setGroups] = useState<MachineProjects[] | null>(null);
+  const groupsRef = useRef<MachineProjects[] | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const loadGenerationRef = useRef(0);
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const languageWrapperRef = useRef<HTMLDivElement | null>(null);
+  const { navigate } = useNavigation();
+  const [viewMode, setViewMode] = useState<"aggregate" | "single-machine">("aggregate");
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
     const generation = ++loadGenerationRef.current;
@@ -60,6 +109,8 @@ export function HomePage() {
         try {
           sessions = await fetchSessionsFor(machine.id, force);
         } catch {
+          const prev = groupsRef.current?.find((g) => g.machineId === machine.id);
+          if (prev && prev.projects.size > 0) return { ...prev, machineName: base.machineName, offline: true };
           return { ...base, offline: true };
         }
         const byProject = new Map<string, SessionInfo[]>();
@@ -82,6 +133,7 @@ export function HomePage() {
       }),
     );
     if (generation !== loadGenerationRef.current) return;
+    groupsRef.current = results;
     setGroups(results);
   }, [machines, machinesLoading, fetchSessionsFor]);
 
@@ -126,6 +178,34 @@ export function HomePage() {
     () => (selectedGroup && selectedProject ? selectedGroup.projects.get(selectedProject) ?? [] : []),
     [selectedGroup, selectedProject],
   );
+
+  const aggregateGroups = useMemo<AggregateProjectGroup[]>(() => {
+    if (!groups) return [];
+    const byName = new Map<string, AggregateSessionEntry[]>();
+    for (const group of groups) {
+      for (const [root, sessions] of group.projects) {
+        const entries: AggregateSessionEntry[] = sessions.map((session) => ({
+          session,
+          machineId: group.machineId,
+          machineName: group.machineName,
+          machineOffline: group.offline,
+          projectRoot: root,
+        }));
+        const name = basename(root);
+        const bucket = byName.get(name);
+        if (bucket) bucket.push(...entries);
+        else byName.set(name, entries);
+      }
+    }
+    const result: AggregateProjectGroup[] = [];
+    for (const [displayName, sessions] of byName) {
+      sessions.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
+      const machineCount = new Set(sessions.map((entry) => entry.machineId)).size;
+      result.push({ key: displayName, displayName, sessions, machineCount, lastActivity: sessions[0]?.session.modified ?? "" });
+    }
+    result.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+    return result;
+  }, [groups]);
 
   // Close the language dropdown on outside click or Escape.
   useEffect(() => {
@@ -185,6 +265,33 @@ export function HomePage() {
             {t("home.title")}
           </h1>
           <div style={{ flex: 1 }} />
+          <div
+            role="group"
+            aria-label={t("home.viewMode")}
+            title={t("home.viewMode")}
+            style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden", flexShrink: 0 }}
+          >
+            {(["aggregate", "single-machine"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setViewMode(mode)}
+                aria-pressed={viewMode === mode}
+                style={{
+                  height: 28,
+                  padding: "0 10px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  border: "none",
+                  background: viewMode === mode ? "var(--accent)" : "var(--bg-hover)",
+                  color: viewMode === mode ? "#fff" : "var(--text-muted)",
+                  fontWeight: viewMode === mode ? 600 : 500,
+                }}
+              >
+                {t(mode === "aggregate" ? "home.viewAggregate" : "home.viewSingleMachine")}
+              </button>
+            ))}
+          </div>
           <div ref={languageWrapperRef} style={{ position: "relative", flexShrink: 0 }}>
             <button
               type="button"
@@ -281,10 +388,10 @@ export function HomePage() {
             <button
               key={group.machineId}
               type="button"
-              onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); }}
-              style={{ ...chipStyle(group.machineId === selectedMachineId), ...(group.offline ? { opacity: 0.55 } : {}) }}
+              onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); setViewMode("single-machine"); }}
+              style={{ ...chipStyle(viewMode === "single-machine" && group.machineId === selectedMachineId), ...(group.offline ? { opacity: 0.55 } : {}) }}
               title={group.offline ? `${group.machineName} (${t("home.machineOffline")})` : group.machineName}
-              aria-pressed={group.machineId === selectedMachineId}
+              aria-pressed={viewMode === "single-machine" && group.machineId === selectedMachineId}
             >
               {group.machineName}
               {group.offline && <span style={{ color: "var(--danger)", marginLeft: 6 }}>·</span>}
@@ -292,6 +399,7 @@ export function HomePage() {
           ))}
           {groups === null && <span style={{ color: "var(--text-dim)", fontSize: 12.5 }}>…</span>}
         </div>
+        {viewMode === "single-machine" && (
         <div style={{ ...chipRowStyle, marginTop: 6 }}>
           {selectedGroup && projectRoots.length > 0 && projectRoots.map((root) => {
             const count = selectedGroup.projects.get(root)?.length ?? 0;
@@ -323,9 +431,71 @@ export function HomePage() {
             </span>
           )}
         </div>
+        )}
       </header>
       <main style={{ flex: 1, overflowY: "auto", width: "100%", maxWidth: 1440, margin: "0 auto", padding: "16px 20px 60px" }}>
-        {selectedGroup && selectedProject ? (
+        {viewMode === "aggregate" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+            {aggregateGroups.map((group) => (
+              <section key={group.key} aria-label={group.displayName}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+                  <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{group.displayName}</h2>
+                  <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                    {t("home.sessionCount", { count: String(group.sessions.length) })}
+                    {group.machineCount > 1 && <> · {t("home.machineCountLabel", { count: String(group.machineCount) })}</>}
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {group.sessions.map((entry) => {
+                    const title = entry.session.name || entry.session.firstMessage.slice(0, 80) || entry.session.id.slice(0, 12);
+                    const turns = Math.round(entry.session.messageCount / 2);
+                    return (
+                      <button
+                        key={`${entry.machineId}:${entry.session.id}`}
+                        type="button"
+                        onClick={() => navigate({ machineId: entry.machineId, project: entry.projectRoot, session: entry.session.id }, { history: "push" })}
+                        title={`${entry.machineName} · ${entry.projectRoot}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          width: "100%",
+                          textAlign: "left",
+                          background: "var(--bg-panel)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 7,
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          padding: "6px 10px",
+                          fontSize: 12.5,
+                          opacity: entry.machineOffline ? 0.7 : 1,
+                        }}
+                      >
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {title}
+                        </span>
+                        <span style={{ fontSize: 10.5, color: "var(--text-dim)", flexShrink: 0 }}>
+                          {formatRelativeTime(new Date(entry.session.modified), locale)}
+                        </span>
+                        <Tag title={entry.machineOffline ? `${entry.machineName} (${t("home.machineOffline")})` : entry.machineName}>
+                          {entry.machineName}
+                        </Tag>
+                        <Tag title={t("home.messageCount", { count: String(entry.session.messageCount) })}>
+                          {t("home.turnCount", { count: String(turns) })}
+                        </Tag>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+            {aggregateGroups.length === 0 && (
+              <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
+                {groups === null ? "…" : t("home.aggregateEmpty")}
+              </div>
+            )}
+          </div>
+        ) : selectedGroup && selectedProject ? (
           <HomeCalendar
             machineId={selectedGroup.machineId}
             machineName={selectedGroup.machineName}
