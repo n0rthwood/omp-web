@@ -1,0 +1,13 @@
+[Unit]
+Description=omp-web restart-trigger daemon (loopback-only, standalone from omp-web.service)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/joysort/omp/ompweb
+EnvironmentFile=/home/joysort/omp/ops/env/restart-service.env
+ExecStart=/usr/bin/python3 /home/joysort/omp/ompweb/ops/restart-service/server.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
