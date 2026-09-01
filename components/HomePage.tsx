@@ -477,6 +477,9 @@ export function HomePage() {
                         <span style={{ fontSize: 10.5, color: "var(--text-dim)", flexShrink: 0 }}>
                           {formatRelativeTime(new Date(entry.session.modified), locale)}
                         </span>
+                        <Tag title={entry.projectRoot}>
+                          {basename(entry.projectRoot)}
+                        </Tag>
                         <Tag title={entry.machineOffline ? `${entry.machineName} (${t("home.machineOffline")})` : entry.machineName}>
                           {entry.machineName}
                         </Tag>
