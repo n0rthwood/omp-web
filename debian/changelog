@@ -1,3 +1,30 @@
+omp-web (0.3.9) jammy; urgency=medium
+
+  * session-title: rewrite the browser-facing title-summarization prompts to
+    always answer in Simplified Chinese, place any recognized GitHub issue
+    number annotation at the front of the title instead of appending it as
+    a suffix, and target roughly 100 Hanzi or fewer (raised the hard
+    truncation ceiling from 120 to 150 chars as headroom for the longest
+    annotation prefixes, not a new target length) (`lib/session-title.ts`,
+    `lib/title-annotations.ts`, `components/HomeCalendar.tsx`).
+  * postinst: overwrite the SDK's own bundled default title-generation
+    prompts (`title-system.md`, `title-marker-instruction.md` under
+    `@oh-my-pi/pi-coding-agent`) with the same Chinese/prefix/~100-char
+    house style, on both the fresh-install and upgrade/reinstall overlay
+    paths. This is purely defensive: every omp-web code path that generates
+    a title already passes its own `customSystemPrompt`, so these SDK
+    defaults are not read today and this step changes no currently
+    observable behavior — it only guards a future code path that might
+    omit `customSystemPrompt`.
+  * docs: remove the stale `docs/release.md` and `docs/fleet-deployment.md`
+    (superseded by `docs/plans/2026-08-20-omp-web-release-pipeline.md` and
+    `AGENTS.md`'s deployment topology); the still-active npm-publish steps
+    from `docs/release.md` were inlined into
+    `.claude/skills/github-release/SKILL.md` so that skill remains
+    self-contained.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 01 Sep 2026 12:00:00 +0000
+
 omp-web (0.3.8) jammy; urgency=medium
 
   * release: reconcile the `release/0.3.7` fleet-deployed lineage (issues

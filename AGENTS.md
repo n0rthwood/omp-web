@@ -311,8 +311,9 @@ AgentSession in-process.
 ## Deployment Topology — where this repo runs
 
 This repo is deployed as a **fleet**: one gateway plus six remote omp-web
-instances, all `systemd --user` units, all serving port 5010. Full operator
-runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
+instances, all `systemd --user` units, all serving port 5010. Debian
+packaging/release pipeline: `docs/plans/2026-08-20-omp-web-release-pipeline.md`;
+gateway/proxy design: `docs/fleet.md`.
 
 | Host | IP | Unit | Notes |
 |---|---|---|---|

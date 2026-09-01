@@ -5,7 +5,7 @@ import { isLowSignalTitleInput } from "@oh-my-pi/pi-coding-agent/tiny/text";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionLike } from "./omp-types";
 
-const MAX_TITLE_LENGTH = 120;
+const MAX_TITLE_LENGTH = 150;
 const TITLE_MARKER_INSTRUCTION =
   "Output only the title wrapped in `<title>` and `</title>` tags, with nothing before or after. When the message carries no concrete task yet (a bare greeting, acknowledgement, or small talk), output exactly `<title>none</title>`.";
 const TITLE_MAX_TOKENS = 1024;
@@ -22,32 +22,33 @@ export interface GeneratedSessionTitle {
 }
 
 /**
- * Web-owned title prompt (issue #15). The web-owned online title path appends
- * the marker instruction itself (answer inside <title>...</title>; no-task →
- * <title>none</title>); the SDK local-tiny fallback appends the same marker.
- * Our no-task wording uses <title/> per the agreed protocol, and
- * `isDeclinedTitle` treats a literal "none" as a decline so whichever
- * instruction the model follows converges on the same outcome.
+ * Web-owned title prompt (issue #15). The web-owned online title path writes
+ * a Simplified Chinese title and prepends the issue annotation itself; the
+ * SDK local-tiny fallback writes only the human title and the same marker,
+ * and the web layer deterministically prepends the issue annotation via
+ * {@link prependIssueAnnotationPrefix}. Our no-task wording uses <title/>
+ * per the agreed protocol, and `isDeclinedTitle` treats a literal "none" as
+ * a decline so whichever instruction the model follows converges on the
+ * same outcome.
  */
 const WEB_TITLE_SYSTEM_PROMPT = [
-  "Write a concise 3-10 word title for the task in <user>.",
-  "Title the goal or outcome the task is working toward — never quote, restate, or lightly reword the user's own question or phrasing.",
-  "Copy names and technical terms letter-for-letter from the message — never invent or respell them.",
-  "When the user's message references GitHub issues, append an issue annotation suffix inside the same <title> tags, after the human title:",
-  "- the issue(s) this task is mainly about: bare numbers prefixed with #, joined by \" · \" — e.g. #12 or #12 · #13;",
-  "- issues mentioned only as related context: after \"rel \", prefixed with #, comma-joined — e.g. rel #10, #7;",
-  "- both kinds may be absent, single, or multiple; never invent issue numbers — only use numbers literally present in the message;",
-  "- example result: Fix login redirect (#12 · rel #10, #7).",
-  "If there is no task (a bare greeting or small talk), answer <title/>.",
+  "用简体中文写一句概括任务目标的标题,长度控制在约100个汉字以内,能短则短。",
+  "标题要点明任务要达成的目标或结果,不要照抄或轻微改写用户原话。",
+  "人名、产品名、代码标识符等专有名词和技术术语必须逐字保留原文,不要翻译或改写。",
+  "若用户消息中提到了 GitHub issue 编号,把编号标注放在标题最前面,格式为 \"(#12 · rel #10, #7) 标题正文\":",
+  "- 与本次任务主要相关的 issue:纯数字加 #,多个用 \" · \" 连接,例如 #12 或 #12 · #13;",
+  "- 仅作为背景提及的 issue:跟在 \"rel \" 之后,用 \"#\" 前缀、逗号分隔,例如 rel #10, #7;",
+  "- 两类可以都没有、只有一类,或两类都有;严禁编造 issue 编号,只能使用消息中真实出现的数字;",
+  "- 示例:(#12 · rel #10, #7) 修复登录跳转问题。",
+  "如果没有具体任务(只是打招呼或闲聊),回答 <title/>。",
 ].join("\n");
 
 const WEB_TITLE_HUMAN_ONLY_PROMPT = [
-  "Write a concise 3-10 word title for the task in <user>.",
-  "Title the goal or outcome the task is working toward — never quote, restate, or lightly reword the user's own question or phrasing.",
-  "Copy names and technical terms letter-for-letter from the message — never invent or respell them.",
-  "Keep this human title under 60 characters; issue annotations are appended separately.",
-  "Do not include GitHub issue numbers or parenthesized issue annotations.",
-  "If there is no task (a bare greeting or small talk), answer <title/>.",
+  "用简体中文写一句概括任务目标的标题,长度控制在约100个汉字以内,能短则短。",
+  "标题要点明任务要达成的目标或结果,不要照抄或轻微改写用户原话。",
+  "人名、产品名、代码标识符等专有名词和技术术语必须逐字保留原文,不要翻译或改写。",
+  "不要在标题里加入 GitHub issue 编号或圆括号标注,这部分由系统另行添加。",
+  "如果没有具体任务(只是打招呼或闲聊),回答 <title/>。",
 ].join("\n");
 
 /** The SDK's appended marker instruction tells the model to answer <title>none</title> for no-task; treat that literal as a decline. */
@@ -214,7 +215,8 @@ export function normalizeWebGeneratedTitle(value: string | null | undefined): st
   return cleaned;
 }
 
-export function appendIssueAnnotationSuffix(title: string, sourceText: string): string {
+/** Deterministically prepends a "(#12 · rel #10, #7)" issue annotation block, extracted from `sourceText`, to the front of `title`. */
+export function prependIssueAnnotationPrefix(title: string, sourceText: string): string {
   const base = truncateTitle(title);
   if (!base) return "";
   const related = new Set<string>();
@@ -245,7 +247,7 @@ export function appendIssueAnnotationSuffix(title: string, sourceText: string): 
   const parts: string[] = [];
   if (main.length > 0) parts.push(main.map((issue) => `#${issue}`).join(" · "));
   if (relatedOrdered.length > 0) parts.push(`rel ${relatedOrdered.map((issue) => `#${issue}`).join(", ")}`);
-  return parts.length === 0 ? base : truncateTitle(`${base} (${parts.join(" · ")})`);
+  return parts.length === 0 ? base : truncateTitle(`(${parts.join(" · ")}) ${base}`);
 }
 
 function resolveWebTitleModel(session: AgentSessionLike): Model<Api> | undefined {
@@ -321,7 +323,7 @@ export async function generateSessionTitle(
 
   const title = session.settings.get("providers.tinyModel") === "online"
     ? await generateOnlineWebSessionTitle(session, firstMessage)
-    : appendIssueAnnotationSuffix(
+    : prependIssueAnnotationPrefix(
       await generateOmpSessionTitle(
         firstMessage,
         session.modelRegistry as never,

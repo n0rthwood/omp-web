@@ -40,6 +40,49 @@ Rules:
 - Keep the prose concise, past-tense, and user-facing. Preserve relevant backticks around commands, package names, selectors, and configuration keys.
 - Do not add an `Assets` section: GitHub supplies source archives and displays them separately.
 
+## npm publishing (optional, only when requested)
+
+`omp-web` publishes to npm on a separate tag scheme from the Debian package
+release described above: pushing a version tag matching `v*` (not the
+Debian package's `omp-web-v*` tags) triggers
+`.github/workflows/publish-npm.yml`, which checks that the tag version
+matches `package.json`, installs dependencies with Bun, runs the production
+build, and publishes `omp-web` to npm with provenance via npm trusted
+publishing (workflow file `.github/workflows/publish-npm.yml`, GitHub
+environment `npm`, publisher GitHub Actions) — no npm token is stored in
+GitHub Actions.
+
+Preflight before tagging:
+
+```bash
+git status --short --branch
+gh auth status
+npm whoami
+bun --version   # the published .next is built with Bun; 1.2+ required
+```
+
+Expected: `git status` is clean, or only contains changes intentionally
+being released; GitHub is authenticated as an account that can push and
+create releases; npm is authenticated as an account that can publish
+`omp-web`.
+
+Publish to npm, commit the version bump, then tag and push:
+
+```bash
+npm version patch --no-git-tag-version && npm run build && npm publish --access public
+git add package.json package-lock.json
+git commit -m "Release v<version>"
+git tag -a v<version> -m "v<version>"
+git push origin main --tags
+```
+
+Confirm the tag does not already exist before creating it when unsure:
+
+```bash
+git ls-remote --tags origin v<version>
+gh release view v<version> --repo ddallabenetta/omp-web
+```
+
 ## Workflow
 
 ### 1. Establish the release target
@@ -54,7 +97,7 @@ gh auth status
 
 Use `package.json` as the canonical version source unless the user explicitly supplies a different version. The release tag is `v<package.json.version>`. Do not silently invent a new version or overwrite an existing release. Confirm that the tag, package version, and requested release target agree.
 
-For a normal release, verify the working tree and branch are suitable for release. Do not include unrelated uncommitted changes. Follow `docs/release.md` for the repository's npm/tag/build prerequisites, but do not publish to npm unless the user asks for npm publication as well.
+For a normal release, verify the working tree and branch are suitable for release. Do not include unrelated uncommitted changes. See [npm publishing](#npm-publishing-optional-only-when-requested) above for the repository's npm/tag/build prerequisites, but do not publish to npm unless the user asks for npm publication as well.
 
 ### 2. Identify the commit range
 
@@ -84,7 +127,7 @@ bun run typecheck
 bun test
 ```
 
-Run `bun run build` only as part of the actual production/package release flow; the repository explicitly forbids it during ordinary development. If the user asks for npm publication, follow the full build and publish procedure in `docs/release.md`.
+Run `bun run build` only as part of the actual production/package release flow; the repository explicitly forbids it during ordinary development. If the user asks for npm publication, follow the [npm publishing](#npm-publishing-optional-only-when-requested) procedure above.
 
 Before creating the release, check whether the tag or GitHub release already exists:
 

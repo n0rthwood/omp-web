@@ -7,7 +7,7 @@ detached from both this daemon and the calling HTTP request and survives
 omp-web.service being torn down mid-restart (which sends SIGTERM to its
 whole cgroup, including any shell that issued the restart from inside it).
 
-See docs/fleet-deployment.md for the full protocol and the real gateway
+See ~/omp/ops/scripts/restart-payload.sh on the gateway for the real
 self-upgrade recipe. This is intentionally a single fixed-script trigger,
 not a generic task runner.
 
