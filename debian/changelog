@@ -1,3 +1,28 @@
+omp-web (0.3.10) jammy; urgency=medium
+
+  * debian/postinst: fix `ensure_env()` to also copy the package's
+    `patches/` directory (if it ships one) into `env_dir` alongside
+    `package.json`/`bun.lock`, before running `bun install
+    --frozen-lockfile --production` there. `bun.lock`'s
+    `patchedDependencies` entries reference patch files by a path relative
+    to the install cwd (e.g.
+    `patches/@oh-my-pi%2Fpi-coding-agent@17.3.0.patch`); since `ensure_env`
+    (new in 0.3.9) never copied `patches/` into the freshly materialized
+    env dir, `bun install --frozen-lockfile` failed with "Couldn't find
+    patch file" on every host's very first run of `ensure_env` — i.e.
+    every currently-deployed host's first upgrade to 0.3.9, leaving dpkg
+    half-configured. Found via a throwaway-LXC fresh-install verification
+    pass before any production host upgraded.
+  * tests/run-postinst-fixture-tests.sh: the fake `bun install` now
+    validates that any patch file referenced by `bun.lock` exists relative
+    to the install cwd (as real `bun install` does), and a new fixture
+    case seeds a `patches/` directory with a marker file referenced from a
+    `patchedDependencies`-shaped `bun.lock` entry, asserting the marker
+    file lands inside the materialized `env_dir` and `bun install`
+    succeeds.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 13:08:59 +0000
+
 omp-web (0.3.9) jammy; urgency=medium
 
   * debian/rules, debian/postinst: stop shipping `node_modules` (2.2GB) and

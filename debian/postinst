@@ -125,6 +125,17 @@ case "$1" in
         chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/omp/envs" "$env_dir"
         cp "$OMP_WEB_SRC/package.json" "$OMP_WEB_SRC/bun.lock" "$env_dir/"
         chown "$TARGET_USER:$TARGET_USER" "$env_dir/package.json" "$env_dir/bun.lock"
+        # bun.lock's patchedDependencies (if any) reference patch files by a
+        # path relative to the install cwd, e.g.
+        # "patches/@scope%2Fpkg@1.0.0.patch" — copy the package's patches/
+        # dir (if it ships one) alongside package.json/bun.lock so `bun
+        # install` below can resolve it. Without this, `bun install
+        # --frozen-lockfile` fails with "Couldn't find patch file" on every
+        # currently-deployed host's first run of ensure_env.
+        if [ -d "$OMP_WEB_SRC/patches" ]; then
+          cp -r "$OMP_WEB_SRC/patches" "$env_dir/"
+          chown -R "$TARGET_USER:$TARGET_USER" "$env_dir/patches"
+        fi
         run_as_target "cd '$env_dir' && '$TARGET_HOME/.bun/bin/bun' install --frozen-lockfile --production"
       else
         echo "omp-web: reusing existing dependencies for bun.lock $env_hash at $env_dir" >&2

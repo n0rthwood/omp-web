@@ -35,9 +35,22 @@ build_fake_payload() {
 # Fake bun: logs every invocation (so tests can assert install-call counts)
 # and, for `install`, materializes a node_modules dir with a marker file —
 # ensure_env's "does $env_dir/node_modules already exist" reuse check needs
-# something real to observe across repeated fixture runs.
+# something real to observe across repeated fixture runs. Also simulates
+# bun's patchedDependencies resolution: any patch file bun.lock references
+# (a path relative to the install cwd) must exist, or a real `bun install
+# --frozen-lockfile` fails with "Couldn't find patch file" — this is what
+# catches ensure_env not having copied patches/ into env_dir alongside
+# package.json/bun.lock.
 echo "bun-fake $*" >> "${OMP_WEB_TEST_ROOT}/bun-install.log"
 if [ "$1" = "install" ]; then
+  if [ -f bun.lock ]; then
+    for patch_path in $(grep -oE '"[^"]*\.patch"' bun.lock | tr -d '"'); do
+      if [ ! -f "$patch_path" ]; then
+        echo "bun-fake: error: Couldn't find patch file \"$patch_path\"" >&2
+        exit 1
+      fi
+    done
+  fi
   mkdir -p node_modules
   touch node_modules/.fixture-installed
 fi
@@ -264,6 +277,41 @@ SYMLINK_TARGET13="$(readlink "$REAL_NM13")"
 CURRENT_ENV_HASH13="$(sha256sum "$ROOT9/opt/omp-web/current/bun.lock" | cut -c1-16)"
 assert_eq "ensure_env: legacy-host symlink points at the correct hashed env dir" \
   "$HOME9/omp/envs/$CURRENT_ENV_HASH13/node_modules" "$SYMLINK_TARGET13"
+
+# --- Test 14: ensure_env must copy the package's patches/ directory into
+# env_dir before running `bun install --frozen-lockfile`, or a bun.lock
+# patchedDependencies entry (a path relative to the install cwd, e.g.
+# "patches/@scope%2Fpkg@1.0.0.patch") cannot resolve and a real `bun
+# install` fails with "Couldn't find patch file". ensure_env is brand new
+# in this release, so every currently-deployed fleet host hits this on its
+# very first upgrade — regression test for the fix on top of #43. ---
+ROOT14="$(new_fixture_root)"
+build_fake_payload "$ROOT14"
+mkdir -p "$ROOT14/opt/omp-web/current/patches"
+echo "fixture-patch-marker" > "$ROOT14/opt/omp-web/current/patches/fixture.patch"
+cat > "$ROOT14/opt/omp-web/current/bun.lock" <<'EOF'
+{
+  "lockfileVersion": 1,
+  "packages": {},
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@17.3.0": "patches/fixture.patch"
+  }
+}
+EOF
+if ! run_postinst "$ROOT14" >"$ROOT14/postinst.log" 2>&1; then
+  echo "FAIL - ensure_env: postinst must succeed when bun.lock references patchedDependencies and the package ships patches/"
+  cat "$ROOT14/postinst.log"
+  FAIL=1
+else
+  HOME14="$ROOT14/home/joysort"
+  ENV_HASH14="$(sha256sum "$ROOT14/opt/omp-web/current/bun.lock" | cut -c1-16)"
+  ENV_DIR14="$HOME14/omp/envs/$ENV_HASH14"
+  assert_file_exists "ensure_env: patches/ directory copied into env dir so bun install can resolve patchedDependencies" \
+    "$ENV_DIR14/patches/fixture.patch"
+  assert_file_exists "ensure_env: bun install succeeded (patchedDependencies resolved) leaving node_modules materialized" \
+    "$ENV_DIR14/node_modules/.fixture-installed"
+fi
+
 echo "---"
 if [ "$FAIL" = "1" ]; then
   echo "FIXTURE TESTS FAILED"
