@@ -1,9 +1,9 @@
-/** Suffix grammar: `(` mains? (` · `)? related? `)` with at least one part present.
+/** Prefix grammar: `(` mains? (` · `)? related? `)` with at least one part present, followed by a single space.
  *  mains: `#12` joined by " · " (bare). related: `rel #10` then ", #7" (prefixed). */
 export interface TitleAnnotations { main: number[]; related: number[] }
 
 export function parseTitleAnnotations(name: string): { text: string; annotations: TitleAnnotations | null } {
-  const match = name.match(/\s+\(([^()]*)\)\s*$/);
+  const match = name.match(/^\(([^()]*)\)\s+/);
   if (!match) return { text: name, annotations: null };
   const parts = match[1].split(" · ").filter((p) => p.length > 0);
   const main: number[] = [];
@@ -25,7 +25,7 @@ export function parseTitleAnnotations(name: string): { text: string; annotations
     }
   }
   if (main.length === 0 && related.length === 0) return { text: name, annotations: null };
-  return { text: name.slice(0, match.index).trimEnd(), annotations: { main, related } };
+  return { text: name.slice(match[0].length), annotations: { main, related } };
 }
 
 function parseBareIssue(value: string): number | null {

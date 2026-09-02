@@ -56,8 +56,7 @@ export function IssueChips({ name }: { name: string }) {
   const { text, annotations } = useMemo(() => parseTitleAnnotations(name), [name]);
   return (
     <>
-      {text}
-      {annotations?.main.map((n) => (
+      {annotations?.main.map((n, i) => (
         <a
           key={`m${n}`}
           href={`https://github.com/n0rthwood/omp-web/issues/${n}`}
@@ -67,7 +66,7 @@ export function IssueChips({ name }: { name: string }) {
           title={t("home.mainIssues")}
           style={{
             ...chipBase,
-            marginLeft: 8,
+            marginRight: i === annotations.main.length - 1 && annotations.related.length === 0 ? 8 : 6,
             fontWeight: 600,
             background: "color-mix(in srgb, var(--accent) 16%, transparent)",
             color: "var(--accent)",
@@ -77,7 +76,7 @@ export function IssueChips({ name }: { name: string }) {
           #{n}
         </a>
       ))}
-      {annotations?.related.map((n) => (
+      {annotations?.related.map((n, i) => (
         <a
           key={`r${n}`}
           href={`https://github.com/n0rthwood/omp-web/issues/${n}`}
@@ -87,7 +86,7 @@ export function IssueChips({ name }: { name: string }) {
           title={t("home.relatedIssues")}
           style={{
             ...chipBase,
-            marginLeft: 6,
+            marginRight: i === annotations.related.length - 1 ? 8 : 6,
             fontWeight: 500,
             background: "var(--bg-subtle)",
             color: "var(--text-dim)",
@@ -97,6 +96,7 @@ export function IssueChips({ name }: { name: string }) {
           rel #{n}
         </a>
       ))}
+      {text}
     </>
   );
 }
