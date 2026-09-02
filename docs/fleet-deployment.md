@@ -20,10 +20,12 @@ API and proxy design, see [fleet.md](./fleet.md).
 with session history; `agent.db`/`sessions/` were preserved when it joined the
 fleet on 2026-08-19 — only the binary and configs were refreshed).
 
-Every remote runs as a `systemd --user omp-web.service` unit, checked out from
-`~/omp/ompweb` on that host, built from `main`. The fleet feature was developed
-on `feature/omp2-fleet-gateway`, which merged into `main` and was then deleted;
-hosts provisioned during that window were repointed to `main`.
+Every remote runs as a `systemd --user omp-web.service` unit, with the app
+tree at `~/omp/ompweb` on that host kept current by the `omp-web` apt
+package (see [Apt upgrade](#day-2-operations) below) rather than a manual
+git build. The fleet feature was developed on `feature/omp2-fleet-gateway`,
+which merged into `main` and was then deleted; hosts provisioned during
+that window were repointed to `main` before the apt package existed.
 
 **Never restart, stop, or reconfigure `omp-web.service` on 172.30.3.123** from
 a session running on it — it hosts the session itself.
@@ -76,7 +78,7 @@ on that host — every running agent turn, terminal, and unsaved session state
 dies with it. `SIGTERM` is the safe signal for `systemctl --user restart` /
 `stop`. Do not change this without checking the shutdown handler.
 
-## Four traps that cost real time today
+## Three traps that cost real time today
 
 1. **Non-interactive SSH PATH excludes `~/.local/bin` and `~/.bun/bin` on most
    of these hosts**, because `.bashrc` guards them behind an interactive-shell
@@ -85,16 +87,12 @@ dies with it. `SIGTERM` is the safe signal for `systemctl --user restart` /
    above has an explicit `Environment=PATH=...` line — a unit copied without
    it starts under systemd (which doesn't source `.bashrc` either) and then
    fails to find Bun.
-2. **`package.json`'s `build` script calls bare `bun`.** Running
-   `bun run build` over SSH — even when you invoked the outer `bun` by
-   absolute path — needs `PATH=$HOME/.bun/bin:$PATH` exported for that one
-   command, or the nested `bun` invocation fails to resolve.
-3. **Check linger before you trust a reboot.** Run
+2. **Check linger before you trust a reboot.** Run
    `loginctl show-user joysort -p Linger` on the host; if it says `Linger=no`,
    run `loginctl enable-linger joysort`. Without linger, the user service dies
    the moment the SSH session that started it ends, and never comes back after
    a reboot. This was off on `.24` and `.39` today.
-4. **Never run `bun run dev`, `next build`, or `rm -rf .next` inside a
+3. **Never run `bun run dev`, `next build`, or `rm -rf .next` inside a
    directory that a live unit has as its `WorkingDirectory`.** On the gateway
    that directory is `/home/joysort/omp/ompweb`, and `omp-web.service` serves
    from the `.next` inside it. Deleting or rebuilding it does not disturb the
@@ -106,7 +104,9 @@ dies with it. `SIGTERM` is the safe signal for `systemctl --user restart` /
    `webpack-*` assets until the service is restarted. Build in a git worktree
    instead (`git worktree add .worktrees/<name> <ref>` with `node_modules`
    symlinked), and if it has already happened, the only repair is a restart
-   onto a complete `.next`.
+   onto a complete `.next`. The apt package's own build happens in CI, not on
+   any remote, so this trap now only bites a developer building locally in
+   `~/omp/ompweb-feat` or a worktree — never during a routine fleet upgrade.
 
 ## Provider keys are single-sourced
 
@@ -226,18 +226,13 @@ EOF
 chmod 600 ~/omp/ops/env/restart-service.env
 unset TOKEN
 
-# The real deploy recipe this service exists to run:
+# The real self-upgrade recipe this service exists to run (see "Apt
+# upgrade" under Day-2 operations below for interactive use):
 cat > ~/omp/ops/scripts/restart-payload.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/joysort/omp/ompweb
-git fetch origin
-git checkout main
-git pull
-export PATH="$HOME/.bun/bin:$PATH"
-bun install
-bun run build
-systemctl --user restart omp-web
+sudo apt-get update
+sudo apt-get install -y --only-upgrade omp-web
 EOF
 chmod +x ~/omp/ops/scripts/restart-payload.sh
 
@@ -278,7 +273,7 @@ curl -s http://127.0.0.1:8799/status
 ```
 
 until `running` is `false`, then check `exit_code` (`0` = success) and
-`log_tail` for the `bun install`/`bun run build` output.
+`log_tail` for the `apt-get update`/`apt-get install` output.
 
 ### Verifying the loop without touching the live service
 
@@ -295,12 +290,39 @@ must be unchanged before and after this whole exercise.
 
 ## Day-2 operations
 
-**Redeploy a remote** (run on that host, or `ssh <host> '...'` with absolute
-paths per trap #1):
+**Apt upgrade (redeploy a remote)** (run on that host, or `ssh <host> '...'`
+with absolute paths per trap #1):
 
 ```
-cd ~/omp/ompweb && git fetch origin && git checkout main && git pull && ~/.bun/bin/bun install && PATH=$HOME/.bun/bin:$PATH bun run build && systemctl --user restart omp-web
+sudo apt-get update && sudo apt-get install -y --only-upgrade omp-web
 ```
+
+`~/omp/ompweb` stays the same git checkout it always was — the package
+overlays it via `sync_app`'s non-deleting tar-pipe (`debian/postinst`), it
+does not replace it with a fresh clone. A dirty `git status` there right
+after an upgrade is that overlay, not uncommitted work — never
+`git add`/`git commit` it.
+
+**One host at a time, active-session hosts last.** The upgrade's `postinst`
+restarts `omp-web.service` (same `KillMode=control-group` cgroup-wide
+`SIGTERM` as a manual restart), which tears down every `AgentSession`
+running in that host's process — live agent turns, terminals, and unsaved
+session state on that host all die at the moment of restart. On the
+gateway specifically, trigger the upgrade through
+[`omp-web-restart-service`](#gateway-self-upgrade-omp-web-restart-service)
+instead of running `apt-get install` directly from a session hosted by the
+very service being upgraded — same reasoning as the git-pull recipe this
+replaced.
+
+**Never target `omp-web=0.3.9` explicitly.** That version's `ensure_env()`
+(the step that materializes `node_modules` for a release) omits copying
+`patches/` into the freshly created env dir, so
+`bun install --frozen-lockfile` dies with "Couldn't find patch file" and
+`dpkg` is left half-configured. Fixed in `0.3.10` (per `debian/changelog`);
+`0.5.0` is a version-number-only relabel of `0.3.10`, carrying no further
+code changes. A plain `apt-get install --only-upgrade omp-web` always
+resolves to the highest available Candidate, so this only matters if
+someone manually pins a version with `=<version>`.
 
 **Tail logs:**
 
@@ -331,43 +353,52 @@ systemctl --user status omp-web
 
 Prerequisites, in order:
 
-1. Bun installed for the `joysort` user (`~/.bun/bin/bun` present).
-2. `loginctl enable-linger joysort` if `loginctl show-user joysort -p Linger`
-   says `no`.
-3. `omp` CLI binary and `~/.omp/agent/{.env,models.yml,config.yml}` in place,
-   each `600` where they carry secrets — copy from an already-provisioned
-   host (e.g. `scp` from 172.30.3.123) rather than re-authoring by hand.
-4. GitHub SSH access for that user (deploy key or personal key with repo
-   access) so `git clone git@github.com:n0rthwood/omp-web.git` succeeds.
+1. Configure the apt source, copying from an already-provisioned host
+   rather than re-authoring by hand:
+   ```
+   ssh joysort@<existing-host> 'cat /etc/apt/keyrings/joysort-archive-keyring.gpg' \
+     | ssh joysort@<new-host> 'sudo tee /etc/apt/keyrings/joysort-archive-keyring.gpg > /dev/null'
+   ssh joysort@<existing-host> 'cat /etc/apt/sources.list.d/joysort.sources' \
+     | ssh joysort@<new-host> 'sudo tee /etc/apt/sources.list.d/joysort.sources > /dev/null'
+   ssh joysort@<new-host> 'sudo apt-get update'
+   ```
+2. Check linger: `loginctl show-user joysort -p Linger` on the new host; if
+   it says `Linger=no`, run `loginctl enable-linger joysort`.
+   `debian/postinst` only enables linger when it creates the `joysort` user
+   itself — an already-existing user is left untouched.
 
 Then, on the new host:
 
 ```
-git clone git@github.com:n0rthwood/omp-web.git ~/omp/ompweb
-cd ~/omp/ompweb
-~/.bun/bin/bun install
-PATH=$HOME/.bun/bin:$PATH bun run build
-
-mkdir -p ~/omp/ops/env
-cat > ~/omp/ops/env/5010.env <<'EOF'
-OMP_WEB_HOSTNAME=<this host's LAN IP>
-OMP_WEB_PASSWORD=<generate a new unique password>
-OMP_WEB_TERMINALS=1
-EOF
-chmod 600 ~/omp/ops/env/5010.env
-
-mkdir -p ~/.config/systemd/user
-# create ~/.config/systemd/user/omp-web.service using the unit template above,
-# with <IP> replaced by this host's LAN address
-
-systemctl --user daemon-reload
-systemctl --user enable --now omp-web
+sudo apt-get install -y omp-web
 ```
+
+`debian/postinst`'s fresh-install path (it runs because no completion
+marker exists yet on this host) does everything the steps below used to do
+by hand: installs the bundled Bun runtime and the `omp` CLI if either is
+missing, materializes `node_modules` for the release's `bun.lock`
+(`ensure_env`), tar-overlays the app tree into `~/omp/ompweb` (`sync_app`),
+generates a random `OMP_WEB_PASSWORD` and writes `~/omp/ops/env/5010.env`
+(`seed_env_file`), seeds `~/.omp/agent/{.env,models.yml,config.yml}` from
+the package's own sealed defaults (`seed_agent_dir`), writes the
+`systemd --user` unit from the packaged template, and enables + starts
+`omp-web.service`. There is no `git clone`, `bun install`, or
+`bun run build` step on the host itself — those already happened in the CI
+job that built the package.
+
+Still manual after install:
+
+- Real provider API keys in `~/.omp/agent/.env` beyond whatever the
+  package's sealed defaults cover (see "Provider keys are single-sourced"
+  above).
+- Registering the host with the gateway (below) — the package has no
+  knowledge of the fleet gateway.
 
 Verify locally on the new host, then from the gateway (see below), then:
 
-- Copy its password to `~/omp/ops/env/fleet/<IP>.env` on the gateway, mode
-  `600`.
+- Copy its generated password
+  (`grep OMP_WEB_PASSWORD ~/omp/ops/env/5010.env` on the new host) to
+  `~/omp/ops/env/fleet/<IP>.env` on the gateway, mode `600`.
 - Register it: `POST /api/machines` on the gateway with
   `{"name": "<hostname>", "baseUrl": "http://<IP>:5010", "authMode": "basic", "username": "omp", "token": "<password>"}`
   (see [fleet.md](./fleet.md) for the full field reference).
