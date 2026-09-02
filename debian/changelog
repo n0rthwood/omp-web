@@ -1,3 +1,23 @@
+omp-web (0.5.0) jammy; urgency=medium
+
+  * Deliberate milestone version bump (0.3.10 -> 0.5.0), requested by the
+    repo owner, to mark the .deb packaging redesign (issues/PRs #43, #44,
+    #45) as a significant release rather than a continuation of the
+    0.3.x bugfix line. This version carries no additional code changes
+    beyond what already shipped in 0.3.9/0.3.10 below; the jump exists
+    solely to give the packaging redesign its own release marker in the
+    version history.
+  * Summary of the redesign (see 0.3.9/0.3.10 entries below for full
+    detail): stopped shipping `node_modules` and `.next/cache` inside the
+    .deb, and instead have `postinst`'s `ensure_env()` materialize
+    dependencies on the target host into a `bun.lock`-hash-keyed shared
+    directory, symlinked into the app checkout, reusing bun's global
+    content-addressable package cache. Net effect, LXC-verified end to
+    end: installed-size dropped from ~2.79GB to ~290MB, and a reinstall
+    with an unchanged `bun.lock` dropped from ~2m8s to ~5s (~25x faster).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 13:30:00 +0000
+
 omp-web (0.3.10) jammy; urgency=medium
 
   * debian/postinst: fix `ensure_env()` to also copy the package's
