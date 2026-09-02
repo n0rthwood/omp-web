@@ -1,3 +1,34 @@
+omp-web (0.3.9) jammy; urgency=medium
+
+  * debian/rules, debian/postinst: stop shipping `node_modules` (2.2GB) and
+    `.next/cache` (590MB, pure build cache `next start` never reads) inside
+    the .deb — excluded from `override_dh_auto_install`'s rsync. Instead
+    `postinst`'s new `ensure_env()` (called from `sync_app()`, right after
+    the tar-overlay and before the possible service restart) materializes
+    `node_modules` on the target host into a `bun.lock`-hash-keyed shared
+    directory (`~/omp/envs/<sha256-prefix>`, `bun install
+    --frozen-lockfile --production` run as the target user) and symlinks
+    `~/omp/ompweb/node_modules` into it. An upgrade whose `bun.lock` is
+    unchanged from the currently installed release reuses the existing env
+    dir and skips the install entirely; a release with a different
+    `bun.lock` gets its own env dir without disturbing the previous one. A
+    pre-existing real (non-symlink) `node_modules` — the case for every
+    currently-deployed host, which had it tar-overlaid directly before
+    this change — is removed first, since `ln -sfn` targeting an existing
+    real directory nests the new symlink inside it rather than replacing
+    it. Also reclaims any stale `.next/cache` left on disk by a
+    pre-existing host's earlier full-tree overlay, since the tar-overlay
+    never deletes (closes #43).
+  * tests/run-postinst-fixture-tests.sh: extend the fixture harness with a
+    fake `bun` that logs invocations and materializes a `node_modules`
+    marker on `install`, plus five new cases covering `ensure_env`'s
+    first-materialization, unchanged-lockfile reuse, changed-lockfile
+    reinstall/retarget, the stale-`.next/cache` cleanup, and a legacy real
+    (non-symlink) `node_modules` being replaced by the correct symlink on
+    upgrade.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 12:17:27 +0000
+
 omp-web (0.3.8) jammy; urgency=medium
 
   * release: reconcile the `release/0.3.7` fleet-deployed lineage (issues
