@@ -56,6 +56,8 @@ override_dh_auto_install:
 		--exclude='debian_dist' \
 		--exclude='release/seeds' \
 		--exclude='tests' \
+		--exclude='node_modules' \
+		--exclude='.next/cache' \
 		./ debian/omp-web/opt/omp-web/current/
 
 	mkdir -p debian/omp-web/opt/omp-web/runtime

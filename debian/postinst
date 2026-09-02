@@ -104,6 +104,46 @@ case "$1" in
       echo "$TARGET_HOME/.local/bin"
     }
 
+    # bun.lock-hash-keyed shared dependency install (refs #43): the
+    # package no longer ships node_modules (2.2GB) or .next/cache (590MB,
+    # pure build cache `next start` never reads) to keep the .deb small.
+    # Instead this materializes node_modules once per distinct bun.lock
+    # under a shared ~/omp/envs/<hash> directory and symlinks it into
+    # $DEST — an upgrade whose bun.lock is unchanged from the currently
+    # installed release reuses the existing env dir and skips `bun
+    # install` entirely. A release with a different bun.lock gets its own
+    # env dir, so nothing already-materialized is ever mutated or removed
+    # out from under a still-running older release.
+    ensure_env() {
+      local env_hash env_dir
+      env_hash="$(sha256sum "$OMP_WEB_SRC/bun.lock" | cut -c1-16)"
+      env_dir="$TARGET_HOME/omp/envs/$env_hash"
+
+      if [ ! -d "$env_dir/node_modules" ]; then
+        echo "omp-web: materializing dependencies for bun.lock $env_hash at $env_dir" >&2
+        mkdir -p "$env_dir"
+        chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/omp/envs" "$env_dir"
+        cp "$OMP_WEB_SRC/package.json" "$OMP_WEB_SRC/bun.lock" "$env_dir/"
+        chown "$TARGET_USER:$TARGET_USER" "$env_dir/package.json" "$env_dir/bun.lock"
+        run_as_target "cd '$env_dir' && '$TARGET_HOME/.bun/bin/bun' install --frozen-lockfile --production"
+      else
+        echo "omp-web: reusing existing dependencies for bun.lock $env_hash at $env_dir" >&2
+      fi
+
+      # A pre-existing REAL (non-symlink) node_modules — the case for
+      # every currently-deployed host, which had node_modules tar-overlaid
+      # directly before this change — must be removed first: `ln -sfn`
+      # targeting an existing real directory does not replace it, it
+      # nests the new symlink *inside* it (standard ln/cp
+      # destination-is-a-directory semantics; `-f`/`-n` do not change
+      # this for a real, non-symlink destination).
+      if [ -e "$DEST/node_modules" ] && [ ! -L "$DEST/node_modules" ]; then
+        rm -rf "$DEST/node_modules"
+      fi
+      ln -sfn "$env_dir/node_modules" "$DEST/node_modules"
+      chown -h "$TARGET_USER:$TARGET_USER" "$DEST/node_modules"
+    }
+
     sync_app() {
       local was_active=0
       if run_as_target 'systemctl --user is-active --quiet omp-web.service' 2>/dev/null; then
@@ -118,6 +158,12 @@ case "$1" in
       # `rsync --delete`) — Design decision 5.
       tar -cf - -C "$OMP_WEB_SRC" . \
         | runuser -l "$TARGET_USER" -c "tar -xf - -C '$DEST'"
+      # Old hosts may still have a stale .next/cache on disk from a prior
+      # full-tree tar-overlay (before this package stopped shipping it) —
+      # the overlay above never deletes, so reclaim it explicitly. Pure
+      # build cache; `next start` never reads it.
+      rm -rf "$DEST/.next/cache"
+      ensure_env
 
       if [ "$was_active" = 1 ]; then
         run_as_target 'systemctl --user daemon-reload && systemctl --user restart omp-web.service'
