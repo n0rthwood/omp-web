@@ -1,3 +1,31 @@
+omp-web (0.5.1) jammy; urgency=medium
+
+  * Session titles are now generated in Simplified Chinese, targeting about
+    100 Hanzi, and the GitHub issue annotation moved from a trailing suffix
+    to a leading prefix so the issue number survives truncation in the
+    sidebar and the Home calendar. `appendIssueAnnotationSuffix` became
+    `prependIssueAnnotationPrefix`; the truncation ceiling went from 120 to
+    150 characters to leave room for the longest annotation prefix
+    (closes #47).
+  * Documentation now describes exactly one deployment method: the R2 apt
+    repository. Every `git pull` + `bun install` + `bun run build` +
+    `systemctl --user restart` recipe in `docs/fleet-deployment.md`,
+    `AGENTS.md` and the `omp-web-restart-service` payload was replaced with
+    `apt-get update && apt-get install --only-upgrade omp-web`, together
+    with the one-host-at-a-time rule, the fact that an upgrade restarts the
+    unit and therefore aborts every in-browser AgentSession on that host,
+    and the standing hazard that 0.3.9 must be skipped because its
+    `ensure_env()` omitted `patches/`. `docs/release.md` was cut down and
+    its still-valid npm-publish steps moved into the `github-release`
+    skill. Topology, per-host layout, the systemd unit, env
+    single-sourcing, auth, security posture, version reporting and the
+    restart-service protocol were all preserved rather than deleted
+    (closes #48).
+  * No packaging, dependency or runtime change; `bun.lock` and the
+    `patches/` set are untouched from 0.5.0.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 03 Sep 2026 00:50:53 +0000
+
 omp-web (0.5.0) jammy; urgency=medium
 
   * Deliberate milestone version bump (0.3.10 -> 0.5.0), requested by the
