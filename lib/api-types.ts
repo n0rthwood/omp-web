@@ -237,6 +237,12 @@ export interface SafeMachine {
   id: string;
   name: string;
   baseUrl: string;
+  /** Additional endpoints tried, in order, when `baseUrl` is unreachable. */
+  fallbackUrls: string[];
+  /** The endpoint currently believed reachable — `baseUrl` unless serving over a fallback. */
+  activeUrl: string;
+  /** `baseUrl` followed by `fallbackUrls`, each with its last-known reachability. */
+  endpoints: MachineEndpointHealth[];
   authMode: MachineAuthMode;
   hasCredential: boolean;
   headerNames: string[];
@@ -245,12 +251,18 @@ export interface SafeMachine {
   isLocal: boolean;
 }
 
+/** Last-known reachability of one of a machine's endpoints. `null` = never attempted. */
+export interface MachineEndpointHealth {
+  url: string;
+  healthy: boolean | null;
+}
+
 /**
  * The user-role projection of `SafeMachine` — slimmed for `GET /api/machines`
- * when the caller is not an admin. Never carries the remote origin or the
+ * when the caller is not an admin. Never carries the remote origin(s) or the
  * static header names an admin can see.
  */
-export type UserVisibleMachine = Omit<SafeMachine, "baseUrl" | "headerNames">;
+export type UserVisibleMachine = Omit<SafeMachine, "baseUrl" | "headerNames" | "fallbackUrls" | "activeUrl" | "endpoints">;
 
 /** Health probe response (also served by every machine's `/api/health`). */
 export interface MachineHealth {

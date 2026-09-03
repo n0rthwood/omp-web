@@ -44,7 +44,7 @@ export async function PATCH(req: Request, context: RouteContext) {
   const body = await readJsonBody(req);
   if (!body) return jsonError(400, "Invalid JSON body");
 
-  const { name, baseUrl, authMode, token, username, headers } = body;
+  const { name, baseUrl, fallbackUrls, authMode, token, username, headers } = body;
   const parsedAuthMode = typeof authMode === "string" ? AUTH_MODES[authMode] : undefined;
   if (authMode !== undefined && !parsedAuthMode) {
     return jsonError(400, "authMode must be \"bearer\", \"basic\" or \"none\"");
@@ -54,6 +54,12 @@ export async function PATCH(req: Request, context: RouteContext) {
   }
   if (baseUrl !== undefined && typeof baseUrl !== "string") {
     return jsonError(400, "baseUrl must be a string");
+  }
+  if (
+    fallbackUrls !== undefined &&
+    (!Array.isArray(fallbackUrls) || fallbackUrls.some((entry) => typeof entry !== "string"))
+  ) {
+    return jsonError(400, "fallbackUrls must be an array of strings");
   }
   if (token !== undefined && token !== null && typeof token !== "string") {
     return jsonError(400, "token must be a string or null");
@@ -68,6 +74,7 @@ export async function PATCH(req: Request, context: RouteContext) {
   const patch: MachinePatch = {};
   if (name !== undefined) patch.name = name;
   if (baseUrl !== undefined) patch.baseUrl = baseUrl;
+  if (Array.isArray(fallbackUrls)) patch.fallbackUrls = fallbackUrls as string[];
   if (parsedAuthMode !== undefined) patch.authMode = parsedAuthMode;
   if (token !== undefined) patch.token = token;
   if (username !== undefined) patch.username = username;

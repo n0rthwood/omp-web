@@ -57,7 +57,7 @@ export async function POST(req: Request) {
   const body = await readJsonBody(req);
   if (!body) return jsonError(400, "Invalid JSON body");
 
-  const { id, name, baseUrl, authMode, token, username, headers } = body;
+  const { id, name, baseUrl, fallbackUrls, authMode, token, username, headers } = body;
   const parsedAuthMode = typeof authMode === "string" ? AUTH_MODES[authMode] : undefined;
   if (!parsedAuthMode) {
     return jsonError(400, "authMode must be \"bearer\", \"basic\" or \"none\"");
@@ -65,6 +65,12 @@ export async function POST(req: Request) {
   if (typeof name !== "string") return jsonError(400, "name is required");
   if (typeof baseUrl !== "string") return jsonError(400, "baseUrl is required");
   if (id !== undefined && typeof id !== "string") return jsonError(400, "id must be a string");
+  if (
+    fallbackUrls !== undefined &&
+    (!Array.isArray(fallbackUrls) || fallbackUrls.some((entry) => typeof entry !== "string"))
+  ) {
+    return jsonError(400, "fallbackUrls must be an array of strings");
+  }
   if (token !== undefined && token !== null && typeof token !== "string") {
     return jsonError(400, "token must be a string");
   }
@@ -80,6 +86,7 @@ export async function POST(req: Request) {
     baseUrl,
     authMode: parsedAuthMode,
     ...(typeof id === "string" ? { id } : {}),
+    ...(Array.isArray(fallbackUrls) ? { fallbackUrls: fallbackUrls as string[] } : {}),
     ...(typeof token === "string" ? { token } : {}),
     ...(typeof username === "string" ? { username } : {}),
     ...(headers === undefined ? {} : { headers: headers as Record<string, string> }),

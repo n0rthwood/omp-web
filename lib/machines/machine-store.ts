@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "../atomic-file";
 import type { MachineAuthMode, SafeMachine, UserVisibleMachine } from "../api-types";
+import { clearEndpointState, describeEndpoints } from "./endpoint-state";
 
 export type { MachineAuthMode, SafeMachine, UserVisibleMachine } from "../api-types";
 
@@ -13,6 +14,10 @@ export interface StoredMachine {
   id: string;
   name: string;
   baseUrl: string;
+  /** Additional endpoints tried, in priority order, when `baseUrl` is unreachable
+   *  at the transport level. Same credential as `baseUrl` — every endpoint is
+   *  the same omp-web instance reached by a different route. */
+  fallbackUrls: string[];
   authMode: MachineAuthMode;
   token?: string;
   username?: string;
@@ -26,6 +31,7 @@ export interface MachineInput {
   id?: string;
   name: string;
   baseUrl: string;
+  fallbackUrls?: string[];
   authMode: MachineAuthMode;
   token?: string | null;
   username?: string | null;
@@ -35,6 +41,7 @@ export interface MachineInput {
 export interface MachinePatch {
   name?: string;
   baseUrl?: string;
+  fallbackUrls?: string[];
   authMode?: MachineAuthMode;
   token?: string | null;
   username?: string | null;
@@ -59,7 +66,6 @@ interface MachinesCache {
   value: StoredMachine[];
 }
 declare global {
-  // eslint-disable-next-line no-var
   var __ompMachinesCache: MachinesCache | undefined;
 }
 
@@ -118,6 +124,26 @@ export function normalizeBaseUrl(raw: string): string {
     throw new MachineValidationError("baseUrl", "baseUrl must use http or https");
   }
   return url.origin;
+}
+
+/** Each entry reduced to its origin the same way `normalizeBaseUrl` does;
+ *  rejects anything that isn't an array of valid absolute http/https URLs. */
+function normalizeFallbackUrls(raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== "string")) {
+    throw new MachineValidationError("fallbackUrls", "fallbackUrls must be an array of URL strings");
+  }
+  return raw.map((entry) => {
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      throw new MachineValidationError("fallbackUrls", `fallbackUrls entry must be a valid absolute URL: ${entry}`);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new MachineValidationError("fallbackUrls", "fallbackUrls entries must use http or https");
+    }
+    return url.origin;
+  });
 }
 
 function validateHeaders(headers: Record<string, string>): void {
@@ -212,6 +238,9 @@ function parseStoredMachine(value: unknown): StoredMachine | null {
     id,
     name,
     baseUrl,
+    fallbackUrls: Array.isArray(record.fallbackUrls)
+      ? record.fallbackUrls.filter((entry): entry is string => typeof entry === "string")
+      : [],
     authMode,
     ...(typeof record.token === "string" ? { token: record.token } : {}),
     ...(typeof record.username === "string" ? { username: record.username } : {}),
@@ -272,6 +301,9 @@ const LOCAL_MACHINE: SafeMachine = {
   id: LOCAL_MACHINE_ID,
   name: "This machine",
   baseUrl: "",
+  fallbackUrls: [],
+  activeUrl: "",
+  endpoints: [],
   authMode: "none",
   hasCredential: false,
   headerNames: [],
@@ -289,10 +321,14 @@ export function getLocalSafeMachine(): SafeMachine {
 }
 
 export function toSafeMachine(machine: StoredMachine): SafeMachine {
+  const { activeUrl, endpoints } = describeEndpoints(machine.id, machine.baseUrl, machine.fallbackUrls);
   return {
     id: machine.id,
     name: machine.name,
     baseUrl: machine.baseUrl,
+    fallbackUrls: machine.fallbackUrls,
+    activeUrl,
+    endpoints,
     authMode: machine.authMode,
     hasCredential:
       machine.authMode !== "none" && typeof machine.token === "string" && machine.token.length > 0,
@@ -336,6 +372,7 @@ export function createMachine(input: MachineInput): StoredMachine {
   validateName(input.name);
   if (typeof input.baseUrl !== "string") throw new MachineValidationError("baseUrl", "baseUrl must be a string");
   const baseUrl = normalizeBaseUrl(input.baseUrl);
+  const fallbackUrls = input.fallbackUrls === undefined ? [] : normalizeFallbackUrls(input.fallbackUrls);
   if (typeof input.authMode !== "string" || !isMachineAuthMode(input.authMode)) {
     throw new MachineValidationError("authMode", "authMode must be \"bearer\", \"basic\" or \"none\"");
   }
@@ -356,6 +393,7 @@ export function createMachine(input: MachineInput): StoredMachine {
     id,
     name: input.name,
     baseUrl,
+    fallbackUrls,
     authMode: input.authMode,
     ...(input.authMode !== "none" && typeof input.token === "string"
       ? { token: input.token }
@@ -394,6 +432,9 @@ export function updateMachine(id: string, patch: MachinePatch): StoredMachine | 
         "re-enter the credential when changing the base URL",
       );
     }
+  }
+  if (patch.fallbackUrls !== undefined) {
+    next.fallbackUrls = normalizeFallbackUrls(patch.fallbackUrls);
   }
   if (patch.authMode !== undefined) {
     if (typeof patch.authMode !== "string" || !isMachineAuthMode(patch.authMode)) {
@@ -439,5 +480,6 @@ export function deleteMachine(id: string): boolean {
   const machines = readMachinesFile();
   if (!machines.some((candidate) => candidate.id === id)) return false;
   writeMachinesFile(machines.filter((candidate) => candidate.id !== id));
+  clearEndpointState(id);
   return true;
 }
