@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
 import { isIP } from "net";
 import { dirname, join } from "path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
-import { writePrivateFileAtomicSync } from "./atomic-file";
+import { withFileLockSync, writePrivateFileAtomicSync } from "./atomic-file";
 
 export const WEB_SESSION_COOKIE = "omp-web-session";
 
@@ -33,12 +33,15 @@ type SessionsFile = { sessions: Record<string, StoredWebSession> };
 type SessionsCache = { value: SessionsFile; mtimeMs: number };
 
 declare global {
-  // eslint-disable-next-line no-var
   var __ompWebSessions: SessionsCache | undefined;
 }
 
 function getSessionsPath(): string {
   return process.env.OMP_WEB_SESSIONS_FILE ?? join(getAgentDir(), "omp-web-sessions.json");
+}
+
+function getSessionsLockPath(): string {
+  return `${getSessionsPath()}.lock`;
 }
 
 function sessionKey(raw: string): string {
@@ -129,9 +132,11 @@ export function createWebSession(
   const raw = randomBytes(32).toString("base64url");
   const now = Date.now();
   const expires = now + ttlDays * MS_PER_DAY;
-  const store = readSessions();
-  store.sessions[sessionKey(raw)] = { username, created: now, expires, lastUsed: now };
-  writeSessions(store);
+  withFileLockSync(getSessionsLockPath(), () => {
+    const store = readSessions();
+    store.sessions[sessionKey(raw)] = { username, created: now, expires, lastUsed: now };
+    writeSessions(store);
+  });
   return { raw, cookieAttrs: cookieAttrs(host, ttlDays), expires };
 }
 
@@ -146,54 +151,62 @@ export function lookupWebSession(
   ttlDays: number = DEFAULT_SESSION_TTL_DAYS,
 ): { username: string } | null {
   const key = sessionKey(raw);
-  const store = readSessions();
-  const record = store.sessions[key];
-  if (!record) return null;
-  const now = Date.now();
-  if (record.expires <= now) {
-    delete store.sessions[key];
-    writeSessions(store);
-    return null;
-  }
-  if (now - record.lastUsed > REFRESH_INTERVAL_MS) {
-    record.lastUsed = now;
-    record.expires = now + ttlDays * MS_PER_DAY;
-    writeSessions(store);
-  }
-  return { username: record.username };
+  return withFileLockSync(getSessionsLockPath(), () => {
+    const store = readSessions();
+    const record = store.sessions[key];
+    if (!record) return null;
+    const now = Date.now();
+    if (record.expires <= now) {
+      delete store.sessions[key];
+      writeSessions(store);
+      return null;
+    }
+    if (now - record.lastUsed > REFRESH_INTERVAL_MS) {
+      record.lastUsed = now;
+      record.expires = now + ttlDays * MS_PER_DAY;
+      writeSessions(store);
+    }
+    return { username: record.username };
+  });
 }
 
 export function revokeWebSession(raw: string): void {
   const key = sessionKey(raw);
-  const store = readSessions();
-  if (!(key in store.sessions)) return;
-  delete store.sessions[key];
-  writeSessions(store);
+  withFileLockSync(getSessionsLockPath(), () => {
+    const store = readSessions();
+    if (!(key in store.sessions)) return;
+    delete store.sessions[key];
+    writeSessions(store);
+  });
 }
 
 /** Revokes every session belonging to `username` (account deletion). */
 export function revokeSessionsForUser(username: string): number {
-  const store = readSessions();
-  let revoked = 0;
-  for (const key of Object.keys(store.sessions)) {
-    if (store.sessions[key].username === username) {
-      delete store.sessions[key];
-      revoked++;
+  return withFileLockSync(getSessionsLockPath(), () => {
+    const store = readSessions();
+    let revoked = 0;
+    for (const key of Object.keys(store.sessions)) {
+      if (store.sessions[key].username === username) {
+        delete store.sessions[key];
+        revoked++;
+      }
     }
-  }
-  if (revoked > 0) writeSessions(store);
-  return revoked;
+    if (revoked > 0) writeSessions(store);
+    return revoked;
+  });
 }
 
 export function purgeExpiredWebSessions(): void {
-  const store = readSessions();
-  const now = Date.now();
-  let changed = false;
-  for (const key of Object.keys(store.sessions)) {
-    if (store.sessions[key].expires <= now) {
-      delete store.sessions[key];
-      changed = true;
+  withFileLockSync(getSessionsLockPath(), () => {
+    const store = readSessions();
+    const now = Date.now();
+    let changed = false;
+    for (const key of Object.keys(store.sessions)) {
+      if (store.sessions[key].expires <= now) {
+        delete store.sessions[key];
+        changed = true;
+      }
     }
-  }
-  if (changed) writeSessions(store);
+    if (changed) writeSessions(store);
+  });
 }
