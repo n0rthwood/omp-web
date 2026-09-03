@@ -142,6 +142,7 @@ export async function POST(req: Request) {
     id: stored?.id ?? "draft",
     name: stored?.name ?? "draft",
     baseUrl: origin,
+    fallbackUrls: stored?.fallbackUrls ?? [],
     authMode: parsedAuthMode,
     ...(effectiveToken ? { token: effectiveToken } : {}),
     ...(effectiveUsername ? { username: effectiveUsername } : {}),

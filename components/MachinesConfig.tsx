@@ -17,6 +17,7 @@ type HealthState = {
 type MachineForm = {
   name: string;
   baseUrl: string;
+  fallbackUrlsText: string;
   authMode: MachineAuthMode;
   credential: string;
   username: string;
@@ -28,6 +29,7 @@ type ApiError = Error & { status?: number };
 const EMPTY_FORM: MachineForm = {
   name: "",
   baseUrl: "",
+  fallbackUrlsText: "",
   authMode: "bearer",
   credential: "",
   username: "omp",
@@ -64,6 +66,16 @@ function parseHeaders(text: string): Record<string, string> | undefined | null {
     headers[name] = value;
   }
   return headers;
+}
+
+/** One URL per non-blank line — a machine's additional endpoints, in priority order. */
+function parseFallbackUrls(text: string): string[] {
+  return text.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function endpointDotColor(healthy: boolean | null): string {
+  if (healthy === null) return "var(--text-dim)";
+  return healthy ? "var(--success)" : "var(--danger)";
 }
 
 function statusLabel(status: HealthState | undefined): string {
@@ -164,6 +176,7 @@ export function MachinesConfig() {
     setForm({
       name: currentMachine.name,
       baseUrl: currentMachine.baseUrl,
+      fallbackUrlsText: currentMachine.fallbackUrls.join("\n"),
       authMode: currentMachine.authMode,
       credential: "",
       username: "",
@@ -171,7 +184,7 @@ export function MachinesConfig() {
     });
   }, [currentMachine]);
 
-  useEffect(() => { setTestResult(null); }, [form.name, form.baseUrl, form.authMode, form.credential, form.username, form.headersText]);
+  useEffect(() => { setTestResult(null); }, [form.name, form.baseUrl, form.fallbackUrlsText, form.authMode, form.credential, form.username, form.headersText]);
 
   const updateForm = <Key extends keyof MachineForm>(key: Key, value: MachineForm[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -187,6 +200,7 @@ export function MachinesConfig() {
   const formPayload = (): Record<string, unknown> | null => {
     const name = form.name.trim();
     const baseUrl = form.baseUrl.trim();
+    const fallbackUrls = parseFallbackUrls(form.fallbackUrlsText);
     const headers = parseHeaders(form.headersText);
     if (!name || !baseUrl) {
       setError("Name and base URL are required.");
@@ -203,6 +217,7 @@ export function MachinesConfig() {
     return {
       name,
       baseUrl,
+      fallbackUrls,
       authMode: form.authMode,
       ...(form.credential ? { token: form.credential } : {}),
       ...(form.authMode === "basic" && form.username.trim() ? { username: form.username.trim() } : {}),
@@ -301,6 +316,7 @@ export function MachinesConfig() {
               <div className={styles.serverRows}>
                 {machines.map((machine) => {
                   const machineHealth = health[machine.id];
+                  const onFallback = !machine.isLocal && machine.activeUrl !== machine.baseUrl;
                   return (
                     <div key={machine.id} className={styles.serverRow} data-active={!creating && selected === machine.id}>
                       <button type="button" className={styles.serverSelect} onClick={() => { setCreating(false); setSelected(machine.id); }} title={machine.baseUrl}>
@@ -311,6 +327,7 @@ export function MachinesConfig() {
                         </span>
                         <span className={styles.sourceBadge}>{machine.authMode}</span>
                         <span className={styles.sourceBadge} style={{ color: statusColor(machineHealth) }}>{statusLabel(machineHealth)}</span>
+                        {onFallback && <span className={styles.sourceBadge} style={{ color: "var(--warning)" }} title={`Serving over fallback: ${machine.activeUrl}`}>on fallback</span>}
                         {machine.isLocal ? <span className={styles.sourceBadge}>local</span> : machineHealth?.health && localHealth && (machineHealth.health.ompVersion !== localHealth.ompVersion || machineHealth.health.ompWebVersion !== localHealth.ompWebVersion) && <span className={styles.sourceBadge} style={{ color: "var(--warning)" }}>version drift</span>}
                       </button>
                     </div>
@@ -327,6 +344,8 @@ export function MachinesConfig() {
                 </div>
                 <div className={styles.settingLabel}>Base URL</div>
                 <input className={styles.textInput} placeholder="https://omp.example.test" value={form.baseUrl} spellCheck={false} onChange={(event) => updateForm("baseUrl", event.target.value)} />
+                <div className={styles.settingLabel} style={{ marginTop: 10 }}>Fallback URLs (one per line, tried in order if the base URL is unreachable)</div>
+                <textarea className={styles.jsonEditor} style={{ minHeight: 56 }} value={form.fallbackUrlsText} placeholder="https://omp-fallback.example.test" spellCheck={false} onChange={(event) => updateForm("fallbackUrlsText", event.target.value)} />
                 <div className={styles.settingLabel} style={{ marginTop: 10 }}>Authentication</div>
                 <select className={styles.select} value={form.authMode} onChange={(event) => updateForm("authMode", event.target.value as MachineAuthMode)}>
                   <option value="bearer">Bearer token</option><option value="basic">Basic authentication</option><option value="none">No authentication</option>
@@ -361,6 +380,22 @@ export function MachinesConfig() {
                 {health[currentMachine.id]?.health && <div style={{ marginTop: 7, display: "flex", flexDirection: "column", gap: 3, font: "10px var(--font-mono)" }}>
                   {versionLabel("omp-web", health[currentMachine.id].health?.ompWebVersion ?? null, localHealth?.ompWebVersion ?? null)}
                   {versionLabel("omp", health[currentMachine.id].health?.ompVersion ?? null, localHealth?.ompVersion ?? null)}
+                </div>}
+                {!currentMachine.isLocal && currentMachine.endpoints.length > 1 && <div style={{ marginTop: 10 }}>
+                  <div className={styles.settingLabel}>Endpoints</div>
+                  {currentMachine.activeUrl !== currentMachine.baseUrl && <div role="status" className={styles.saveState} style={{ color: "var(--warning)", marginTop: 4 }}>
+                    On fallback — serving from {currentMachine.activeUrl}
+                  </div>}
+                  <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 3, font: "10px var(--font-mono)" }}>
+                    {currentMachine.endpoints.map((endpoint, index) => (
+                      <div key={endpoint.url} style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <span className={styles.statusDot} style={{ background: endpointDotColor(endpoint.healthy) }} />
+                        <span style={{ color: endpoint.url === currentMachine.activeUrl ? "var(--text)" : "var(--text-dim)" }}>
+                          {endpoint.url} {index === 0 ? "(primary)" : "(fallback)"}{endpoint.url === currentMachine.activeUrl ? " · active" : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>}
               </div>}
             </section>
