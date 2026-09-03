@@ -1,3 +1,36 @@
+omp-web (0.5.2) jammy; urgency=medium
+
+  * The web-session store now serializes its full read-modify-write cycle
+    across processes with an O_CREAT|O_EXCL lockfile, so two gateway
+    instances (prod :5010 and dev :5020, sharing ~/.omp/agent) can no
+    longer erase each other's sessions during login, logout, sliding-TTL
+    refresh or user deletion. Writes were already atomic per file; the
+    lock closes the window where a stale read snapshot from one process
+    overwrote a concurrent writer's new session. Bounded acquisition with
+    stale-lock takeover; no public API change (closes #23).
+  * Fleet machines can now carry fallback URLs in addition to their
+    primary baseUrl, in priority order. When the gateway cannot reach a
+    machine over its current endpoint at connect time (DNS failure,
+    ECONNREFUSED, connect timeout, TLS failure), it transparently retries
+    the next endpoint; any HTTP status from the remote (401/404/500)
+    means the endpoint worked and never triggers a switch. While serving
+    over a fallback, the gateway lazily re-probes the primary no more
+    than once per five minutes, switches back on the first success, and
+    guarantees at most one in-flight probe per machine. The machine's
+    active endpoint and per-endpoint health are visible through
+    GET /api/machines, so the admin UI can show "on fallback". Streaming
+    responses keep working over a fallback; a body already streaming is
+    never replayed (closes #37).
+  * The live end-to-end verification harness for #30 and #31 —
+    credential-kill mid-conversation failover, sticky model identity
+    across a real compaction and an idle teardown+resume, and failover
+    to the conversation's own rotated chain rather than the globally
+    configured first backup — is now committed and repeatable
+    (refs #30, refs #31).
+  * No dependency or packaging change; `bun.lock` and the `patches/`
+    set are untouched from 0.5.1.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 03 Sep 2026 13:45:52 +0000
 omp-web (0.5.1) jammy; urgency=medium
 
   * Session titles are now generated in Simplified Chinese, targeting about
