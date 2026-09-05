@@ -11,6 +11,11 @@ Typecheck: `bun run typecheck`
 Lint: `bun run lint`
 Tests: `bun test`
 **Never run `bun run build` during dev** — pollutes `.next/` and breaks `bun run dev`.
+This same command is CI's release build (`debian/rules` -> `override_dh_auto_build`)
+and intermittently stalls dead there (zero CPU, zero output) independent of
+source changes; `debian/retry-build.sh` wraps it with an output-inactivity
+retry (omp-web#41) — that wrapper only runs in the packaging build, not `bun
+run dev`.
 
 ### Everything runs on Bun
 
@@ -311,9 +316,8 @@ AgentSession in-process.
 ## Deployment Topology — where this repo runs
 
 This repo is deployed as a **fleet**: one gateway plus six remote omp-web
-instances, all `systemd --user` units, all serving port 5010. Debian
-packaging/release pipeline: `docs/plans/2026-08-20-omp-web-release-pipeline.md`;
-gateway/proxy design: `docs/fleet.md`.
+instances, all `systemd --user` units, all serving port 5010. Full operator
+runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
 
 | Host | IP | Unit | Notes |
 |---|---|---|---|
@@ -346,8 +350,16 @@ terminal host gate on a non-loopback bind.
   most fleet hosts — absolute paths always; the units carry explicit
   `Environment=PATH=`.
 - **Redeploy a remote**:
-  `cd ~/omp/ompweb && git fetch origin && git checkout main && git pull && ~/.bun/bin/bun install && PATH=$HOME/.bun/bin:$PATH bun run build && systemctl --user restart omp-web`
-  (`bun run build` needs that PATH export: the script calls bare `bun`.)
+  `ssh <host> 'sudo apt-get update && sudo apt-get install -y --only-upgrade omp-web'`
+  — one host at a time (the package's `postinst` restarts `omp-web.service`,
+  which kills every live `AgentSession` on that host); never target
+  `omp-web=0.3.9` explicitly — that version's `ensure_env()` omits
+  `patches/` from the freshly materialized env dir, so
+  `bun install --frozen-lockfile` dies with "Couldn't find patch file" and
+  leaves `dpkg` half-configured. Fixed in `0.3.10` (per
+  `debian/changelog`); `0.5.0` is a version-number-only relabel of
+  `0.3.10` with no further code changes. Full detail and the gateway
+  self-upgrade path: `docs/fleet-deployment.md`.
 - **Never restart a remote's omp-web while an agent session is running on it**
   through the gateway — same in-process-session rule as above. One host at a
   time when rolling out.

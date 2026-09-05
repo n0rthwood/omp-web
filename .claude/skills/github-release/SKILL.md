@@ -43,8 +43,8 @@ Rules:
 ## npm publishing (optional, only when requested)
 
 `omp-web` publishes to npm on a separate tag scheme from the Debian package
-release described above: pushing a version tag matching `v*` (not the
-Debian package's `omp-web-v*` tags) triggers
+release documented in `docs/release.md`: pushing a version tag matching
+`v*` (not the Debian package's `omp-web-v*` tags) triggers
 `.github/workflows/publish-npm.yml`, which checks that the tag version
 matches `package.json`, installs dependencies with Bun, runs the production
 build, and publishes `omp-web` to npm with provenance via npm trusted

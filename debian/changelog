@@ -1,29 +1,139 @@
+omp-web (0.5.2) jammy; urgency=medium
+
+  * The web-session store now serializes its full read-modify-write cycle
+    across processes with an O_CREAT|O_EXCL lockfile, so two gateway
+    instances (prod :5010 and dev :5020, sharing ~/.omp/agent) can no
+    longer erase each other's sessions during login, logout, sliding-TTL
+    refresh or user deletion. Writes were already atomic per file; the
+    lock closes the window where a stale read snapshot from one process
+    overwrote a concurrent writer's new session. Bounded acquisition with
+    stale-lock takeover; no public API change (closes #23).
+  * Fleet machines can now carry fallback URLs in addition to their
+    primary baseUrl, in priority order. When the gateway cannot reach a
+    machine over its current endpoint at connect time (DNS failure,
+    ECONNREFUSED, connect timeout, TLS failure), it transparently retries
+    the next endpoint; any HTTP status from the remote (401/404/500)
+    means the endpoint worked and never triggers a switch. While serving
+    over a fallback, the gateway lazily re-probes the primary no more
+    than once per five minutes, switches back on the first success, and
+    guarantees at most one in-flight probe per machine. The machine's
+    active endpoint and per-endpoint health are visible through
+    GET /api/machines, so the admin UI can show "on fallback". Streaming
+    responses keep working over a fallback; a body already streaming is
+    never replayed (closes #37).
+  * The live end-to-end verification harness for #30 and #31 —
+    credential-kill mid-conversation failover, sticky model identity
+    across a real compaction and an idle teardown+resume, and failover
+    to the conversation's own rotated chain rather than the globally
+    configured first backup — is now committed and repeatable
+    (refs #30, refs #31).
+  * No dependency or packaging change; `bun.lock` and the `patches/`
+    set are untouched from 0.5.1.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 03 Sep 2026 13:45:52 +0000
+omp-web (0.5.1) jammy; urgency=medium
+
+  * Session titles are now generated in Simplified Chinese, targeting about
+    100 Hanzi, and the GitHub issue annotation moved from a trailing suffix
+    to a leading prefix so the issue number survives truncation in the
+    sidebar and the Home calendar. `appendIssueAnnotationSuffix` became
+    `prependIssueAnnotationPrefix`; the truncation ceiling went from 120 to
+    150 characters to leave room for the longest annotation prefix
+    (closes #47).
+  * Documentation now describes exactly one deployment method: the R2 apt
+    repository. Every `git pull` + `bun install` + `bun run build` +
+    `systemctl --user restart` recipe in `docs/fleet-deployment.md`,
+    `AGENTS.md` and the `omp-web-restart-service` payload was replaced with
+    `apt-get update && apt-get install --only-upgrade omp-web`, together
+    with the one-host-at-a-time rule, the fact that an upgrade restarts the
+    unit and therefore aborts every in-browser AgentSession on that host,
+    and the standing hazard that 0.3.9 must be skipped because its
+    `ensure_env()` omitted `patches/`. `docs/release.md` was cut down and
+    its still-valid npm-publish steps moved into the `github-release`
+    skill. Topology, per-host layout, the systemd unit, env
+    single-sourcing, auth, security posture, version reporting and the
+    restart-service protocol were all preserved rather than deleted
+    (closes #48).
+  * No packaging, dependency or runtime change; `bun.lock` and the
+    `patches/` set are untouched from 0.5.0.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 03 Sep 2026 00:50:53 +0000
+
+omp-web (0.5.0) jammy; urgency=medium
+
+  * Deliberate milestone version bump (0.3.10 -> 0.5.0), requested by the
+    repo owner, to mark the .deb packaging redesign (issues/PRs #43, #44,
+    #45) as a significant release rather than a continuation of the
+    0.3.x bugfix line. This version carries no additional code changes
+    beyond what already shipped in 0.3.9/0.3.10 below; the jump exists
+    solely to give the packaging redesign its own release marker in the
+    version history.
+  * Summary of the redesign (see 0.3.9/0.3.10 entries below for full
+    detail): stopped shipping `node_modules` and `.next/cache` inside the
+    .deb, and instead have `postinst`'s `ensure_env()` materialize
+    dependencies on the target host into a `bun.lock`-hash-keyed shared
+    directory, symlinked into the app checkout, reusing bun's global
+    content-addressable package cache. Net effect, LXC-verified end to
+    end: installed-size dropped from ~2.79GB to ~290MB, and a reinstall
+    with an unchanged `bun.lock` dropped from ~2m8s to ~5s (~25x faster).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 13:30:00 +0000
+
+omp-web (0.3.10) jammy; urgency=medium
+
+  * debian/postinst: fix `ensure_env()` to also copy the package's
+    `patches/` directory (if it ships one) into `env_dir` alongside
+    `package.json`/`bun.lock`, before running `bun install
+    --frozen-lockfile --production` there. `bun.lock`'s
+    `patchedDependencies` entries reference patch files by a path relative
+    to the install cwd (e.g.
+    `patches/@oh-my-pi%2Fpi-coding-agent@17.3.0.patch`); since `ensure_env`
+    (new in 0.3.9) never copied `patches/` into the freshly materialized
+    env dir, `bun install --frozen-lockfile` failed with "Couldn't find
+    patch file" on every host's very first run of `ensure_env` — i.e.
+    every currently-deployed host's first upgrade to 0.3.9, leaving dpkg
+    half-configured. Found via a throwaway-LXC fresh-install verification
+    pass before any production host upgraded.
+  * tests/run-postinst-fixture-tests.sh: the fake `bun install` now
+    validates that any patch file referenced by `bun.lock` exists relative
+    to the install cwd (as real `bun install` does), and a new fixture
+    case seeds a `patches/` directory with a marker file referenced from a
+    `patchedDependencies`-shaped `bun.lock` entry, asserting the marker
+    file lands inside the materialized `env_dir` and `bun install`
+    succeeds.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 13:08:59 +0000
+
 omp-web (0.3.9) jammy; urgency=medium
 
-  * session-title: rewrite the browser-facing title-summarization prompts to
-    always answer in Simplified Chinese, place any recognized GitHub issue
-    number annotation at the front of the title instead of appending it as
-    a suffix, and target roughly 100 Hanzi or fewer (raised the hard
-    truncation ceiling from 120 to 150 chars as headroom for the longest
-    annotation prefixes, not a new target length) (`lib/session-title.ts`,
-    `lib/title-annotations.ts`, `components/HomeCalendar.tsx`).
-  * postinst: overwrite the SDK's own bundled default title-generation
-    prompts (`title-system.md`, `title-marker-instruction.md` under
-    `@oh-my-pi/pi-coding-agent`) with the same Chinese/prefix/~100-char
-    house style, on both the fresh-install and upgrade/reinstall overlay
-    paths. This is purely defensive: every omp-web code path that generates
-    a title already passes its own `customSystemPrompt`, so these SDK
-    defaults are not read today and this step changes no currently
-    observable behavior — it only guards a future code path that might
-    omit `customSystemPrompt`.
-  * docs: remove the stale `docs/release.md` and `docs/fleet-deployment.md`
-    (superseded by `docs/plans/2026-08-20-omp-web-release-pipeline.md` and
-    `AGENTS.md`'s deployment topology); the still-active npm-publish steps
-    from `docs/release.md` were inlined into
-    `.claude/skills/github-release/SKILL.md` so that skill remains
-    self-contained.
+  * debian/rules, debian/postinst: stop shipping `node_modules` (2.2GB) and
+    `.next/cache` (590MB, pure build cache `next start` never reads) inside
+    the .deb — excluded from `override_dh_auto_install`'s rsync. Instead
+    `postinst`'s new `ensure_env()` (called from `sync_app()`, right after
+    the tar-overlay and before the possible service restart) materializes
+    `node_modules` on the target host into a `bun.lock`-hash-keyed shared
+    directory (`~/omp/envs/<sha256-prefix>`, `bun install
+    --frozen-lockfile --production` run as the target user) and symlinks
+    `~/omp/ompweb/node_modules` into it. An upgrade whose `bun.lock` is
+    unchanged from the currently installed release reuses the existing env
+    dir and skips the install entirely; a release with a different
+    `bun.lock` gets its own env dir without disturbing the previous one. A
+    pre-existing real (non-symlink) `node_modules` — the case for every
+    currently-deployed host, which had it tar-overlaid directly before
+    this change — is removed first, since `ln -sfn` targeting an existing
+    real directory nests the new symlink inside it rather than replacing
+    it. Also reclaims any stale `.next/cache` left on disk by a
+    pre-existing host's earlier full-tree overlay, since the tar-overlay
+    never deletes (closes #43).
+  * tests/run-postinst-fixture-tests.sh: extend the fixture harness with a
+    fake `bun` that logs invocations and materializes a `node_modules`
+    marker on `install`, plus five new cases covering `ensure_env`'s
+    first-materialization, unchanged-lockfile reuse, changed-lockfile
+    reinstall/retarget, the stale-`.next/cache` cleanup, and a legacy real
+    (non-symlink) `node_modules` being replaced by the correct symlink on
+    upgrade.
 
- -- JoySort Release Bot <release@joysort.cc>  Tue, 01 Sep 2026 12:00:00 +0000
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 02 Sep 2026 12:17:27 +0000
 
 omp-web (0.3.8) jammy; urgency=medium
 

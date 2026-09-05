@@ -17,11 +17,15 @@ jobs:
   build:
     name: Build omp-web .deb
     runs-on: [self-hosted, Linux, X64, omp-web]
-    # A hung `next build --webpack` (transient provider/fleet network stall
-    # during "collecting page data") must fail fast instead of blocking the
-    # runner for hours. 40 minutes is comfortably above the observed ~25 min
-    # successful build.
-    timeout-minutes: 40
+    # `debian/rules` wraps the flaky `bun run build` (next build --webpack)
+    # in debian/retry-build.sh (omp-web#41): an output-inactivity-based
+    # retry, up to 3 attempts, each capped at 35 min. Worst case for the
+    # build step alone: 3 x 35min = 105 min. Add ~15 min of headroom for the
+    # surrounding non-retried steps (checkout, bun installs, secrets
+    # assembly/seed fetch, dpkg-buildpackage packaging, artifact upload) =>
+    # 120 min. A normal, non-stalled build still finishes in ~14-29 min, as
+    # before — this budget only matters when a stall is actually hit.
+    timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

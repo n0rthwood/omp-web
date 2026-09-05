@@ -47,4 +47,19 @@ describe("parseTitleAnnotations", () => {
     expect(result.annotations).toBeNull();
     expect(result.text).toBe("(备注) 标题");
   });
+
+  test("a full main+related annotation reformatted as a trailing suffix is not parsed (regression guard for #47)", () => {
+    const result = parseTitleAnnotations("修复登录跳转问题 (#12 · rel #10, #7)");
+    expect(result.annotations).toBeNull();
+    expect(result.text).toBe("修复登录跳转问题 (#12 · rel #10, #7)");
+  });
+
+  test("a maximal 150-character prefixed title round-trips without truncating the prefix in half", () => {
+    const base = "x".repeat(144);
+    const name = `(#14) ${base}`;
+    expect(name.length).toBe(150);
+    const result = parseTitleAnnotations(name);
+    expect(result.annotations).toEqual({ main: [14], related: [] });
+    expect(result.text).toBe(base);
+  });
 });

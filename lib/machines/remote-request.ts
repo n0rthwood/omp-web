@@ -1,4 +1,5 @@
 import { isProxyablePath } from "./proxy-allowlist";
+import { planAttempt } from "./endpoint-state";
 import type { StoredMachine } from "./machine-store";
 
 /**
@@ -89,6 +90,16 @@ function buildUpstreamResponse(upstream: Response): Response {
 /**
  * Proxy `request` to `machine`. `remotePathname` is the path on the remote
  * (e.g. `/api/sessions`), already 404/403-checked by the caller.
+ *
+ * Endpoints (`machine.baseUrl`, then `machine.fallbackUrls` in order) are
+ * tried per `planAttempt`'s plan. A transport failure — DNS, connection
+ * refused, connect timeout, TLS — before response headers arrive moves to
+ * the next endpoint; any HTTP response, whatever its status, is final and
+ * never triggers a switch. A request with a body is `.clone()`d before each
+ * attempt so a virgin stream is always offered; once an attempt's clone
+ * reports `bodyUsed`, upstream has started reading it, so that attempt's
+ * failure is terminal — replaying a request whose body has already begun
+ * streaming could apply it twice on the far end.
  */
 export async function proxyToMachine(
   machine: StoredMachine,
@@ -96,44 +107,67 @@ export async function proxyToMachine(
   remotePathname: string,
   search: string,
 ): Promise<Response> {
-  const url = `${machine.baseUrl}${remotePathname}${search}`;
+  const plan = planAttempt(machine.id, machine.baseUrl, machine.fallbackUrls);
+  const hasBody = request.body !== null && request.method !== "GET" && request.method !== "HEAD";
 
-  // Race connect+headers against a timeout, but clear it as soon as the remote
-  // answers — once the body is streaming there is no total deadline. The
-  // caller's own signal stays composed in, so a client disconnect still
-  // cancels the upstream stream.
-  const connectTimeout = new AbortController();
-  const timer = setTimeout(() => connectTimeout.abort(), UPSTREAM_HEADER_TIMEOUT_MS);
-
-  let upstream: Response;
   try {
-    // `duplex: "half"` is required to stream a request body; the TS lib's
-    // RequestInit does not carry it (Bun/undici do at runtime).
-    upstream = await fetch(url, {
-      method: request.method,
-      headers: buildOutboundHeaders(machine, request),
-      body: request.body ?? undefined,
-      duplex: "half",
-      redirect: "manual",
-      signal: AbortSignal.any([request.signal, connectTimeout.signal]),
-    } as RequestInit);
-  } catch {
-    if (request.signal.aborted) {
-      return errorResponse(499, { error: "Client disconnected" });
-    }
-    // Timeout, DNS failure, refused connection, TLS or network error. The
-    // platform's message is deliberately not relayed: repeated over a
-    // caller-chosen baseUrl it distinguishes closed from filtered from open
-    // ports. Diagnose a machine with the pre-save probe instead.
-    return errorResponse(502, {
-      error: `Machine unreachable: ${machine.id}`,
-      code: "machine_unreachable",
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+    for (let i = 0; i < plan.order.length; i++) {
+      const endpoint = plan.order[i];
+      const attemptRequest = hasBody ? request.clone() : request;
 
-  return buildUpstreamResponse(upstream);
+      // Race connect+headers against a timeout, but clear it as soon as the
+      // remote answers — once the body is streaming there is no total
+      // deadline. The caller's own signal stays composed in, so a client
+      // disconnect still cancels the upstream stream.
+      const connectTimeout = new AbortController();
+      const timer = setTimeout(() => connectTimeout.abort(), UPSTREAM_HEADER_TIMEOUT_MS);
+
+      let upstream: Response;
+      try {
+        // `duplex: "half"` is required to stream a request body; the TS lib's
+        // RequestInit does not carry it (Bun/undici do at runtime).
+        upstream = await fetch(`${endpoint}${remotePathname}${search}`, {
+          method: request.method,
+          headers: buildOutboundHeaders(machine, request),
+          body: hasBody ? attemptRequest.body : undefined,
+          duplex: "half",
+          redirect: "manual",
+          signal: AbortSignal.any([request.signal, connectTimeout.signal]),
+        } as RequestInit);
+      } catch {
+        if (request.signal.aborted) {
+          return errorResponse(499, { error: "Client disconnected" });
+        }
+        plan.recordFailure(endpoint);
+        // The body has already started streaming to this endpoint: it may
+        // have been partially applied on the far end, so trying the next
+        // endpoint could replay it. Only a connect-phase failure — nothing
+        // sent yet — is safe to retry, even for POST.
+        const bodyAlreadyStreamed = hasBody && attemptRequest.bodyUsed;
+        if (bodyAlreadyStreamed || i === plan.order.length - 1) {
+          // Timeout, DNS failure, refused connection, TLS or network error.
+          // The platform's message is deliberately not relayed: repeated
+          // over a caller-chosen baseUrl it distinguishes closed from
+          // filtered from open ports. Diagnose a machine with the pre-save
+          // probe instead.
+          return errorResponse(502, {
+            error: `Machine unreachable: ${machine.id}`,
+            code: "machine_unreachable",
+          });
+        }
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      plan.recordSuccess(endpoint);
+      return buildUpstreamResponse(upstream);
+    }
+    // plan.order is never empty (it always contains at least the primary).
+    return errorResponse(502, { error: `Machine unreachable: ${machine.id}`, code: "machine_unreachable" });
+  } finally {
+    plan.release();
+  }
 }
 
 export { isProxyablePath };

@@ -58,6 +58,7 @@ next-env.d.ts
 /debian/files
 /debian/*.substvars
 /debian/*.debhelper.log
+/debian/.build-home/
 
 # release/seeds outputs are generated at build time by release/seeds/fetch-seeds.sh
 # and tools/xor-secrets.py seal — never commit fetched config or sealed secrets
