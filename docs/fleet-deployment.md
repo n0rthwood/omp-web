@@ -108,6 +108,162 @@ dies with it. `SIGTERM` is the safe signal for `systemctl --user restart` /
    any remote, so this trap now only bites a developer building locally in
    `~/omp/ompweb-feat` or a worktree — never during a routine fleet upgrade.
 
+## Fleet-wide upgrade
+
+This is the end-to-end procedure for putting a new omp-web release on every
+host in the fleet — not one remote, all seven. The method is always **apt
+install from the R2 index**, never `git pull` or a `bun run build` inside
+`~/omp/ompweb` on any host: the package is built once in CI and shipped as a
+`.deb` (see [Apt upgrade](#day-2-operations)), and building by hand on a
+served checkout risks the `.next`-corruption trap under
+[Three traps](#three-traps-that-cost-real-time-today).
+
+### Order: six remotes, then the gateway, one host at a time
+
+1. `172.30.3.24` (joysort24)
+2. `172.30.3.39` (joysort39)
+3. `172.30.3.109` (joysort109)
+4. `172.30.3.202` (gpu-dev)
+5. `172.30.3.250` (joysort-ai-server)
+6. `172.30.3.110` (training2 / joysort110)
+7. `172.30.3.123` (gateway) — **last, always**
+
+Never skip ahead and never batch hosts. The package's `postinst` restarts
+`omp-web.service` — the same `KillMode=control-group` cgroup-wide `SIGTERM`
+as a manual restart — which kills every live `AgentSession` on that host:
+running agent turns, terminals, and unsaved session state all die with it
+(see [Day-2 operations](#day-2-operations)). Confirm each host lands on the
+target version before touching the next one, so a stuck host doesn't leave
+you guessing which of several simultaneous failures you're looking at. The
+gateway goes last because it also hosts the operator's own session — see
+[Gateway self-upgrade](#gateway-self-upgrade-omp-web-restart-service) for
+why it can't just run `apt-get install` directly either.
+
+### Pre-flight (before touching any host)
+
+Confirm the release actually reached the R2 apt repo by checking the
+**index**, not a direct `.deb` URL — `.../pool/.../omp-web_<ver>_amd64.deb`
+404s by design even once the version is live; only the `Packages` index
+resolves it. Run this from any fleet host (they share the same apt source:
+`https://repo.joysort.cc/apt`, suite `jammy`, component `main`, keyring
+`/etc/apt/keyrings/joysort-archive-keyring.gpg`):
+
+```
+TARGET=0.5.2   # the version you're rolling out
+
+sudo apt-get update -qq
+apt-cache policy omp-web | grep Candidate
+# Candidate: 0.5.2   <- must equal $TARGET before you touch any host
+```
+
+Then, on **each** host in turn, right before upgrading it, repeat
+`apt-get update -qq && apt-cache policy omp-web`. A host's local index is
+only as fresh as its last `apt-get update`, so one that hasn't checked in
+recently can still show a stale (older) Candidate even after the release is
+live on R2.
+
+### Roll the six remotes
+
+Run this against each remote, one at a time, in the order above:
+
+```
+TARGET=0.5.2
+
+ssh joysort@172.30.3.24 bash <<EOF
+set -euo pipefail
+sudo apt-get update -qq
+sudo apt-get install --only-upgrade -y omp-web 2>&1 | sudo tee /tmp/upgrade.log
+dpkg -s omp-web | grep ^Version
+EOF
+```
+
+Confirm the printed `Version:` line equals `$TARGET` before moving to the
+next host — `.24` → `.39` → `.109` → `.202` → `.250` → `.110`. If it doesn't
+match, read the tail of that host's `/tmp/upgrade.log` before retrying;
+don't just re-run blind. `172.30.3.110` (training2 / joysort110) uses a key,
+not a password — no interactive auth needed:
+
+```
+ssh -i ~/.ssh/id_rsa joysort@172.30.3.110 bash <<EOF
+... same body as above ...
+EOF
+```
+
+(equivalently `ssh joysort110 …` if that alias is set up in
+`~/.ssh/config`). Do **not** touch `172.30.3.123` in this loop — it is
+handled separately, below, and always last.
+
+### Gateway — via `omp-web-restart-service`, never a direct `apt-get install`
+
+The gateway hosts the operator's own session, so running
+`sudo apt-get install --only-upgrade omp-web` directly from a session it is
+itself serving self-destructs mid-upgrade (see
+[Gateway self-upgrade](#gateway-self-upgrade-omp-web-restart-service) for
+the full mechanism). Use the loopback restart service instead:
+
+```
+curl -s 127.0.0.1:8799/health
+# must print exactly: ok — if it doesn't respond "ok", stop here.
+# Do NOT fall back to a manual `systemctl --user restart omp-web`.
+
+sudo apt-get update -qq
+apt-cache policy omp-web | grep Candidate   # confirm == $TARGET, per pre-flight above
+
+TOKEN=$(grep -oP '(?<=^RESTART_SERVICE_TOKEN=).*' ~/omp/ops/env/restart-service.env)
+curl -s -X POST -H "X-Restart-Token: $TOKEN" http://127.0.0.1:8799/run
+unset TOKEN
+
+# poll until the upgrade+restart script has finished:
+curl -s http://127.0.0.1:8799/status
+```
+
+Wait for `running: false`, then confirm `exit_code: 0`. Then verify:
+
+```
+dpkg -s omp-web | grep ^Version                              # == $TARGET
+curl -s http://127.0.0.1:5010/api/health | jq .ompWebVersion  # == "$TARGET"
+```
+
+See [Gateway self-upgrade](#gateway-self-upgrade-omp-web-restart-service)
+for the full endpoint contract (`/health`, `/run`, `/status`) and why the
+service exists at all — this section only sequences it into the fleet-wide
+rollout.
+
+### Verify the whole fleet
+
+Once all seven hosts report done:
+
+```
+TARGET=0.5.2
+for HOST in 172.30.3.24 172.30.3.39 172.30.3.109 172.30.3.202 172.30.3.250 172.30.3.110 172.30.3.123; do
+  echo -n "$HOST: "
+  ssh joysort@$HOST "dpkg -s omp-web | grep ^Version"
+done
+```
+
+All seven must print `Version: $TARGET` (`.110` needs `-i ~/.ssh/id_rsa`,
+same as the roll-out step above; `.123` is the box you're already on).
+
+### Post-upgrade notes
+
+- `~/omp/ompweb`'s dirty `git status` after every host's install is the
+  `sync_app` tar-overlay, not uncommitted work — never `git add`/`git commit`
+  it (see [Day-2 operations](#day-2-operations)).
+- If a host's `/_next/*` assets start 404ing after the upgrade, its `.next`
+  build was corrupted; the only fix is restarting the unit onto a complete
+  build. Never `bun run build` inside `~/omp/ompweb` to try to patch it in
+  place — build in a worktree instead (see
+  [Three traps](#three-traps-that-cost-real-time-today)).
+- 0.5.x `.deb`s no longer bundle `node_modules` (excluded from the release
+  build to keep the package small); each host materializes it on install
+  into `~/omp/envs/<bun.lock-sha256>/node_modules`, and the checked-out
+  `node_modules` under `~/omp/ompweb` is a symlink into that store — don't
+  expect a real directory there.
+- Never pin a version with `apt-get install omp-web=<version>` — a plain
+  `--only-upgrade` always resolves the highest Candidate, and pinning
+  specifically risks landing on `0.3.9`, which has a broken `ensure_env()`
+  (see [Day-2 operations](#day-2-operations)).
+
 ## Provider keys are single-sourced
 
 `node_modules/@oh-my-pi/pi-utils/src/env.ts:199` eagerly parses
