@@ -1,3 +1,13 @@
+omp-web (0.5.3) jammy; urgency=medium
+
+  * Tool results can now include an inline image (for example, a
+    generate_image-style tool), and the chat transcript renders it directly
+    in the tool call block instead of silently dropping it. Handles both the
+    nested and the SDK's flat base64 image shapes via a single shared
+    resolver; renders regardless of the tool call's collapsed/expanded state
+    or error status (closes #58).
+
+ -- JoySort Release Bot <release@joysort.cc>  Sun, 06 Sep 2026 18:00:00 +0000
 omp-web (0.5.2) jammy; urgency=medium
 
   * The web-session store now serializes its full read-modify-write cycle
