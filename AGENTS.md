@@ -631,8 +631,8 @@ Newer omp emits `compaction_start` / `compaction_end`; older versions emitted `a
 - `/api/sessions/[id]/export` delegates to omp's export helper, then patches recursive tree helpers in the generated HTML to iterative versions so very deep linear sessions do not overflow the browser call stack.
 
 ### HTTP proxying
-Bun's `fetch` reads `HTTP_PROXY` / `HTTPS_PROXY` **once at process start** and
-never proxies loopback — which is what local providers need. It ignores
+Bun's `fetch` reads `HTTP_PROXY` / `HTTPS_PROXY` **once at process start**. On
+Bun 1.3.14 it also proxies loopback when those variables are set ([#61](https://github.com/n0rthwood/omp-web/issues/61)), so local providers do not receive those requests directly. It ignores
 `NO_PROXY`. `lib/http-dispatcher.ts` is therefore a no-op under Bun; its undici
 `EnvHttpProxyAgent` path only exists for a dev server run on Node, because Bun
 resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
