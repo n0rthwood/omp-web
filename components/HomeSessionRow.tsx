@@ -135,7 +135,9 @@ export function HomeSessionRow(props: {
             {entry.machineName}
           </Tag>
         )}
-        <Tag title={t("home.messageCount", { count: String(entry.session.messageCount) })} maxWidth="10ch">
+        {/* Widest realistic turn label ("~9999 turns") plus the tag's own
+            border-box padding; a fixed short string must never ellipsize. */}
+        <Tag title={t("home.messageCount", { count: String(entry.session.messageCount) })} maxWidth="14ch">
           {t("home.turnCount", { count: String(turns) })}
         </Tag>
       </span>
