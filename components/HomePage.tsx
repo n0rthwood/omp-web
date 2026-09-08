@@ -13,11 +13,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
 import { formatRelativeTime } from "@/lib/i18n/format";
+import { machineStorageKey } from "@/lib/api-path";
 import { useI18n } from "@/hooks/useI18n";
 import { useMachines } from "@/lib/machine-context";
 import { useSessionList } from "@/lib/session-list-context";
 import { HomeCalendar } from "./HomeCalendar";
+import { HomeSessionRow, type HomeSessionRowEntry } from "./HomeSessionRow";
 import { useNavigation } from "./NavigationProvider";
+
+const RECENT_LIMIT = 6;
+const AGGREGATE_GROUP_SESSION_LIMIT = 8;
+const EXPANDED_PROJECT_GROUPS_STORAGE_KEY = "omp-web:home-expanded-project-groups";
+
+
 
 interface MachineProjects {
   machineId: string;
@@ -28,13 +36,7 @@ interface MachineProjects {
   lastActivityByProject: Map<string, string>;
 }
 
-interface AggregateSessionEntry {
-  session: SessionInfo;
-  machineId: string;
-  machineName: string;
-  machineOffline: boolean;
-  projectRoot: string;
-}
+type AggregateSessionEntry = HomeSessionRowEntry;
 
 interface AggregateProjectGroup {
   /** Project basename — the visual grouping key. Session buckets stay keyed
@@ -55,29 +57,29 @@ function basename(path: string): string {
   return slash === -1 ? trimmed : trimmed.slice(slash + 1) || trimmed;
 }
 
-function Tag({ children, title }: { children: React.ReactNode; title?: string }) {
-  return (
-    <span
-      title={title}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        flexShrink: 0,
-        padding: "1px 6px",
-        borderRadius: 4,
-        fontSize: 10.5,
-        fontWeight: 500,
-        lineHeight: 1.6,
-        background: "var(--bg-hover)",
-        border: "1px solid var(--border)",
-        color: "var(--text-muted)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
-  );
+function loadExpandedProjectGroups(storageKey: string): Set<string> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((key): key is string => typeof key === "string"))
+      : null;
+  } catch {
+    return null;
+  }
 }
+
+function saveExpandedProjectGroups(storageKey: string, expandedGroups: Set<string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify([...expandedGroups]));
+  } catch {
+    // Ignore storage quota and privacy-mode errors.
+  }
+}
+
 
 export function HomePage() {
   const { locale, t, setLocale, supportedLocales } = useI18n();
@@ -93,6 +95,12 @@ export function HomePage() {
   const languageWrapperRef = useRef<HTMLDivElement | null>(null);
   const { navigate } = useNavigation();
   const [viewMode, setViewMode] = useState<"aggregate" | "single-machine">("aggregate");
+  const expandedGroupStorageKey = machineStorageKey(EXPANDED_PROJECT_GROUPS_STORAGE_KEY);
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string> | null>(null);
+  const [shownAllGroupKeys, setShownAllGroupKeys] = useState<Set<string>>(() => new Set<string>());
+  const aggregateGroupRefs = useRef(new Map<string, HTMLElement>());
+  const [expandedGroupsStorageKey, setExpandedGroupsStorageKey] = useState<string | null>(null);
+
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
     const generation = ++loadGenerationRef.current;
@@ -179,6 +187,25 @@ export function HomePage() {
     [selectedGroup, selectedProject],
   );
 
+  const recentEntries = useMemo<AggregateSessionEntry[]>(() => {
+    if (!groups) return [];
+    const entries: AggregateSessionEntry[] = [];
+    for (const group of groups) {
+      for (const [projectRoot, sessions] of group.projects) {
+        entries.push(...sessions.map((session) => ({
+          session,
+          machineId: group.machineId,
+          machineName: group.machineName,
+          machineOffline: group.offline,
+          projectRoot,
+        })));
+      }
+    }
+    return entries
+      .sort((a, b) => b.session.modified.localeCompare(a.session.modified))
+      .slice(0, RECENT_LIMIT);
+  }, [groups]);
+
   const aggregateGroups = useMemo<AggregateProjectGroup[]>(() => {
     if (!groups) return [];
     const byName = new Map<string, AggregateSessionEntry[]>();
@@ -206,6 +233,53 @@ export function HomePage() {
     result.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
     return result;
   }, [groups]);
+  useEffect(() => {
+    if (groups === null || aggregateGroups.length === 0 || expandedGroupsStorageKey === expandedGroupStorageKey) return;
+
+    const knownGroupKeys = new Set(aggregateGroups.map((group) => group.key));
+    const persistedGroups = loadExpandedProjectGroups(expandedGroupStorageKey);
+    const restoredGroups = persistedGroups
+      ? new Set([...persistedGroups].filter((key) => knownGroupKeys.has(key)))
+      : new Set(aggregateGroups.slice(0, 1).map((group) => group.key));
+
+    setExpandedGroupsStorageKey(expandedGroupStorageKey);
+    setExpandedGroupKeys(restoredGroups);
+    setShownAllGroupKeys(new Set<string>());
+  }, [aggregateGroups, expandedGroupStorageKey, expandedGroupsStorageKey, groups]);
+
+  useEffect(() => {
+    if (expandedGroupKeys === null || expandedGroupsStorageKey !== expandedGroupStorageKey) return;
+    saveExpandedProjectGroups(expandedGroupStorageKey, expandedGroupKeys);
+  }, [expandedGroupKeys, expandedGroupStorageKey, expandedGroupsStorageKey]);
+
+  const toggleAggregateGroup = useCallback((key: string) => {
+    setExpandedGroupKeys((current) => {
+      const next = new Set(current ?? aggregateGroups.slice(0, 1).map((group) => group.key));
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setShownAllGroupKeys((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, [aggregateGroups]);
+
+  const expandAndScrollToAggregateGroup = useCallback((key: string) => {
+    setExpandedGroupKeys((current) => {
+      const initial = current ?? new Set(aggregateGroups.slice(0, 1).map((group) => group.key));
+      if (initial.has(key)) return initial;
+      const next = new Set(initial);
+      next.add(key);
+      return next;
+    });
+    requestAnimationFrame(() => {
+      aggregateGroupRefs.current.get(key)?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }, [aggregateGroups]);
+
 
   // Close the language dropdown on outside click or Escape.
   useEffect(() => {
@@ -385,17 +459,58 @@ export function HomePage() {
         </div>
         <div style={chipRowStyle}>
           {groups?.map((group) => (
-            <button
+            <div
               key={group.machineId}
-              type="button"
-              onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); setViewMode("single-machine"); }}
-              style={{ ...chipStyle(viewMode === "single-machine" && group.machineId === selectedMachineId), ...(group.offline ? { opacity: 0.55 } : {}) }}
-              title={group.offline ? `${group.machineName} (${t("home.machineOffline")})` : group.machineName}
-              aria-pressed={viewMode === "single-machine" && group.machineId === selectedMachineId}
+              style={{
+                display: "flex",
+                flexShrink: 0,
+                height: 28,
+                borderRadius: 999,
+                overflow: "hidden",
+                background: viewMode === "single-machine" && group.machineId === selectedMachineId
+                  ? "color-mix(in srgb, var(--accent) 14%, transparent)"
+                  : "var(--bg-hover)",
+                color: viewMode === "single-machine" && group.machineId === selectedMachineId ? "var(--accent)" : "var(--text-muted)",
+                border: `1px solid ${viewMode === "single-machine" && group.machineId === selectedMachineId ? "color-mix(in srgb, var(--accent) 45%, var(--border))" : "var(--border)"}`,
+              }}
             >
-              {group.machineName}
-              {group.offline && <span style={{ color: "var(--danger)", marginLeft: 6 }}>·</span>}
-            </button>
+              <button
+                type="button"
+                onClick={() => { setSelectedMachineId(group.machineId); setSelectedProject(null); setViewMode("single-machine"); }}
+                title={group.offline ? `${group.machineName} (${t("home.machineOffline")})` : group.machineName}
+                aria-pressed={viewMode === "single-machine" && group.machineId === selectedMachineId}
+                style={{
+                  minWidth: 0, height: "100%", padding: "0 11px", border: "none",
+                  background: "transparent", color: "inherit", cursor: "pointer",
+                  fontSize: 12, fontWeight: viewMode === "single-machine" && group.machineId === selectedMachineId ? 600 : 500,
+                  whiteSpace: "nowrap", opacity: group.offline ? 0.55 : 1,
+                }}
+              >
+                {group.machineName}
+                {group.offline && <span style={{ color: "var(--danger)", marginLeft: 6 }}>·</span>}
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  navigate({ machineId: group.machineId, project: null, session: null }, { history: "push" });
+                }}
+                disabled={group.offline}
+                aria-disabled={group.offline}
+                aria-label={t("home.openMachine", { name: group.machineName })}
+                title={group.offline ? t("home.machineOffline") : t("home.openMachine", { name: group.machineName })}
+                style={{
+                  width: 28, minWidth: 28, height: 28, padding: 0,
+                  border: "none", borderLeft: "1px solid var(--border)",
+                  background: "transparent", color: "inherit",
+                  cursor: group.offline ? "not-allowed" : "pointer",
+                  opacity: group.offline ? 0.5 : 1,
+                  fontSize: 14, lineHeight: 1,
+                }}
+              >
+                ↗
+              </button>
+            </div>
           ))}
           {groups === null && <span style={{ color: "var(--text-dim)", fontSize: 12.5 }}>…</span>}
         </div>
@@ -436,62 +551,179 @@ export function HomePage() {
       <main style={{ flex: 1, overflowY: "auto", width: "100%", maxWidth: 1440, margin: "0 auto", padding: "16px 20px 60px" }}>
         {viewMode === "aggregate" ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-            {aggregateGroups.map((group) => (
-              <section key={group.key} aria-label={group.displayName}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
-                  <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{group.displayName}</h2>
-                  <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
-                    {t("home.sessionCount", { count: String(group.sessions.length) })}
-                    {group.machineCount > 1 && <> · {t("home.machineCountLabel", { count: String(group.machineCount) })}</>}
-                  </span>
-                </div>
+            <section
+              aria-label={t("home.recentActivity")}
+              style={{
+                background: "var(--bg-panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 9,
+                padding: 12,
+              }}
+            >
+              <h2 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+                {t("home.recentActivity")}
+              </h2>
+              {recentEntries.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {group.sessions.map((entry) => {
-                    const title = entry.session.name || entry.session.firstMessage.slice(0, 80) || entry.session.id.slice(0, 12);
-                    const turns = Math.round(entry.session.messageCount / 2);
-                    return (
+                  {recentEntries.map((entry) => (
+                    <HomeSessionRow
+                      key={`${entry.machineId}:${entry.session.id}`}
+                      entry={entry}
+                      showProjectTag
+                      showMachineTag
+                      onSelect={(selectedEntry) => navigate(
+                        {
+                          machineId: selectedEntry.machineId,
+                          project: selectedEntry.projectRoot,
+                          session: selectedEntry.session.id,
+                        },
+                        { history: "push" },
+                      )}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "12px 0" }}>
+                  {groups === null ? "…" : t("accessNotice.noVisibleSessions")}
+                </div>
+              )}
+            </section>
+
+            {aggregateGroups.length > 0 && (
+              <div style={chipRowStyle}>
+                {aggregateGroups.map((group) => {
+                  const isExpanded = expandedGroupKeys?.has(group.key) ?? (group.key === aggregateGroups[0]?.key);
+                  return (
+                    <button
+                      key={group.key}
+                      type="button"
+                      onClick={() => expandAndScrollToAggregateGroup(group.key)}
+                      aria-pressed={isExpanded}
+                      title={group.displayName}
+                      style={chipStyle(isExpanded)}
+                    >
+                      <span>{group.displayName} {group.sessions.length}</span>
+                      {group.lastActivity && (
+                        <span style={{ color: "var(--text-dim)", marginLeft: 6, fontWeight: 400 }}>
+                          {formatRelativeTime(new Date(group.lastActivity), locale)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {aggregateGroups.map((group) => {
+              const isExpanded = expandedGroupKeys?.has(group.key) ?? (group.key === aggregateGroups[0]?.key);
+              const isShowingAll = shownAllGroupKeys.has(group.key);
+              const contentId = `home-project-group-${encodeURIComponent(group.key)}`;
+              return (
+                <section
+                  key={group.key}
+                  ref={(element) => {
+                    if (element) aggregateGroupRefs.current.set(group.key, element);
+                    else aggregateGroupRefs.current.delete(group.key);
+                  }}
+                  aria-label={group.displayName}
+                  style={{ scrollMarginTop: 16 }}
+                >
+                  <div style={{ marginBottom: isExpanded ? 8 : 0 }}>
+                    <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
                       <button
-                        key={`${entry.machineId}:${entry.session.id}`}
                         type="button"
-                        onClick={() => navigate({ machineId: entry.machineId, project: entry.projectRoot, session: entry.session.id }, { history: "push" })}
-                        title={`${entry.machineName} · ${entry.projectRoot}`}
+                        onClick={() => toggleAggregateGroup(group.key)}
+                        aria-expanded={isExpanded}
+                        aria-controls={contentId}
+                        title={t(isExpanded ? "home.collapseProject" : "home.expandProject", { project: group.displayName })}
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          width: "100%",
-                          textAlign: "left",
-                          background: "var(--bg-panel)",
-                          border: "1px solid var(--border)",
-                          borderRadius: 7,
-                          color: "var(--text)",
+                          display: "inline-flex",
+                          alignItems: "baseline",
+                          gap: 10,
+                          flexWrap: "wrap",
+                          padding: 0,
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
                           cursor: "pointer",
-                          padding: "6px 10px",
-                          fontSize: 12.5,
-                          opacity: entry.machineOffline ? 0.7 : 1,
+                          font: "inherit",
+                          textAlign: "left",
                         }}
                       >
-                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {title}
+                        <span>{group.displayName}</span>
+                        <span style={{ fontSize: 11.5, fontWeight: 400, color: "var(--text-dim)" }}>
+                          {t("home.sessionCount", { count: String(group.sessions.length) })}
+                          {group.machineCount > 1 && <> · {t("home.machineCountLabel", { count: String(group.machineCount) })}</>}
                         </span>
-                        <span style={{ fontSize: 10.5, color: "var(--text-dim)", flexShrink: 0 }}>
-                          {formatRelativeTime(new Date(entry.session.modified), locale)}
-                        </span>
-                        <Tag title={entry.projectRoot}>
-                          {basename(entry.projectRoot)}
-                        </Tag>
-                        <Tag title={entry.machineOffline ? `${entry.machineName} (${t("home.machineOffline")})` : entry.machineName}>
-                          {entry.machineName}
-                        </Tag>
-                        <Tag title={t("home.messageCount", { count: String(entry.session.messageCount) })}>
-                          {t("home.turnCount", { count: String(turns) })}
-                        </Tag>
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                          style={{ transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.1s" }}
+                        >
+                          <path d="m3 6 5 5 5-5" />
+                        </svg>
                       </button>
-                    );
-                  })}
-                </div>
-              </section>
-            ))}
+                    </h2>
+                  </div>
+                  <div id={contentId}>
+                    {isExpanded && (
+                      <>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {(isShowingAll ? group.sessions : group.sessions.slice(0, AGGREGATE_GROUP_SESSION_LIMIT)).map((entry) => (
+                            <HomeSessionRow
+                              key={`${entry.machineId}:${entry.session.id}`}
+                              entry={entry}
+                              showProjectTag={false}
+                              showMachineTag
+                              onSelect={(selectedEntry) => navigate(
+                                {
+                                  machineId: selectedEntry.machineId,
+                                  project: selectedEntry.projectRoot,
+                                  session: selectedEntry.session.id,
+                                },
+                                { history: "push" },
+                              )}
+                            />
+                          ))}
+                        </div>
+                        {!isShowingAll && group.sessions.length > AGGREGATE_GROUP_SESSION_LIMIT && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShownAllGroupKeys((current) => {
+                                if (current.has(group.key)) return current;
+                                const next = new Set(current);
+                                next.add(group.key);
+                                return next;
+                              });
+                            }}
+                            style={{
+                              marginTop: 6,
+                              padding: "4px 8px",
+                              border: "1px solid var(--border)",
+                              borderRadius: 6,
+                              background: "var(--bg-hover)",
+                              color: "var(--accent)",
+                              cursor: "pointer",
+                              fontSize: 11.5,
+                            }}
+                          >
+                            {t("home.showAllConversations", { count: String(group.sessions.length) })}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </section>
+              );
+            })}
             {aggregateGroups.length === 0 && (
               <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
                 {groups === null ? "…" : t("home.aggregateEmpty")}

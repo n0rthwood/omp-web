@@ -55,9 +55,8 @@ export function machineStorageKey(key: string, machineId?: string): string {
 }
 
 /**
- * The app's own URL for the current machine/project/session — see
- * `./nav-url` for the full path grammar. Local machine, no project, and no
- * session collapse to "/".
+ * `./nav-url` for the full path grammar. A project-less local target is
+ * explicit as `/m/local`, so it remains distinct from the Home entry (`/`).
  */
 export function appUrl(params: { project?: string | null; session?: string | null }, machineId?: string): string {
   const id = machineId ?? currentMachineId;
