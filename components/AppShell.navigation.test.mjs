@@ -130,7 +130,7 @@ test("Home Refresh bypasses the arbitrary-machine session-list cache", () => {
 test("Home ignores superseded session-list fan-out results", () => {
   assert.match(homePageSource, /const loadGenerationRef = useRef\(0\);/);
   assert.match(homePageSource, /const generation = \+\+loadGenerationRef\.current;/);
-  assert.match(homePageSource, /if \(generation !== loadGenerationRef\.current\) return;\s*setGroups\(results\);/);
+  assert.match(homePageSource, /if \(generation !== loadGenerationRef\.current\) return;\s*groupsRef\.current = results;\s*setGroups\(results\);/);
 });
 
 test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {
