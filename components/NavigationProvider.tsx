@@ -9,25 +9,23 @@
  * handler in the app.
  *
  * Two navigation paths:
- *  - Boot + popstate: untrusted input (a URL or localStorage resume) runs
- *    the full async `nav-state` pipeline — staged loading, validation,
- *    error taxonomy, storage write at settle.
+ *  - Boot + popstate: untrusted input runs the full async `nav-state`
+ *    pipeline — staged loading, validation, error taxonomy, and a
+ *    selection intent captured once from the incoming location.
  *  - Interactive (`navigate()`): the caller already holds an
  *    already-validated target (a session/project clicked from a loaded
  *    list, a machine picked from the loaded machines list). A same-machine
  *    target updates the URL, storage, and the machine seam directly, no
- *    re-validation round trip. A target that *changes* the machine instead
- *    runs through the same async pipeline as a `/m/<id>` deeplink — its
- *    defaults (project, conversation) resolve exactly as a fresh visit's
- *    would, so an interactive machine switch lands on the identical URL a
- *    matching deeplink would (issue #10 stage-3 review, blocker #2).
+ *    re-validation round trip. A target that *changes* the machine runs
+ *    through the same async pipeline as a deeplink. The explicit
+ *    `"defaults"` intent resolves the machine's project and conversation;
+ *    `"none"` validates the machine and enters its shell with no selection.
  *
- * A settled resolution sourced from the URL (deeplink, legacy query, or the
- * machine-switch pipeline above) canonicalizes the address bar to its
- * resolved form via a native `history.replaceState` when it differs — a legacy `?session=`
- * link or a bare `/m/<id>` switch both end up at the full
- * `/m/<id>/p/<project>/s/<session>` path. Resume/default-sourced settles (a
- * plain `/` visit) never touch history (blocker #1).
+ * A settled URL-sourced resolution canonicalizes the address bar via native
+ * `history.replaceState` only when its resolved form differs. Legacy
+ * `?session=` links and defaults-selected machine switches become their full
+ * `/m/<id>/p/<project>/s/<session>` path; a select-nothing `/m/<id>` stays
+ * bare. Home settles never touch history.
  *
  * Children render only once `phase === "settled"` — the whole-subtree
  * loading gate idiom, extended with per-stage progress and `AccessNotice`
@@ -44,8 +42,9 @@ import {
   type NavError,
   type NavPhase,
   type NavResult,
+  type NavTargetSelection,
 } from "@/lib/nav-state";
-import { buildUrl, parseLocation, type NavigationTarget } from "@/lib/nav-url";
+import { buildUrl, parseLocation, type NavigationTarget, type ParsedLocation } from "@/lib/nav-url";
 import { apiPath } from "@/lib/api-path";
 import { loadRemovedProjects } from "@/lib/removed-projects";
 import { useMachines } from "@/lib/machine-context";
@@ -57,6 +56,16 @@ import { AccessNotice, type AccessNoticeVariant } from "./AccessNotice";
 import type { SessionInfo } from "@/lib/types";
 import { createContext, useContext } from "react";
 
+
+export interface NavigationNavigateOptions {
+  history: "push" | "replace";
+  /**
+   * `"none"` means a blank target opens only the machine shell. Callers that
+   * deliberately want a blank target to choose remembered defaults must opt
+   * into `"defaults"` so it remains distinct from the URL shape.
+   */
+  selection?: NavTargetSelection;
+}
 
 export interface NavigationContextValue {
   target: NavigationTarget;
@@ -74,8 +83,8 @@ export interface NavigationContextValue {
    *  since its own interactive selections already update local state
    *  themselves. */
   resolutionRevision: number;
-  /** Updates URL and syncs the machine seam for an already-validated target. Same-machine selections settle synchronously; a machine-changing target re-runs the full async pipeline (identical to a /m/<id> deeplink) so defaults resolve and the URL canonicalizes. */
-  navigate(target: NavigationTarget, options: { history: "push" | "replace" }): void;
+  /** Updates URL and syncs the machine seam for an already-validated target. A blank target defaults to the select-nothing intent; callers that need a remembered project/session pass `selection: "defaults"`. */
+  navigate(target: NavigationTarget, options: NavigationNavigateOptions): void;
   /** Lands on the Home page (issue #15): pushes "/" and settles the home intent. */
   goHome(): void;
   /** Re-runs the full pipeline against the current URL (offline retry). */
@@ -93,6 +102,24 @@ export function useNavigation(): NavigationContextValue {
 function currentLocation(): { pathname: string; search: string } {
   if (typeof window === "undefined") return { pathname: "/", search: "" };
   return { pathname: window.location.pathname, search: window.location.search };
+}
+
+/**
+ * `parseLocation` has already validated the path grammar. With no query
+ * string, its only blank target is a bare `/m/<id>` path, which is the
+ * explicit machine-shell route. Any query retains the legacy/default
+ * semantics, even when it happens to encode the same target shape.
+ *
+ * This boundary is the sole point that derives URL provenance; the result is
+ * passed to the resolver and is never reconstructed from the URL downstream.
+ */
+function selectionAtLocationIngress(parsed: ParsedLocation, search: string): NavTargetSelection {
+  return parsed.kind === "target"
+    && search === ""
+    && parsed.target.project === null
+    && parsed.target.session === null
+    ? "none"
+    : "defaults";
 }
 
 /**
@@ -246,37 +273,42 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     onMachineCommit: (machineId: string) => machinesRef.current.commitMachineId(machineId),
   }), []);
 
-  // Boot: resolve the page's initial location once.
-  useEffect(() => {
+  const runCurrentLocation = useCallback(() => {
     const { pathname, search } = currentLocation();
-    resolverRef.current!.run(parseLocation(pathname, search), buildDeps());
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once; buildDeps reads live refs internally.
-  }, []);
+    const parsed = parseLocation(pathname, search);
+    const selection = selectionAtLocationIngress(parsed, search);
+    resolverRef.current!.run(parsed, buildDeps(), { selection });
+  }, [buildDeps]);
+
+  // Boot: resolve the page's initial location once. `runCurrentLocation` is
+  // stable because `buildDeps` reads live refs internally.
+  useEffect(() => {
+    runCurrentLocation();
+  }, [runCurrentLocation]);
 
   // The nav module is the only popstate handler in the app.
   useEffect(() => {
     const onPopState = () => {
-      const { pathname, search } = currentLocation();
-      resolverRef.current!.run(parseLocation(pathname, search), buildDeps());
+      runCurrentLocation();
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [buildDeps]);
+  }, [runCurrentLocation]);
 
   // Canonicalize the address bar once a URL-sourced resolution settles
-  // somewhere other than where it started (blocker #1): a legacy
-  // `?machine=/?session=/?cwd=` link, or a machine switch's defaults
-  // resolving past the bare `/m/<id>` `navigate()` pushed below. A no-op
-  // once the URL already matches; resume/default-sourced settles are never
-  // even considered (see `canonicalRewriteUrl`), so a plain `/` visit never
-  // gets a history entry rewritten under it.
+  // somewhere other than where it started. Legacy query links and
+  // defaults-selected machine switches resolve past their initial URL; a
+  // select-nothing machine shell already equals its canonical `/m/<id>`.
   useEffect(() => {
     const { pathname, search } = currentLocation();
     const rewrite = canonicalRewriteUrl(result, pathname + search);
     if (rewrite) writeAddressBar(rewrite, "replace");
   }, [result]);
 
-  const navigate = useCallback((next: NavigationTarget, options: { history: "push" | "replace" }) => {
+  const navigate = useCallback((next: NavigationTarget, options: NavigationNavigateOptions) => {
+    // A blank interactive target is an "enter this machine" request unless a
+    // caller explicitly preserves the older default-project/session behavior.
+    const selection = options.selection ?? "none";
     const url = buildUrl(next);
     writeAddressBar(url, options.history);
 
@@ -285,18 +317,18 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
       // SessionInfo. Route session clicks through the resolver even when the
       // machine is already current so the session object is fetched before the
       // shell mounts.
-      resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
+      resolverRef.current!.run({ kind: "target", target: next }, buildDeps(), { selection });
       return;
     }
 
-    if (next.machineId !== machinesRef.current.machineId) {
-      // Machine changes: run the same async pipeline a `/m/<id>` deeplink
-      // would (blocker #2) instead of settling immediately with a raw,
-      // project-less target — defaults (project, conversation) resolve,
-      // `onMachineCommit` fires at the pipeline's own machine-commit phase,
-      // and the settle above canonicalizes this URL to the full resolved
-      // path, landing identically to a matching deeplink.
-      resolverRef.current!.run({ kind: "target", target: next }, buildDeps());
+    const requiresDefaultResolution = selection === "defaults"
+      && next.project === null
+      && next.session === null;
+    if (next.machineId !== machinesRef.current.machineId || requiresDefaultResolution) {
+      // Machine changes, and explicit blank-target defaults on the current
+      // machine, use the async pipeline so validation/defaulting happens at
+      // the same staged commit points as an equivalent deeplink.
+      resolverRef.current!.run({ kind: "target", target: next }, buildDeps(), { selection });
       return;
     }
     setResult({ phase: "settled", target: next, session: null, error: null, source: "url", home: false });
@@ -308,9 +340,8 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
   }, [buildDeps]);
 
   const retry = useCallback(() => {
-    const { pathname, search } = currentLocation();
-    resolverRef.current!.run(parseLocation(pathname, search), buildDeps());
-  }, [buildDeps]);
+    runCurrentLocation();
+  }, [runCurrentLocation]);
 
   const value = useMemo<NavigationContextValue>(() => ({
     target: result.target,
@@ -325,7 +356,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
   }), [result, resolutionRevision, navigate, goHome, retry]);
 
   if (result.phase === "error" && result.error) {
-    return <ErrorGate error={result.error} t={t} onRetry={retry} onGoLocal={() => navigate({ machineId: "local", project: null, session: null }, { history: "replace" })} />;
+    return <ErrorGate error={result.error} t={t} onRetry={retry} onGoLocal={() => navigate({ machineId: "local", project: null, session: null }, { history: "replace", selection: "defaults" })} />;
   }
 
   if (result.phase !== "settled") {

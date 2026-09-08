@@ -37,11 +37,11 @@ test("explicit user selections push history; system corrections (session-deleted
   assert.match(source, /nav\.navigate\(\{ machineId: machines\.machineId, project: selectedSession\.projectRoot \?\? selectedSession\.cwd, session: null \}, \{ history: "replace" \}\)/);
 });
 
-test("machine switch drops project/session, routed through MachineSwitcher's navigate() call", () => {
+test("machine switch keeps the default-selection intent explicit", () => {
   const switcherSource = fs.readFileSync(new URL("./MachineSwitcher.tsx", import.meta.url), "utf8");
   assert.match(
     switcherSource,
-    /navigate\(\{ machineId: id, project: null, session: null \}, \{ history: "push" \}\)/,
+    /navigate\(\{ machineId: id, project: null, session: null \}, \{ history: "push", selection: "defaults" \}\)/,
   );
 });
 
@@ -81,16 +81,17 @@ test("issue #12: NavigationProvider writes URLs with the native History API, nev
   assert.match(navProviderSource, /window\.history\.replaceState\(null, "", url\)/);
 });
 
-test("blocker #2: navigate() routes a machine-changing target through the async pipeline, not the sync fast path", () => {
+test("blocker #2: navigate() carries an explicit selection intent through the async resolver for machine changes", () => {
   const navigateStart = navProviderSource.indexOf("const navigate = useCallback");
   const navigateEnd = navProviderSource.indexOf("const retry = useCallback", navigateStart);
   assert.notEqual(navigateStart, -1);
   const navigateBody = navProviderSource.slice(navigateStart, navigateEnd);
 
-  assert.match(navigateBody, /if \(next\.machineId !== machinesRef\.current\.machineId\) \{/);
-  assert.match(navigateBody, /resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);/);
-  // The same-machine fast path still settles synchronously, without a
-  // pipeline round trip.
+  assert.match(navigateBody, /const selection = options\.selection \?\? "none";/);
+  assert.match(navigateBody, /if \(next\.machineId !== machinesRef\.current\.machineId \|\| requiresDefaultResolution\) \{/);
+  assert.match(navigateBody, /resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\), \{ selection \}\);/);
+  // The ordinary same-machine fast path still settles synchronously, without
+  // a pipeline round trip.
   assert.match(navigateBody, /setResult\(\{ phase: "settled", target: next, session: null, error: null, source: "url", home: false \}\);/);
 });
 
@@ -103,7 +104,34 @@ test("Home session clicks run the resolver even when the target machine is alrea
 
   assert.match(
     navigateBody,
-    /if \(resultRef\.current\.phase !== "error" && resultRef\.current\.home && next\.session\) \{[\s\S]*resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\)\);[\s\S]*return;[\s\S]*\}/,
+    /if \(resultRef\.current\.phase !== "error" && resultRef\.current\.home && next\.session\) \{[\s\S]*resolverRef\.current!\.run\(\{ kind: "target", target: next \}, buildDeps\(\), \{ selection \}\);[\s\S]*return;[\s\S]*\}/,
+  );
+});
+
+test("AccessNotice Go local keeps the explicit default-selection recovery behavior", () => {
+  assert.match(
+    navProviderSource,
+    /onGoLocal=\{\(\) => navigate\(\{ machineId: "local", project: null, session: null \}, \{ history: "replace", selection: "defaults" \}\)\}/,
+  );
+});
+
+test("issue #60: URL ingress captures a bare machine path once and carries select-nothing through boot, popstate, and retry", () => {
+  assert.match(
+    navProviderSource,
+    /function selectionAtLocationIngress\(parsed: ParsedLocation, search: string\): NavTargetSelection/,
+  );
+  assert.match(
+    navProviderSource,
+    /parsed\.kind === "target"\s*&& search === ""\s*&& parsed\.target\.project === null\s*&& parsed\.target\.session === null\s*\? "none"\s*: "defaults"/,
+  );
+  assert.match(
+    navProviderSource,
+    /const runCurrentLocation = useCallback\(\(\) => \{\s*const \{ pathname, search \} = currentLocation\(\);\s*const parsed = parseLocation\(pathname, search\);\s*const selection = selectionAtLocationIngress\(parsed, search\);\s*resolverRef\.current!\.run\(parsed, buildDeps\(\), \{ selection \}\);/,
+  );
+  assert.equal(
+    (navProviderSource.match(/runCurrentLocation\(\);/g) ?? []).length,
+    3,
+    "initial boot, popstate, and retry must all carry the captured URL intent",
   );
 });
 

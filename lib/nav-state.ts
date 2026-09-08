@@ -40,8 +40,26 @@ const LOCAL_MACHINE_ID = "local";
 
 export type NavSource = "url" | "home";
 
+/**
+ * `NavigationTarget` deliberately describes only the address-bar shape.
+ * A project-less target can mean either "choose this machine's remembered
+ * default" (legacy links and MachineSwitcher) or "enter this machine's
+ * shell without selecting anything" (`/m/<id>`). Keep that decision on the
+ * resolver run, rather than overloading the two nullable target fields.
+ */
+export type NavTargetSelection = "defaults" | "none";
+
+export interface NavRunOptions {
+  /**
+   * Only meaningful for `{ project: null, session: null }`. Supplying
+   * `"none"` for a project or session target is normalized to `"defaults"`
+   * so a project deeplink without a session still chooses `defaultSession()`.
+   */
+  selection?: NavTargetSelection;
+}
+
 export type NavIntent =
-  | { target: NavigationTarget; source: "url"; home: false }
+  | { target: NavigationTarget; source: "url"; home: false; selection: NavTargetSelection }
   | { home: true };
 
 const DEFAULT_TARGET: NavigationTarget = { machineId: LOCAL_MACHINE_ID, project: null, session: null };
@@ -54,9 +72,20 @@ const DEFAULT_TARGET: NavigationTarget = { machineId: LOCAL_MACHINE_ID, project:
  * are retired: opening the app lands on Home; a conversation is only ever
  * opened through an explicit target (deeplink, Home/calendar click, or an
  * in-app selection).
+ *
+ * The caller carries the selection intent it captured at navigation ingress.
+ * A bare `/m/<id>` has `"none"`; legacy query links and ordinary blank
+ * targets retain `"defaults"`.
  */
-export function resolveIntent(parsed: ParsedLocation): NavIntent {
-  if (parsed.kind === "target") return { target: parsed.target, source: "url", home: false };
+export function resolveIntent(parsed: ParsedLocation, options: NavRunOptions = {}): NavIntent {
+  if (parsed.kind === "target") {
+    const selection = options.selection === "none"
+      && parsed.target.project === null
+      && parsed.target.session === null
+      ? "none"
+      : "defaults";
+    return { target: parsed.target, source: "url", home: false, selection };
+  }
   return { home: true };
 }
 
@@ -87,13 +116,14 @@ export type NavResult =
 /**
  * The address-bar canonicalization for a settled URL-sourced resolution
  * (issue #10 stage-3 review, blocker #1): a legacy `?machine=/?session=/
- * ?cwd=` link, or a machine switch settling on its resolved defaults, must
- * end up at the same path a fresh `/m/<id>/p/<project>/s/<session>` visit
- * would produce — never left on the URL it started from. Resume/default-
- * sourced settles (a plain `/` visit, or a stale-resume step-down) must
- * never touch history, so this only ever returns non-null for a
- * `"url"`-sourced `"settled"` result whose canonical form differs from
- * `currentUrl` (the caller's `window.location.pathname + search`).
+ * ?cwd=` link, or a defaults-selected machine switch, must end up at the
+ * same path a fresh `/m/<id>/p/<project>/s/<session>` visit would produce —
+ * never left on the URL it started from. A select-nothing machine-shell
+ * resolution instead settles at its already-canonical `/m/<id>` path.
+ * Home-sourced settles (a plain `/` visit) never touch history, so this only
+ * ever returns non-null for a `"url"`-sourced `"settled"` result whose
+ * canonical form differs from `currentUrl` (the caller's
+ * `window.location.pathname + search`).
  */
 export function canonicalRewriteUrl(result: NavResult, currentUrl: string): string | null {
   if (result.phase !== "settled" || result.source !== "url") return null;
@@ -307,7 +337,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
           return;
         }
       }
-    } else {
+    } else if (intent.selection === "defaults") {
       project = defaultProject(sessions, removedProjects);
     }
 
@@ -354,7 +384,7 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
         });
         return;
       }
-    } else if (project) {
+    } else if (project && intent.selection === "defaults") {
       resolvedSession = defaultSession(project, sessions, deps.getLastOpenSession);
     }
 
@@ -363,9 +393,9 @@ export function createNavigationResolver(onChange: (result: NavResult) => void) 
   }
 
   return {
-    run(parsed: ParsedLocation, deps: NavDeps): void {
+    run(parsed: ParsedLocation, deps: NavDeps, options?: NavRunOptions): void {
       const myToken = ++token;
-      const intent = resolveIntent(parsed);
+      const intent = resolveIntent(parsed, options);
       void resolve(intent, deps, myToken);
     },
   };
