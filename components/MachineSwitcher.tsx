@@ -71,8 +71,9 @@ export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => 
   }, []);
 
   const selectMachine = (id: string) => {
-    // Machine switch drops project/session — cross-machine ids are meaningless.
-    navigate({ machineId: id, project: null, session: null }, { history: "push" });
+    // Machine switch drops project/session — cross-machine ids are meaningless,
+    // but retains the established remembered-default landing behavior.
+    navigate({ machineId: id, project: null, session: null }, { history: "push", selection: "defaults" });
     setDismissedError(null);
     setOpen(false);
   };

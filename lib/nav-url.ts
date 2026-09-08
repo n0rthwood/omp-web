@@ -121,13 +121,15 @@ export function parseLocation(pathname: string, search: string | URLSearchParams
 }
 
 /**
- * The inverse of `parseLocation`'s path branch. Local machine is omitted;
- * a session is never emitted without its project (defensive — the shapes
- * above never allow it, but a caller could still construct such a target).
+ * The local-machine segment is omitted when a project is present; its
+ * project-less target serializes explicitly as `/m/local` so it is
+ * distinguishable from the Home entry (`/`). A session is never emitted
+ * without its project (defensive — the shapes above never allow it, but a
+ * caller could still construct such a target).
  */
 export function buildUrl(target: NavigationTarget): string {
   const segments: string[] = [];
-  if (target.machineId !== LOCAL_MACHINE_ID) {
+  if (target.machineId !== LOCAL_MACHINE_ID || target.project === null) {
     segments.push("m", encodeURIComponent(target.machineId));
   }
   if (target.project) {

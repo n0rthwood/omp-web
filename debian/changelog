@@ -1,3 +1,31 @@
+omp-web (0.5.4) jammy; urgency=medium
+
+  * The Home page's conversation rows now put the title first. On a phone a
+    row is a card whose title wraps to two lines instead of collapsing to a
+    few characters, and on the desktop the tags yield space before the title
+    truncates (closes #60).
+  * Home's project groups are switchable: a chip row jumps to a group, every
+    group stays listed but only the most recent is expanded, and a group
+    longer than eight conversations shows the rest on demand — a project with
+    dozens of conversations no longer pushes every later group off-screen.
+  * A new Recent activity block lists the six most recently touched
+    conversations across the whole fleet, independent of the machine and
+    project selection. It is derived from the session lists the page has
+    already fetched, so it stays inside each user's existing visibility
+    grants and adds no new API surface.
+  * Machines can be opened directly. Previously the only way into a machine
+    was to open one of its conversations; the machine chips now carry an open
+    control that lands in that machine's shell with nothing selected, and
+    a bare /m/<id> URL now survives a reload and the back button instead of
+    being rewritten to an arbitrary conversation.
+  * Documented that Bun 1.3.14 routes loopback fetches through HTTP_PROXY
+    when one is set, contradicting the previous assumption that local
+    providers are always reached directly (#61). No fleet host sets a proxy
+    variable, so the defect is latent; its guard test is deliberately left
+    failing rather than relaxed. Packaging does not run the test suite
+    (debian/rules overrides dh_auto_test), so this does not affect the build.
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 08 Sep 2026 12:00:00 +0000
 omp-web (0.5.3) jammy; urgency=medium
 
   * Tool results can now include an inline image (for example, a
