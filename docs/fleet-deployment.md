@@ -568,7 +568,11 @@ password directly into a command line; read it from the 600-mode file):
 ```
 curl -s -o /dev/null -w '%{http_code}\n' "http://<IP>:5010/api/health"
 
-OMP_WEB_PASSWORD=$(grep -oP '(?<=^OMP_WEB_PASSWORD=).*' ~/omp/ops/env/fleet/<IP>.env)
+# The operator copies store the value double-quoted (systemd strips the
+# quotes on EnvironmentFile load; a naive extraction does not). Without the
+# sed the curl below sends a quoted password and returns 401 — which looks
+# exactly like a rotated or wrong credential.
+OMP_WEB_PASSWORD=$(grep -oP '(?<=^OMP_WEB_PASSWORD=).*' ~/omp/ops/env/fleet/<IP>.env | sed 's/^"//; s/"$//')
 curl -s -o /dev/null -w '%{http_code}\n' -u "omp:${OMP_WEB_PASSWORD}" "http://<IP>:5010/api/health"
 unset OMP_WEB_PASSWORD
 ```
