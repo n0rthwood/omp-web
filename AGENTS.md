@@ -56,6 +56,81 @@ with `repo` scope. `gh repo set-default` is already pointed at
 
 ---
 
+## Two Kinds of Session — Report or Execution
+
+Every conversation is exactly one of two kinds. Work out which one you are in
+before you do anything else, because it decides what your deliverable is.
+
+| Kind | The user is | Deliverable | Implementation |
+|---|---|---|---|
+| **Report** | describing a bug, a need, or an idea | a GitHub issue — created, or an existing one updated | none |
+| **Execution** | asking for work that an issue already covers | the shipped change | yes, dispatched |
+
+**Telling them apart:** no issue in play and the user is describing a problem
+or a wish → report. An issue number, an "implement #N", a "go ahead", a
+"continue", or a branch already in flight → execution. Genuinely ambiguous →
+ask once, then commit to a mode.
+
+### A report session
+
+It ends when the issue accurately captures the problem, the scope, and the
+acceptance criteria — not when you have said something reassuring. Use the
+gate, the labels, and the body templates in **GitHub Issue Workflow (mandatory
+gate)** immediately below; that section is the procedure, this one is only the
+framing.
+
+"No implementation" means no feature or fix commits. It does not mean no
+effort. A report session still investigates, reproduces, and reads code to
+scope the problem — that is how `Files: unknown` becomes `file:line` and how
+acceptance criteria become verifiable. **A vague issue is a failed report
+session.**
+
+### When a report becomes an execution
+
+The common path: the user describes something, then asks for it. The order is
+fixed — **create the issue first, then switch modes.** The issue number is what
+ties the branch, the commits, and the review together, so it cannot be
+back-filled once the branch exists.
+
+If the user explicitly waives the issue: comply, say once that the change is
+not tracked by an issue, then drop it — the **Standing rules** in the issue
+workflow section govern.
+
+### An execution session
+
+You are the coordinator: decompose the work, dispatch it to subagents, review
+what comes back, and edit directly only where dispatching costs more than
+doing. The rules for choosing subagents, specifying assignments, and deciding
+what to ask the user are in **Main Session Role: Coordinator, Not
+Implementer** at the end of this file — follow them there rather than
+reinventing them here.
+
+### Execution close-out — this order, every time
+
+The order is the point: merge before you ask, ask before you tag, verify
+publication after you tag.
+
+1. **Code complete and verified** — every acceptance criterion met, with
+   evidence you actually ran.
+2. **Merge back to `main`.** An execution session does not end on a feature
+   branch.
+3. **Ask the user whether to release** by tagging. Releasing is the user's
+   call; never tag unilaterally.
+4. **If yes: bump `debian/changelog` and `package.json` together**, tag
+   `omp-web-v<version>`, push, and record the released version in your
+   close-out. The two files feed two independent release channels and have
+   silently drifted apart before.
+5. **Verify the `.deb` reached the R2 apt repository.** A green GitHub Actions
+   run is not proof of publication. Confirm the `Version:` stanza at
+   `https://repo.joysort.cc/apt/dists/jammy/main/binary-amd64/Packages` and
+   note whether the changelog sidecar is present. Rolling the package onto the
+   fleet is a further, separate step — see **Deployment Topology**, one host at
+   a time.
+6. **Close the issue with a progress comment** recording what shipped and in
+   which version.
+
+---
+
 ## GitHub Issue Workflow (mandatory gate)
 
 **No code work starts without a GitHub Issue.** This is a hard gate. The issue
