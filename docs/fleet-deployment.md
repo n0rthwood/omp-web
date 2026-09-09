@@ -12,13 +12,21 @@ API and proxy design, see [fleet.md](./fleet.md).
 | 172.30.3.250 | joysort-ai-server | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.24 | joysort24 | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.109 | joysort109 | remote | `main` | 5010 | `0.0.0.0` |
-| 172.30.3.202 | gpu-dev | remote | `main` | 5010 | `0.0.0.0` |
+| 172.30.3.202 | joysort202 | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.39 | joysort39 | remote | `main` | 5010 | `0.0.0.0` |
 | 172.30.3.110 | joysort110 | remote | `main` | 5010 | `0.0.0.0` |
 
 `joysort110`'s box hostname is `training2` (it had a pre-existing omp install
 with session history; `agent.db`/`sessions/` were preserved when it joined the
 fleet on 2026-08-19 — only the binary and configs were refreshed).
+
+`172.30.3.110` is **not on the local LAN segment** despite its `172.30.3.x`
+address — it is reached over a tunnel, at roughly **255 ms** RTT
+(`ping -c 12` on 2026-09-09: min/avg/max 251.7/254.9/260.7 ms) against
+11–33 ms for genuinely LAN-local hosts like `.24` and `.39`. Consequence for
+operators: a single transient `ssh` or `curl` failure against `.110` is a
+**retry**, not a rollback trigger. Give it a second attempt (and a longer
+`ConnectTimeout`) before concluding anything is actually wrong with the host.
 
 Every remote runs as a `systemd --user omp-web.service` unit, with the app
 tree at `~/omp/ompweb` on that host kept current by the `omp-web` apt
@@ -48,6 +56,35 @@ On the gateway (172.30.3.123):
 - Each remote's password is mirrored at `~/omp/ops/env/fleet/<IP>.env`, mode
   `600` — the operator's copy, and the source used to register that machine
   with the gateway. This file is never printed and never committed.
+- **`<IP>` here is the host's physical `10.10.170.x` LAN address, not the
+  `172.30.3.x` address the topology table above uses** — the latter is
+  ZeroTier. Both address families reach every host, but the credential files
+  are keyed by the physical address, so `fleet/172.30.3.24.env` does not
+  exist and a recipe using it fails with "No such file or directory".
+  Verified mapping (2026-09-09, by `ssh <addr> hostname` on both addresses):
+
+  | Physical (`fleet/` key) | ZeroTier | Hostname |
+  | --- | --- | --- |
+  | 10.10.170.206 | 172.30.3.24 | joysort24 |
+  | 10.10.170.223 | 172.30.3.39 | joysort39 |
+  | 10.10.170.187 | 172.30.3.109 | joysort109 |
+  | 10.10.170.202 | 172.30.3.202 | joysort202 |
+  | 10.10.170.237 | 172.30.3.250 | joysort-ai-server |
+  | — (tunnelled) | 172.30.3.110 | training2 / joysort110 |
+
+  `joysort110` is the sole exception: it is keyed `fleet/172.30.3.110.env`,
+  consistent with it being reached over the tunnel rather than the physical
+  segment. The gateway itself holds both (`eth0` 10.10.170.185, ZeroTier
+  172.30.3.123).
+- **These values are stored double-quoted**, as are the `OMP_WEB_PASSWORD`
+  lines in every host's own `5010.env`: the password originates from the
+  sealed secrets store (`tools/xor-secrets.py get`), which returns it with
+  the quotes as part of the value. `systemd` strips them when it loads an
+  `EnvironmentFile`, so the service works — but any hand extraction that
+  forgets to strip them sends a quoted password and gets a `401` that looks
+  exactly like a wrong or rotated credential. Always pipe such an extraction
+  through `sed 's/^"//; s/"$//'` (see
+  [Verification commands](#verification-commands)).
 
 ## The systemd unit
 
@@ -120,10 +157,22 @@ served checkout risks the `.next`-corruption trap under
 
 ### Order: six remotes, then the gateway, one host at a time
 
+**Canary one host first.** Before running the full order below, put the new
+release on a *single* low-traffic, easily-verified host, and confirm it
+end-to-end there — service restarted clean, `/api/health` reports the target
+version, login works, and any UI change in the release is actually visible in
+a browser. Only then roll the rest. `0.5.4` was canaried on `172.30.3.110`
+for exactly this reason: it carries little traffic and is quick to verify, so
+a packaging or migration defect surfaces on the host it costs least to break.
+A canary that fails stops the rollout at one host instead of six.
+
+Once the canary is confirmed, continue in this order (the canaried host can
+be skipped, since it is already on the target version):
+
 1. `172.30.3.24` (joysort24)
 2. `172.30.3.39` (joysort39)
 3. `172.30.3.109` (joysort109)
-4. `172.30.3.202` (gpu-dev)
+4. `172.30.3.202` (joysort202)
 5. `172.30.3.250` (joysort-ai-server)
 6. `172.30.3.110` (training2 / joysort110)
 7. `172.30.3.123` (gateway) — **last, always**
@@ -169,7 +218,7 @@ Run this against each remote, one at a time, in the order above:
 ```
 TARGET=0.5.2
 
-ssh joysort@172.30.3.24 bash <<EOF
+ssh 172.30.3.24 bash <<EOF
 set -euo pipefail
 sudo apt-get update -qq
 sudo apt-get install --only-upgrade -y omp-web 2>&1 | sudo tee /tmp/upgrade.log
@@ -180,18 +229,18 @@ EOF
 Confirm the printed `Version:` line equals `$TARGET` before moving to the
 next host — `.24` → `.39` → `.109` → `.202` → `.250` → `.110`. If it doesn't
 match, read the tail of that host's `/tmp/upgrade.log` before retrying;
-don't just re-run blind. `172.30.3.110` (training2 / joysort110) uses a key,
-not a password — no interactive auth needed:
+don't just re-run blind.
 
-```
-ssh -i ~/.ssh/id_rsa joysort@172.30.3.110 bash <<EOF
-... same body as above ...
-EOF
-```
+Every remote — `.110` included — authenticates by key for user `joysort`
+under `BatchMode`, so a plain `ssh <IP>` is all you need: neither
+`-i ~/.ssh/id_rsa` nor a `joysort@` prefix is required. Both are harmless
+belt-and-braces if you prefer to be explicit, but the short form is what the
+recipes here use. Verified 2026-09-09: `ssh -o BatchMode=yes <IP> true`
+returned exit `0` on all six remotes. Remember `.110` is the tunnelled host
+(see [Topology](#topology)) — retry a timeout there before escalating.
 
-(equivalently `ssh joysort110 …` if that alias is set up in
-`~/.ssh/config`). Do **not** touch `172.30.3.123` in this loop — it is
-handled separately, below, and always last.
+Do **not** touch `172.30.3.123` in this loop — it is handled separately,
+below, and always last.
 
 ### Gateway — via `omp-web-restart-service`, never a direct `apt-get install`
 
@@ -209,6 +258,12 @@ curl -s 127.0.0.1:8799/health
 sudo apt-get update -qq
 apt-cache policy omp-web | grep Candidate   # confirm == $TARGET, per pre-flight above
 
+# restart-service.env stores its token UNQUOTED, unlike the OMP_WEB_PASSWORD
+# files: this token is generated locally by `secrets.token_urlsafe(32)` and
+# echoed straight into the file, never round-tripped through the sealed
+# secrets store that adds the quotes. So no `sed` stripping here — and that
+# inconsistency between the two files is precisely what makes the quoting
+# trap invisible.
 TOKEN=$(grep -oP '(?<=^RESTART_SERVICE_TOKEN=).*' ~/omp/ops/env/restart-service.env)
 curl -s -X POST -H "X-Restart-Token: $TOKEN" http://127.0.0.1:8799/run
 unset TOKEN
@@ -237,18 +292,32 @@ Once all seven hosts report done:
 TARGET=0.5.2
 for HOST in 172.30.3.24 172.30.3.39 172.30.3.109 172.30.3.202 172.30.3.250 172.30.3.110 172.30.3.123; do
   echo -n "$HOST: "
-  ssh joysort@$HOST "dpkg -s omp-web | grep ^Version"
+  ssh $HOST "dpkg -s omp-web | grep ^Version"
 done
 ```
 
-All seven must print `Version: $TARGET` (`.110` needs `-i ~/.ssh/id_rsa`,
-same as the roll-out step above; `.123` is the box you're already on).
+All seven must print `Version: $TARGET` (`.123` is the box you're already
+on, and needs no `ssh` at all if you prefer to run the `dpkg -s` locally).
 
 ### Post-upgrade notes
 
 - `~/omp/ompweb`'s dirty `git status` after every host's install is the
   `sync_app` tar-overlay, not uncommitted work — never `git add`/`git commit`
   it (see [Day-2 operations](#day-2-operations)).
+- **`status=143` on stop is expected, fleet-wide, and not a failed upgrade.**
+  A clean restart logs:
+  ```
+  omp-web.service: Main process exited, code=exited, status=143/n/a
+  omp-web.service: Failed with result 'exit-code'.
+  ```
+  143 is `128 + 15`, i.e. a normal `SIGTERM` exit — the unit sets
+  `KillSignal=SIGTERM` with an empty `SuccessExitStatus=`, so systemd has no
+  reason to treat 143 as success and labels the stop a failure. It is purely
+  cosmetic: judge the upgrade by the *start* that follows (a `Ready in …ms`
+  line and no error lines) plus `dpkg -s` and `/api/health`, never by this
+  pair of lines. Adding `SuccessExitStatus=143` to the unit would silence it
+  — an unmade cosmetic change, deliberately not applied, since it would mean
+  editing the unit on all seven hosts for a log-cosmetics-only benefit.
 - If a host's `/_next/*` assets start 404ing after the upgrade, its `.next`
   build was corrupted; the only fix is restarting the unit onto a complete
   build. Never `bun run build` inside `~/omp/ompweb` to try to patch it in
@@ -318,7 +387,15 @@ acceptable.
 `GET /api/health` reports two version fields, and they are expected to
 differ:
 
-- `ompWebVersion` — this omp-web build's own `package.json` version.
+- `ompWebVersion` — this omp-web build's own `package.json` version, and
+  emphatically **not** the `package.json` sitting on disk right now:
+  `app/api/health/route.ts` gets it via a static
+  `import packageJson from "../../../package.json"`, so the value is baked
+  into `.next` at build time. A host can therefore show `dpkg` and an
+  on-disk `package.json` at a newer version while `/api/health` still
+  reports the older one, until the release's `.next` actually lands and the
+  service restarts. Check a host's deployed version with `/api/health` or
+  `dpkg-query`, never by reading `package.json` off the disk.
 - `ompVersion` — the `@oh-my-pi/pi-coding-agent` **SDK** version that this
   omp-web build was compiled against (read from
   `node_modules/@oh-my-pi/pi-coding-agent/package.json` at build time; today
@@ -413,6 +490,7 @@ Run from **any** session (it does not need to be, and for the reason above
 *should not need to be*, the session that dies with the restart):
 
 ```
+# Unquoted on purpose — see the note in the gateway rollout section above.
 TOKEN=$(grep -oP '(?<=^RESTART_SERVICE_TOKEN=).*' ~/omp/ops/env/restart-service.env)
 curl -s -X POST -H "X-Restart-Token: $TOKEN" http://127.0.0.1:8799/run
 unset TOKEN
@@ -512,11 +590,11 @@ Prerequisites, in order:
 1. Configure the apt source, copying from an already-provisioned host
    rather than re-authoring by hand:
    ```
-   ssh joysort@<existing-host> 'cat /etc/apt/keyrings/joysort-archive-keyring.gpg' \
-     | ssh joysort@<new-host> 'sudo tee /etc/apt/keyrings/joysort-archive-keyring.gpg > /dev/null'
-   ssh joysort@<existing-host> 'cat /etc/apt/sources.list.d/joysort.sources' \
-     | ssh joysort@<new-host> 'sudo tee /etc/apt/sources.list.d/joysort.sources > /dev/null'
-   ssh joysort@<new-host> 'sudo apt-get update'
+   ssh <existing-host> 'cat /etc/apt/keyrings/joysort-archive-keyring.gpg' \
+     | ssh <new-host> 'sudo tee /etc/apt/keyrings/joysort-archive-keyring.gpg > /dev/null'
+   ssh <existing-host> 'cat /etc/apt/sources.list.d/joysort.sources' \
+     | ssh <new-host> 'sudo tee /etc/apt/sources.list.d/joysort.sources > /dev/null'
+   ssh <new-host> 'sudo apt-get update'
    ```
 2. Check linger: `loginctl show-user joysort -p Linger` on the new host; if
    it says `Linger=no`, run `loginctl enable-linger joysort`.
@@ -552,9 +630,13 @@ Still manual after install:
 
 Verify locally on the new host, then from the gateway (see below), then:
 
-- Copy its generated password
-  (`grep OMP_WEB_PASSWORD ~/omp/ops/env/5010.env` on the new host) to
-  `~/omp/ops/env/fleet/<IP>.env` on the gateway, mode `600`.
+- Copy its generated password to `~/omp/ops/env/fleet/<IP>.env` on the
+  gateway, mode `600`. The seeded value is double-quoted, so strip the quotes
+  when you read it or you will register a quoted token that always `401`s:
+  ```
+  ssh <new-host> "grep -oP '(?<=^OMP_WEB_PASSWORD=).*' ~/omp/ops/env/5010.env" \
+    | sed 's/^"//; s/"$//'
+  ```
 - Register it: `POST /api/machines` on the gateway with
   `{"name": "<hostname>", "baseUrl": "http://<IP>:5010", "authMode": "basic", "username": "omp", "token": "<password>"}`
   (see [fleet.md](./fleet.md) for the full field reference).
