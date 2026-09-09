@@ -322,7 +322,7 @@ runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
 | Host | IP | Unit | Notes |
 |---|---|---|---|
 | gateway (this box) | 172.30.3.123 | `omp-web.service` | port 5010, repo root checkout, authenticated, terminals on. PM2 is retired for omp-web but still runs `agent-canvas` + `omp-tunnel` here — `pm2 kill`/`restart all` remains destructive |
-| gateway dev instance | 172.30.3.123 | `omp-web-dev.service` | port 5020, deliberately unauthenticated, no terminals |
+| gateway dev instance | 172.30.3.123 | `omp-web-dev.service` | port 5020, published publicly as https://ompdev.joyai.dev via the pm2 `omp-tunnel`; **authenticated** since 2026-09-06 — it shares prod's users file (see the shared-users note below), not because its own env sets a password. No terminals |
 | joysort-ai-server | 172.30.3.250 | `omp-web.service` | remote, `~/omp/ompweb`, `main` |
 | joysort24 | 172.30.3.24 | `omp-web.service` | remote |
 | joysort109 | 172.30.3.109 | `omp-web.service` | remote |
@@ -343,6 +343,22 @@ terminal host gate on a non-loopback bind.
   the operator's copy. Values are double-quoted: systemd strips the quotes, a
   naive `sed` does not (use `sed 's/^"//; s/"$//'` or read
   `/proc/<pid>/environ`).
+- **Both gateway instances share one web-users file, so 5020 is authenticated.**
+  Neither `5010.env` nor `5020.env` sets `OMP_WEB_USERS_FILE`, so
+  `getWebUsersFilePath()` (`lib/web-users.ts`) resolves both processes to the
+  same default `~/.omp/agent/omp-web-users.yml`, and `authEnabled()` is
+  `isWebPasswordEnabled() || users.length > 0`. Adding four real users on
+  2026-09-06 therefore flipped 5020 from open to authenticated — it answers
+  `302 → /login` today — even though 5020's own env file sets no password.
+  **Do not "restore" 5020 to an unauthenticated state.**
+  `getWebUserOrSynthetic()` (`lib/web-auth-context.ts`) short-circuits to an
+  anonymous `role:"admin"` user whenever `authEnabled()` is false, so an
+  unauthenticated 5020 hands full admin over the gateway's API to anyone who
+  reaches the *public* https://ompdev.joyai.dev. Those user additions closed
+  that hole by accident; keep it closed. If an isolated dev auth realm is
+  genuinely needed, the only safe form is a dev-specific `OMP_WEB_USERS_FILE`
+  **plus** `OMP_WEB_PASSWORD`, so the instance can never fall back to the
+  anonymous admin — never a dev users file that is left empty.
 - **Provider keys live only in `~/.omp/agent/.env` on each host**
   (`pi-utils/src/env.ts` parses it at module init; process env wins over it).
   Duplicating a key into a systemd env file silently overrides the rotation
@@ -363,6 +379,15 @@ terminal host gate on a non-loopback bind.
 - **Never restart a remote's omp-web while an agent session is running on it**
   through the gateway — same in-process-session rule as above. One host at a
   time when rolling out.
+- **Both gateway units share one `.next`, so any rebuild must restart *both*.**
+  `omp-web.service` and `omp-web-dev.service` declare the same
+  `WorkingDirectory=/home/joysort/omp/ompweb` and therefore serve one build.
+  On 2026-09-06 that `.next` was rebuilt in place and only 5010 was restarted;
+  5020 kept running against the replaced build and 500'd on *every* request
+  until it was restarted on 2026-09-09. Symptom signature: one instance
+  healthy while its sibling returns 500 with
+  `Could not find the module ... in the React Client Manifest` (for
+  `LoginForm.tsx`, `layout-router.js`, `global-error.js`) on every request.
 - Secrets in tool output are persistent and browsable via this very UI:
   `cut -d= -f1` for env key names, `jq 'del(.machines[].token)'` for the
   registry, status-code-only curls. Still avoid printing secrets (they
