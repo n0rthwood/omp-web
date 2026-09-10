@@ -1,3 +1,36 @@
+omp-web (0.5.5) jammy; urgency=medium
+
+  * Open tabs now detect backend upgrades. A tab periodically compares the
+    server's ompWebVersion from /api/health against the version baked into
+    its loaded JS bundle; when they diverge it shows a dismissable
+    bottom-right banner ("omp-web updated: X -> Y") with a Refresh action.
+    Dismissal is per server version — the banner reappears only after a
+    further upgrade. Mounted in the root layout, so it survives machine
+    switching and works on the login page too (#63).
+
+  * Upgraded the embedded @oh-my-pi SDK from 17.3.0 to 18.1.16 (exact
+    pins). Model fallback chains no longer stall when the model they land
+    on has its own dedicated chain: a failing fallback model now advances
+    through its own chain's next entries instead of ending the turn — the
+    joysort109 incident where claude-sonnet-5 fell back to bailian glm-5.2
+    (403 AccessDenied.Unpurchased) and died without trying zhipu glm-5.2 or
+    deepseek. Brings the 18.x hardening sweep over the same failure domain
+    (402 credential rotation before fallback, transport-error retry safety,
+    HTTP 413 classification, memory trimming for long-lived sessions, RPC
+    prompt//compact blocking fixes). The async-job-manager sdk.ts patch was
+    regenerated against 18.1.16; estimateTokens calls replaced by a shared
+    Tokenizer instance; the upstream-removed designer role entry dropped.
+    NOTE: upstream 18.1.5 makes foreign config sources (~/.cursor,
+    ~/.codex, ~/.claude, ...) opt-in via enabledProviders — hosts relying
+    on auto-imported credentials will see fewer models until enabled (#64).
+
+  * Added a nested-chain cascade live harness as the #64 regression guard:
+    it reproduces the incident shape against the real SDK failover engine
+    over real HTTP and asserts the cascade reaches the failing fallback
+    model's own chain; on 17.3.0 it fails with exactly the observed
+    three-hop stall.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 10 Sep 2026 12:00:00 +0000
 omp-web (0.5.4) jammy; urgency=medium
 
   * The Home page's conversation rows now put the title first. On a phone a
