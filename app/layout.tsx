@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { PwaRegistration } from "@/components/PwaRegistration";
+import { VersionRefreshBanner } from "@/components/VersionRefreshBanner";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 
@@ -65,6 +66,7 @@ export default function RootLayout({
       <body translate="no" className="notranslate">
         {children}
         <PwaRegistration />
+        <VersionRefreshBanner />
       </body>
     </html>
   );
