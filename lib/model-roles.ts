@@ -43,7 +43,6 @@ const ROLE_DESCRIPTIONS: Record<string, string> = {
   slow: "Deep-reasoning model for hard problems.",
   vision: "Model used when a turn carries images.",
   plan: "Model that drives plan mode.",
-  designer: "Model used for UI and design work.",
   commit: "Model that writes commit messages and changelogs.",
   tiny: "Smallest model, used for classification and routing.",
   task: "Model subagents spawn with by default.",

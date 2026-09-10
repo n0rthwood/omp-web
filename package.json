@@ -46,11 +46,11 @@
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {
-    "@oh-my-pi/pi-agent-core": "~17.3.0",
-    "@oh-my-pi/pi-ai": "~17.3.0",
-    "@oh-my-pi/pi-coding-agent": "~17.3.0",
-    "@oh-my-pi/pi-tui": "~17.3.0",
-    "@oh-my-pi/pi-utils": "~17.3.0",
+    "@oh-my-pi/pi-agent-core": "18.1.16",
+    "@oh-my-pi/pi-ai": "18.1.16",
+    "@oh-my-pi/pi-coding-agent": "18.1.16",
+    "@oh-my-pi/pi-tui": "18.1.16",
+    "@oh-my-pi/pi-utils": "18.1.16",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
@@ -92,6 +92,6 @@
     "typescript": "^5.9.3"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-coding-agent@17.3.0": "patches/@oh-my-pi%2Fpi-coding-agent@17.3.0.patch"
+    "@oh-my-pi/pi-coding-agent@18.1.16": "patches/@oh-my-pi%2Fpi-coding-agent@18.1.16.patch"
   }
 }
