@@ -1,21 +1,21 @@
 diff --git a/src/sdk.ts b/src/sdk.ts
-index 65f3f5acdaa223ef90112d1fe22b586fc2b185b1..a556b4a91ee95ff447fe9734863f96f03c2381c5 100644
+index 4353d352dff8ffa52ce14dc3fafe350d2611d963..fa4fab9b1786bf25ded545d62a0b994e3ac265b2 100644
 --- a/src/sdk.ts
 +++ b/src/sdk.ts
-@@ -1610,7 +1610,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -1739,7 +1739,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			? new AsyncJobManager({ maxRunningJobs: asyncMaxJobs })
  			: undefined;
  
 -	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 +	// A secondary top-level session may share the live singleton once it has
 +	// proved its deliveries are routable: async job delivery sinks are keyed by
-+	// agent id with last-registration-wins (async/job-manager.ts), so two
-+	// sessions both defaulting to MAIN_AGENT_ID would silently steal each
-+	// other's results — that is what issue #1923 guarded against. A caller that
++	// owner agent id (async/job-manager.ts registerDeliverySink), and the
++	// first top-level session installs the process singleton. A caller that
 +	// supplies its own distinct `agentId` (omp-web gives every browser
-+	// conversation one) has no such collision, so it gets working `task`/`bash`
-+	// async paths instead of a forced sync fallback. Callers that do not set
-+	// `agentId` keep the original refuse-async behaviour.
++	// conversation one) registers its own sink and never collides with the
++	// owning session, so it gets working `task`/`bash` async paths instead of
++	// a forced sync fallback. Callers that do not set `agentId` keep the
++	// original refuse-async behaviour (issue #1923).
 +	const canShareAsyncJobManager =
 +		options.parentTaskPrefix !== undefined ||
 +		(options.agentId !== undefined && options.agentId !== MAIN_AGENT_ID);
@@ -24,7 +24,7 @@ index 65f3f5acdaa223ef90112d1fe22b586fc2b185b1..a556b4a91ee95ff447fe9734863f96f0
  
  	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
  	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-@@ -1782,10 +1795,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -1916,10 +1929,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			getTelemetry: () => agent?.telemetry,
  			// Subagents inherit the singleton (the parent's manager) so their bash/task
  			// completions still flow into the spawning conversation's yieldQueue.
@@ -32,10 +32,11 @@ index 65f3f5acdaa223ef90112d1fe22b586fc2b185b1..a556b4a91ee95ff447fe9734863f96f0
 -			// constructed manager because the singleton was already installed) leave
 -			// this undefined so tools and session job snapshots refuse async work
 -			// instead of silently routing into the owning session (issue #1923).
-+			// Secondary in-process top-level sessions share it only when they supplied
-+			// a distinct `agentId` (see `canShareAsyncJobManager` above); without one
-+			// they leave this undefined so tools and session job snapshots refuse async
-+			// work instead of silently routing into the owning session (issue #1923).
++			// Secondary in-process top-level sessions share it only when they
++			// supplied a distinct `agentId` (see `canShareAsyncJobManager` above);
++			// without one they leave this undefined so tools and session job
++			// snapshots refuse async work instead of silently routing into the
++			// owning session (issue #1923).
  			asyncJobManager: scopedAsyncJobManager,
  		};
- 
+ 		let browserPrelude: EvalPreludeDefinition | undefined;
