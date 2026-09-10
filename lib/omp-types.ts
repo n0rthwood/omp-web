@@ -161,8 +161,7 @@ export interface AgentSessionLike {
   readonly promptTemplates: readonly PromptTemplateLike[];
   readonly skills: readonly SkillLike[];
 
-  readonly bindExtensions?: unknown;
-  reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void>;
+  reload(): Promise<void>;
   refreshSkills?(): Promise<void>;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   prompt(text: string, options?: {

@@ -4,7 +4,8 @@ import {
   getAgentDir,
 } from "@oh-my-pi/pi-coding-agent";
 import type { AgentMessage as OmpAgentMessage } from "@oh-my-pi/pi-agent-core";
-import { calculatePromptTokens, estimateTokens, hasContextTokenUsage } from "@oh-my-pi/pi-agent-core/compaction";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { calculatePromptTokens, hasContextTokenUsage } from "@oh-my-pi/pi-agent-core/compaction";
 import { closeSync, openSync, readSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -14,6 +15,10 @@ import { getOmpRuntime } from "./omp-runtime";
 import { normalizeToolCalls } from "./normalize";
 import { sessionPathKey } from "./session-path";
 import { resolveProject, type ProjectInfo } from "./worktree";
+
+// 18.x replaced the standalone estimateTokens() helper with Tokenizer
+// instances; a shared one keeps the per-message memo cache warm across reads.
+const tokenizer = new Tokenizer();
 
 export { getAgentDir };
 
@@ -440,7 +445,7 @@ export async function getHistoricalContextUsage(
   let tailTokens = 0;
   if (anchorIndex >= 0) {
     for (let index = anchorIndex + 1; index < activeMessages.length; index += 1) {
-      tailTokens += estimateTokens(activeMessages[index]);
+      tailTokens += tokenizer.countMessage(activeMessages[index]);
     }
   }
 
