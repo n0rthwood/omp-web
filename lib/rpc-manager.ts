@@ -30,6 +30,12 @@ import { untrustedProjectSessionOptions } from "./project-trust";
 import { readDefaultModelRole } from "./model-roles";
 import { applyConversationRotation } from "./model-rotation";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
+import {
+  applyWebPlanModeTransition,
+  readPersistedPlanModeState,
+  webPlanModeInfo,
+  type ModeChangeEntryLike,
+} from "./plan-mode-web";
 import { PRESET_FULL } from "./tool-presets";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { generateSessionTitle, shouldAutoGenerateTitle } from "./session-title";
@@ -483,27 +489,10 @@ export class AgentSessionWrapper {
   private syncPlanModeFromSession(): void {
     let state = this.inner.getPlanModeState?.();
     if (!state) {
-      const entries = this.inner.sessionManager.getEntries() as Array<{
-        type?: string;
-        mode?: string;
-        data?: Record<string, unknown>;
-      }>;
-      let persistedMode: (typeof entries)[number] | undefined;
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        if (entries[index]?.type !== "mode_change") continue;
-        persistedMode = entries[index];
-        break;
-      }
-      const planFilePath = persistedMode?.data?.planFilePath;
-      if (persistedMode?.mode === "plan" && typeof planFilePath === "string" && planFilePath.length > 0) {
-        state = {
-          enabled: true,
-          planFilePath,
-          workflow: persistedMode.data?.workflow === "sequential" ? "sequential" : "parallel",
-          reentry: true,
-        };
-        this.inner.setPlanModeState?.(state);
-      }
+      state = readPersistedPlanModeState(
+        this.inner.sessionManager.getEntries() as ModeChangeEntryLike[],
+      );
+      if (state) this.inner.setPlanModeState?.(state);
     }
 
     if (state?.enabled) {
@@ -556,6 +545,7 @@ export class AgentSessionWrapper {
       this.inner.setPlanProposalHandler?.(null);
       this.inner.setPlanModeState?.(undefined);
       this.inner.sessionManager.appendModeChange("none");
+      this.emit({ type: "mode_change", mode: "none" });
       return {
         content: [{
           type: "text",
@@ -728,6 +718,9 @@ export class AgentSessionWrapper {
         return null;
 
       case "get_state": {
+        // Plan mode may live only in the session journal (fresh wrapper for a
+        // TUI-planned session); surface it before reading observable state.
+        this.syncPlanModeFromSession();
         const model = this.inner.model;
         const contextUsage = this.inner.getContextUsage();
         return {
@@ -754,6 +747,7 @@ export class AgentSessionWrapper {
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
           subagents: this.getSubagentSnapshots(),
+          planMode: webPlanModeInfo(this.inner),
         };
       }
       case "get_subagents":
@@ -854,6 +848,25 @@ export class AgentSessionWrapper {
         invalidateSessionListCache();
         return null;
       }
+
+      case "set_plan_mode": {
+        // Rehydrate first: on a restarted wrapper the live SDK state is empty
+        // even when the journal still says plan mode, and the toggle must
+        // land on the persisted mode rather than a stale default.
+        this.syncPlanModeFromSession();
+        const planMode = applyWebPlanModeTransition(
+          this.inner,
+          command.enabled === true,
+          (title) => this.handlePlanProposal(title),
+        );
+        this.emit({
+          type: "mode_change",
+          mode: planMode.enabled ? "plan" : "none",
+          ...(planMode.planFilePath ? { planFilePath: planMode.planFilePath } : {}),
+        });
+        return { planMode };
+      }
+
 
       case "compact": {
         try {
