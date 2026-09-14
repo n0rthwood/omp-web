@@ -13,7 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
 import { formatRelativeTime } from "@/lib/i18n/format";
-import { machineStorageKey } from "@/lib/api-path";
+import { apiPath, machineStorageKey } from "@/lib/api-path";
 import { useI18n } from "@/hooks/useI18n";
 import { useMachines } from "@/lib/machine-context";
 import { useSessionList } from "@/lib/session-list-context";
@@ -80,6 +80,31 @@ function saveExpandedProjectGroups(storageKey: string, expandedGroups: Set<strin
   }
 }
 
+function PlusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.1s ease-in-out" }}>
+      <path d="m4 6 4 4 4-4" />
+    </svg>
+  );
+}
+
+function LoaderIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg className="animate-spin" width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 
 export function HomePage() {
   const { locale, t, setLocale, supportedLocales } = useI18n();
@@ -100,10 +125,15 @@ export function HomePage() {
   const [shownAllGroupKeys, setShownAllGroupKeys] = useState<Set<string>>(() => new Set<string>());
   const aggregateGroupRefs = useRef(new Map<string, HTMLElement>());
   const [expandedGroupsStorageKey, setExpandedGroupsStorageKey] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newConvError, setNewConvError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [chooserKey, setChooserKey] = useState<string | null>(null);
 
   const load = useCallback(async (force: boolean) => {
     if (machinesLoading) return;
     const generation = ++loadGenerationRef.current;
+    if (force) setRefreshing(true);
     const results = await Promise.all(
       machines.map(async (machine): Promise<MachineProjects> => {
         const base: MachineProjects = {
@@ -143,7 +173,59 @@ export function HomePage() {
     if (generation !== loadGenerationRef.current) return;
     groupsRef.current = results;
     setGroups(results);
+    setRefreshing(false);
   }, [machines, machinesLoading, fetchSessionsFor]);
+
+  const createConversation = useCallback(
+    async (machineId: string, projectRoot: string, machineName: string) => {
+      setCreating(true);
+      setNewConvError(null);
+      try {
+        const res = await fetch(apiPath("/api/agent/new", machineId), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cwd: projectRoot, type: "ensure_session" }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.success || !data.sessionId) {
+          const reason = data?.error ?? `Request failed (${res.status})`;
+          setNewConvError(t("home.newConversationFailed", { name: machineName, reason }));
+          return;
+        }
+        navigate({ machineId, project: projectRoot, session: data.sessionId }, { history: "push" });
+      } catch (err) {
+        setNewConvError(err instanceof Error ? err.message : "Request failed");
+      } finally {
+        setCreating(false);
+      }
+    },
+    [navigate, t],
+  );
+
+  const setPickerOpen = (key: string | null) => {
+    if (chooserKey === key) return;
+    setChooserKey(key);
+  };
+
+  // Close the New Conversation picker on outside pointer or Escape.
+  useEffect(() => {
+    if (chooserKey === null) return;
+    const onPointer = (event: PointerEvent) => {
+      const ref = aggregateGroupRefs.current.get(chooserKey);
+      const target = event.target as Node;
+      if (ref && ref.contains(target)) return;
+      setChooserKey(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChooserKey(null);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [chooserKey]);
 
   useEffect(() => {
     void load(reloadKey > 0);
@@ -445,17 +527,29 @@ export function HomePage() {
               </div>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => setReloadKey((k) => k + 1)}
-            title={t("home.refresh")}
-            style={{
-              background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text-muted)",
-              cursor: "pointer", height: 28, padding: "0 12px", borderRadius: 7, fontSize: 12.5, flexShrink: 0,
-            }}
-          >
-            {t("home.refresh")}
-          </button>
+            <button
+              type="button"
+              onClick={() => setReloadKey((k) => k + 1)}
+              title={t("home.refresh")}
+              aria-label={t("home.refresh")}
+              disabled={refreshing}
+              style={{
+                background: "var(--bg-hover)",
+                border: "1px solid var(--border)",
+                color: refreshing ? "var(--accent)" : "var(--text-muted)",
+                cursor: refreshing ? "progress" : "pointer",
+                height: 28,
+                padding: refreshing ? 0 : "0 12px",
+                borderRadius: 7,
+                fontSize: 12.5,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              {refreshing ? <LoaderIcon size={16} /> : t("home.refresh")}
+            </button>
         </div>
         <div style={chipRowStyle}>
           {groups?.map((group) => (
@@ -512,7 +606,7 @@ export function HomePage() {
               </button>
             </div>
           ))}
-          {groups === null && <span style={{ color: "var(--text-dim)", fontSize: 12.5 }}>…</span>}
+          {groups === null && <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "8px 0", width: "100%" }}><LoaderIcon size={16} /></span>}
         </div>
         {viewMode === "single-machine" && (
         <div style={{ ...chipRowStyle, marginTop: 6 }}>
@@ -549,6 +643,37 @@ export function HomePage() {
         )}
       </header>
       <main style={{ flex: 1, overflowY: "auto", width: "100%", maxWidth: 1440, margin: "0 auto", padding: "16px 20px 60px" }}>
+        {newConvError && (
+          <div
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              padding: "8px 10px",
+              borderRadius: 7,
+              border: "1px solid var(--danger)",
+              background: "var(--bg-hover)",
+              marginBottom: 16,
+            }}
+          >
+            <span style={{ flex: 1, fontSize: 13, color: "var(--danger)" }}>{newConvError}</span>
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setNewConvError(null)}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 16,
+                lineHeight: 1,
+                padding: 0,
+              }}
+            >×</button>
+          </div>
+        )}
         {viewMode === "aggregate" ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
             <section
@@ -584,7 +709,7 @@ export function HomePage() {
                 </div>
               ) : (
                 <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "12px 0" }}>
-                  {groups === null ? "…" : t("accessNotice.noVisibleSessions")}
+                  {groups === null ? <div style={{ display: "flex", justifyContent: "center" }}><LoaderIcon size={18} /></div> : t("accessNotice.noVisibleSessions")}
                 </div>
               )}
             </section>
@@ -618,6 +743,21 @@ export function HomePage() {
               const isExpanded = expandedGroupKeys?.has(group.key) ?? (group.key === aggregateGroups[0]?.key);
               const isShowingAll = shownAllGroupKeys.has(group.key);
               const contentId = `home-project-group-${encodeURIComponent(group.key)}`;
+              const pairKeys = new Set<string>();
+              const pairs: {
+                machineId: string;
+                machineName: string;
+                machineOffline: boolean;
+                projectRoot: string;
+              }[] = [];
+              for (const s of group.sessions) {
+                const key = `${s.machineId}\u0000${s.projectRoot}`;
+                if (pairKeys.has(key)) continue;
+                pairKeys.add(key);
+                pairs.push({ machineId: s.machineId, machineName: s.machineName, machineOffline: s.machineOffline, projectRoot: s.projectRoot });
+              }
+              pairs.sort((a, b) => a.machineName.localeCompare(b.machineName));
+              const ncTarget = `${pairs[0].machineName} · ${pairs[0].projectRoot}`;
               return (
                 <section
                   key={group.key}
@@ -629,7 +769,7 @@ export function HomePage() {
                   style={{ scrollMarginTop: 16 }}
                 >
                   <div style={{ marginBottom: isExpanded ? 8 : 0 }}>
-                    <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+                    <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "baseline", position: "relative" }}>
                       <button
                         type="button"
                         onClick={() => toggleAggregateGroup(group.key)}
@@ -650,7 +790,9 @@ export function HomePage() {
                           textAlign: "left",
                         }}
                       >
-                        <span>{group.displayName}</span>
+                        <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {group.displayName}
+                        </span>
                         <span style={{ fontSize: 11.5, fontWeight: 400, color: "var(--text-dim)" }}>
                           {t("home.sessionCount", { count: String(group.sessions.length) })}
                           {group.machineCount > 1 && <> · {t("home.machineCountLabel", { count: String(group.machineCount) })}</>}
@@ -670,6 +812,103 @@ export function HomePage() {
                           <path d="m3 6 5 5 5-5" />
                         </svg>
                       </button>
+                      <div style={{ flex: 1 }} />
+                      <div style={{ position: "relative", display: "inline-flex", flexShrink: 0, marginLeft: 8 }}>
+                        <button
+                          type="button"
+                          disabled={creating || (pairs.length === 1 && pairs[0].machineOffline)}
+                          title={pairs.length === 1 ? ncTarget : t("home.newConversation")}
+                          aria-label={pairs.length === 1 ? ncTarget : t("home.newConversation")}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (pairs.length === 1) {
+                              if (pairs[0].machineOffline) return;
+                              void createConversation(pairs[0].machineId, pairs[0].projectRoot, pairs[0].machineName);
+                            } else {
+                              setPickerOpen(chooserKey === group.key ? null : group.key);
+                            }
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            height: 24,
+                            padding: "0 10px",
+                            fontSize: 12,
+                            fontWeight: 500,
+                            borderRadius: 6,
+                            border: "1px solid var(--border)",
+                            background: "var(--bg-hover)",
+                            color: "var(--accent)",
+                            cursor: creating ? "progress" : "pointer",
+                          }}
+                        >
+                          {creating ? <LoaderIcon size={12} /> : <PlusIcon />}
+                          <span>{t("home.newConversation")}</span>
+                          {pairs.length > 1 && <ChevronIcon open={chooserKey === group.key} />}
+                        </button>
+                        {pairs.length > 1 && chooserKey === group.key && (
+                          <div
+                            role="menu"
+                            style={{
+                              position: "absolute",
+                              top: "110%",
+                              right: 0,
+                              zIndex: 20,
+                              minWidth: 300,
+                              maxWidth: "46vw",
+                              background: "var(--bg-panel)",
+                              border: "1px solid var(--border)",
+                              borderRadius: 8,
+                              boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+                              padding: 6,
+                              overflowY: "auto",
+                            }}
+                          >
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", padding: "2px 6px 6px" }}>
+                              {t("home.newConversationChoose")}
+                            </div>
+                            {pairs.map((pair) => (
+                              <button
+                                key={`${pair.machineId}\u0000${pair.projectRoot}`}
+                                type="button"
+                                role="menuitem"
+                                disabled={creating || pair.machineOffline}
+                          title={`${pair.machineName} · ${pair.projectRoot}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setPickerOpen(null);
+                                  void createConversation(pair.machineId, pair.projectRoot, pair.machineName);
+                                }}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  border: "none",
+                                  borderRadius: 6,
+                                  background: "transparent",
+                                  color: "inherit",
+                                  cursor: creating || pair.machineOffline ? "progress" : "pointer",
+                                  textAlign: "left",
+                                  fontSize: 13,
+                                }}
+                              >
+                                <span style={{ color: pair.machineOffline ? "var(--danger)" : "var(--accent)", flexShrink: 0, fontWeight: 500 }}>＋</span>
+                                <span style={{ flex: "0 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
+                                  {pair.machineName}
+                                  {pair.machineOffline && <> · {t("home.machineOffline")}</>}
+                                </span>
+                                <span style={{ flexShrink: 0, color: "var(--text-dim)", marginLeft: 4 }}>·</span>
+                                <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>
+                                  {pair.projectRoot}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </h2>
                   </div>
                   <div id={contentId}>
@@ -726,7 +965,7 @@ export function HomePage() {
             })}
             {aggregateGroups.length === 0 && (
               <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
-                {groups === null ? "…" : t("home.aggregateEmpty")}
+                {groups === null ? <div style={{ display: "flex", justifyContent: "center" }}><LoaderIcon size={18} /></div> : t("home.aggregateEmpty")}
               </div>
             )}
           </div>
@@ -739,7 +978,7 @@ export function HomePage() {
           />
         ) : (
           <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
-            {groups === null ? "…" : t("home.noProjects")}
+            {groups === null ? <div style={{ display: "flex", justifyContent: "center" }}><LoaderIcon size={18} /></div> : t("home.noProjects")}
           </div>
         )}
       </main>

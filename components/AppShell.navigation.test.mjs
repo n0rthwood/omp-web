@@ -161,6 +161,27 @@ test("Home ignores superseded session-list fan-out results", () => {
   assert.match(homePageSource, /if \(generation !== loadGenerationRef\.current\) return;\s*groupsRef\.current = results;\s*setGroups\(results\);/);
 });
 
+// issue #67: the aggregate-group "New Conversation" control must identify
+// exactly where a new session will be created — the target machine and its
+// project path — rather than a bare generic label, so that two roots on one
+// machine sharing a basename are still unambiguous.
+test("issue #67: the NC button target and every chooser row identify machineName · projectRoot (full path)", () => {
+  // Single-pair target is machineName · projectRoot (full path, not a basename).
+  assert.ok(homePageSource.includes("const ncTarget = \x60${pairs[0].machineName} · ${pairs[0].projectRoot}\x60;"));
+  // The single-pair button's tooltip resolves to that full target.
+  assert.ok(homePageSource.includes('title={pairs.length === 1 ? ncTarget : t("home.newConversation")}'));
+  // ...and its accessible name too.
+  assert.ok(homePageSource.includes('aria-label={pairs.length === 1 ? ncTarget : t("home.newConversation")}'));
+  // Each chooser row preserves the full path in its menu-item title.
+  assert.ok(homePageSource.includes('title=\{\x60${pair.machineName} · ${pair.projectRoot}\x60\}'));
+  // The row renders machineName and the full projectRoot as separate spans,
+  // joined by a literal "·" separator span (dim, with left margin).
+  assert.ok(homePageSource.includes('{pair.machineName}'));
+  assert.ok(homePageSource.includes('{pair.projectRoot}'));
+  assert.ok(homePageSource.includes(`color: "var(--text-dim)", marginLeft: 4`));
+  assert.ok(homePageSource.includes(`{pair.machineOffline && <> · {t("home.machineOffline")}</>}`));
+});
+
 test("blocker #3: session-completion notifications build their URL via buildUrl with the session's own machine id, not a bare legacy '?session=' query", () => {
   const notificationBody = callbackBody("deliverSessionNotification", "handleAgentEnd");
   assert.match(
