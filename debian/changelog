@@ -1,3 +1,31 @@
+omp-web (0.5.7) jammy; urgency=medium
+
+  * Full Plan mode support for web sessions (closes #68). The browser
+    composer now always shows the session's mode (Execute / Plan mode,
+    with the plan file) as a toggle, entering and exiting through a new
+    `set_plan_mode` agent command that mirrors the SDK's ACP mode-change
+    semantics: it sets or clears `PlanModeState`, installs the plan-
+    proposal handler, and persists a `mode_change` journal entry so the
+    mode survives wrapper restarts and restores correctly for sessions
+    planned in the TUI and opened in the web (session detail derives the
+    mode from the journal when no live wrapper exists).
+  * Typing `/plan` in the web is now handled as a built-in with TUI
+    toggle semantics (trailing text becomes the first planning prompt)
+    and never falls through to the model as a plain prompt. Plan mode's
+    read-only guarantee and the plan-review flow are enforced by the SDK
+    from `PlanModeState` alone; the existing plan-review dialog keeps
+    serving refine/approve, and approval exits plan mode and starts
+    implementation, with the transition broadcast to every connected
+    browser over SSE (`mode_change` events, also mirrored in
+    `get_state`). Entry is gated by the `plan.enabled` setting with an
+    explicit error and a disabled toggle.
+  * Regression coverage in lib/plan-mode-web.test.mjs for mode
+    transitions, the settings gate, TUI↔Web journal restore, and `/plan`
+    intent parsing; verified end-to-end live (toggle, `/plan`, cold
+    restore, and a full plan → review → approve → implement cycle).
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 14 Sep 2026 13:20:33 +0000
+
 omp-web (0.5.6) jammy; urgency=medium
 
   * Home: "New Conversation" button on every per-project group header.
