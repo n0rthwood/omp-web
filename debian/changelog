@@ -1,3 +1,20 @@
+omp-web (0.5.6) jammy; urgency=medium
+
+  * Home: "New Conversation" button on every per-project group header.
+    A group targeting a single (machine, project) pair starts the
+    conversation directly; a group spanning several opens a dismissible
+    inline picker listing each pair as "machine · full project root",
+    so same-basename projects stay unambiguous. Offline targets are
+    disabled and marked; failures surface a dismissible alert (#67).
+
+  * Home: loading spinners (inline SVG arcs) replace the four "..."
+    placeholders — machine chip row, recent activity, aggregate-empty
+    and single-machine fallback — on first load and on refresh; the
+    Refresh button is disabled and spinning while a forced reload is
+    in flight (#67).
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 14 Sep 2026 06:45:00 +0000
+
 omp-web (0.5.5) jammy; urgency=medium
 
   * Open tabs now detect backend upgrades. A tab periodically compares the
