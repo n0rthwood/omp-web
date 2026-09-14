@@ -80,6 +80,9 @@ interface Props {
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
+  /** Current session mode (plan mode vs normal execution) and toggle. */
+  planMode?: { enabled: boolean; planFilePath?: string; available: boolean } | null;
+  onSetPlanMode?: (enabled: boolean) => void;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
@@ -437,6 +440,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
+  planMode, onSetPlanMode,
   soundEnabled, onSoundToggle, onAudioUnlock,
   onPromptWithStreamingBehavior,
   draftKey,
@@ -912,6 +916,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
     : null;
+
+  const planModeEnabled = planMode?.enabled ?? false;
+  const planModeAvailable = planMode?.available ?? true;
+  const planModePlanFile = planModeEnabled ? planMode?.planFilePath : undefined;
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
@@ -2198,6 +2206,49 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </button>
           )}
           </div>
+        </div>
+
+        {/* Session mode indicator: execution ↔ plan mode toggle (issue #68) */}
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => onSetPlanMode?.(!planModeEnabled)}
+            disabled={!onSetPlanMode || !planModeAvailable}
+            aria-pressed={planModeEnabled}
+            title={!planModeAvailable
+              ? t("chat.planModeUnavailable")
+              : planModeEnabled ? t("chat.planModeExitHint") : t("chat.planModeEnterHint")}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 10px",
+              border: `1px solid ${planModeEnabled ? "color-mix(in srgb, var(--accent) 45%, transparent)" : "var(--border)"}`,
+              borderRadius: 999,
+              background: planModeEnabled ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "none",
+              color: planModeEnabled ? "var(--accent)" : "var(--text-muted)",
+              fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
+              cursor: onSetPlanMode && planModeAvailable ? "pointer" : "not-allowed",
+              opacity: planModeAvailable ? 1 : 0.55,
+              transition: "background 0.12s, color 0.12s, border-color 0.12s",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6, height: 6, borderRadius: 999, flexShrink: 0,
+                background: planModeEnabled ? "var(--accent)" : "var(--text-muted)",
+                boxShadow: planModeEnabled ? "0 0 6px color-mix(in srgb, var(--accent) 60%, transparent)" : "none",
+              }}
+            />
+            {planModeEnabled ? t("chat.planModeOn") : t("chat.modeExecute")}
+          </button>
+          {planModePlanFile && (
+            <span
+              style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}
+              title={planModePlanFile}
+            >
+              {planModePlanFile.split("/").pop()}
+            </span>
+          )}
         </div>
 
         {/* Bash mode status label */}

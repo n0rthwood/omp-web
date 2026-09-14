@@ -20,6 +20,7 @@ import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { ContextUsage, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
+import { planSlashCommandIntent, type WebPlanModeInfo } from "@/lib/plan-mode-web";
 
 export interface SessionData {
   sessionId: string;
@@ -28,6 +29,7 @@ export interface SessionData {
   tree: SessionTreeNode[];
   leafId: string | null;
   contextUsage?: ContextUsage;
+  planMode?: WebPlanModeInfo;
   context: {
     messages: AgentMessage[];
     entryIds: string[];
@@ -87,6 +89,7 @@ type AgentStateResponse = {
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
   subagents?: SubagentSnapshot[];
+  planMode?: WebPlanModeInfo | null;
 };
 
 export interface QueuedMessages {
@@ -408,7 +411,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const [subagents, setSubagents] = useState<SubagentSnapshot[]>([]);
-
+  const [planMode, setPlanMode] = useState<WebPlanModeInfo | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventSourceSessionIdRef = useRef<string | null>(null);
   const eventConnectionAttemptRef = useRef<EventStreamConnectionAttempt | null>(null);
@@ -505,10 +508,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
       setData(d);
-      setActiveLeafId(d.leafId);
+      setContextUsage(d.contextUsage ?? null);
+      setPlanMode(d.planMode ?? null);
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
-      setContextUsage(d.contextUsage ?? null);
+      setPlanMode(d.planMode ?? null);
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
@@ -532,6 +536,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
+          if (liveState.planMode !== undefined) setPlanMode(liveState.planMode ?? null);
           if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
           if (liveState.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, liveState.subagents ?? []));
         } else if (!agentState.running) {
@@ -1076,6 +1081,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
       if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
       setSubagents((current) => mergeSubagentSnapshots(current, state?.subagents ?? []));
+      if (state?.planMode !== undefined) setPlanMode(state.planMode ?? null);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
@@ -1178,6 +1184,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
               if (d.state?.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, d.state?.subagents ?? []));
+              if (d.state?.planMode !== undefined) setPlanMode(d.state.planMode ?? null);
               // Aborted turns can leave messages queued in pi (delivered with the
               // next turn); dead wrapper (no state) means the queue is gone.
               setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
@@ -1223,6 +1230,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "prompt_error":
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
         break;
+      case "mode_change": {
+        // Server-side transitions (toggle, /plan, plan approval) push the new
+        // mode so every open browser tab follows without waiting for a poll.
+        const enabled = event.mode === "plan";
+        const planFilePath = typeof event.planFilePath === "string" ? event.planFilePath : undefined;
+        setPlanMode((prev) => ({
+          enabled,
+          ...(planFilePath ? { planFilePath } : {}),
+          available: prev?.available ?? true,
+        }));
+        break;
+      }
       case "session_renamed": {
         const title = event.title as string | undefined;
         const eventSessionId = event.sessionId as string | undefined;
@@ -1756,6 +1775,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, newSessionCwd, session?.cwd]);
 
+  // Enter/exit plan mode through the server's ACP-semantics transition. Both
+  // the composer toggle and `/plan` call this — the same path, never a prompt.
+  const handleSetPlanMode = useCallback(async (enabled: boolean): Promise<boolean> => {
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) {
+      addNotice({ type: "error", message: "No active session" });
+      return false;
+    }
+    try {
+      const result = await sendAgentCommand<{ planMode?: WebPlanModeInfo }>(sid, {
+        type: "set_plan_mode",
+        enabled,
+      });
+      if (result?.planMode) setPlanMode(result.planMode);
+      return true;
+    } catch (e) {
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  }, [addNotice, ensureNewSession]);
+
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -1829,6 +1869,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: "Copied last assistant message" });
         }
 
+        case "plan": {
+          // Web-native /plan: route through the same set_plan_mode transition
+          // as the composer toggle instead of falling back to a model prompt.
+          const intent = planSlashCommandIntent(text, planMode?.enabled ?? false);
+          if (!intent) return { handled: false };
+          const toggled = await handleSetPlanMode(intent.enabled);
+          if (!toggled) return { handled: true };
+          return complete({
+            handled: true,
+            ...(intent.prompt ? { prompt: intent.prompt } : {}),
+            message: intent.enabled ? "Plan mode enabled" : "Plan mode disabled",
+          });
+        }
+
         default: {
           if (!sid) return complete({ handled: true, error: "No active session" });
           const result = await sendAgentCommand<{
@@ -1852,7 +1906,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, appendCommandOutput, ensureNewSession, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, appendCommandOutput, ensureNewSession, handleSetPlanMode, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, planMode, promoteNewSession, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -2030,6 +2084,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
           if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
           if (state.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, state.subagents ?? []));
+          if (state.planMode !== undefined) setPlanMode(state.planMode ?? null);
         }
       });
     }
@@ -2137,7 +2192,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, subagents,
+    slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
@@ -2148,7 +2203,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
-    handleBuiltinSlashCommand,
+    handleBuiltinSlashCommand, handleSetPlanMode,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     uploadSessionFiles,
     dispatch, setAgentRunning, setForkingEntryId,

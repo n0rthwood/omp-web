@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { planModeInfoFromEntries, webPlanModeInfo } from "@/lib/plan-mode-web";
+import { sessionPathKey } from "@/lib/session-path";
 import {
   resolveSessionPath,
   resolveSessionIdByPath,
@@ -11,7 +13,6 @@ import {
   getHistoricalContextUsage,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { requireVisibleSession } from "@/lib/web-session-guard";
@@ -72,6 +73,12 @@ export async function GET(
       transient: !filePath || !existsSync(filePath),
     } : null;
 
+    // Plan mode display must survive the TUI↔Web boundary: a TUI-planned
+    // session opened in the web has no live wrapper yet, so derive the mode
+    // from the journal when the in-process session is absent.
+    const planMode = liveRpc
+      ? webPlanModeInfo(liveRpc.inner)
+      : planModeInfoFromEntries(entries);
     return NextResponse.json({
       sessionId: id,
       filePath,
@@ -80,6 +87,7 @@ export async function GET(
       tree,
       context,
       totalActiveMs,
+      planMode,
       ...(contextUsage ? { contextUsage } : {}),
     });
   } catch (error) {
