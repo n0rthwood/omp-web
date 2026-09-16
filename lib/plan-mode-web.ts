@@ -163,3 +163,38 @@ export function planSlashCommandIntent(
   const prompt = (match[2] ?? "").trim();
   return prompt ? { enabled: true, prompt } : { enabled: true };
 }
+
+/**
+ * Translate a failed `set_plan_mode` transition into an actionable message.
+ * A fleet remote still running omp-web ≤ 0.5.6 has no `set_plan_mode`
+ * command and answers HTTP 500 "Unsupported command: set_plan_mode" (the
+ * machine proxy passes status and body through unchanged); surfacing that
+ * rawly is neither understandable nor actionable for the operator.
+ */
+export function planModeTransitionErrorMessage(rawMessage: string): string {
+  if (/Unsupported command:\s*["']?set_plan_mode/i.test(rawMessage)) {
+    return "Plan mode is not supported by this machine's omp-web — it rejected the mode-change command. Upgrade that machine's omp-web to 0.5.7 or newer, then retry.";
+  }
+  return rawMessage;
+}
+
+/**
+ * Failure contract for the web `/plan` builtin (issue #68 follow-up): a
+ * failed transition MUST return `error` so the composer keeps the unsent
+ * text and dispatches nothing; only a successful transition clears the
+ * input (optionally dispatching the trailing prompt as the first planning
+ * turn). Encoded here so the regression test can pin the contract.
+ */
+export function planSlashCommandOutcome(
+  intent: { enabled: boolean; prompt?: string },
+  transitionError: string | null,
+): { handled: true; error?: string; prompt?: string; message?: string } {
+  if (transitionError !== null) {
+    return { handled: true, error: transitionError };
+  }
+  return {
+    handled: true,
+    ...(intent.prompt ? { prompt: intent.prompt } : {}),
+    message: intent.enabled ? "Plan mode enabled" : "Plan mode disabled",
+  };
+}
