@@ -1,3 +1,27 @@
+omp-web (0.5.8) jammy; urgency=medium
+
+  * Plan-mode transition failures no longer discard the composer
+    (issue #68 follow-up). A fleet remote still on omp-web 0.5.6 has no
+    `set_plan_mode` command and answers HTTP 500 through the machine
+    proxy; the `/plan` builtin treated that failure as a handled
+    success, so the optimistic input clear silently dropped the
+    composed text with nothing sent. The mode transition now returns
+    its error through the slash-command contract, so the draft stays in
+    the input, nothing is dispatched to the model, and only a
+    successful transition clears the input (a trailing prompt still
+    ships as the first planning turn on success). The composer toggle
+    and `/plan` share this single request/error path.
+  * Unsupported-command rejections are mapped to an actionable notice
+    ("Plan mode is not supported by this machine's omp-web — upgrade it
+    to 0.5.7 or newer") instead of the raw 500 body. Regression tests
+    pin the failure contract (error result, no prompt, no success
+    message) and the message mapping; both failure shapes — remote 500
+    passthrough for `/plan` with trailing text and a toggle click with a
+    live draft — were verified in the browser to preserve the composer
+    verbatim.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 16 Sep 2026 16:27:01 +0000
+
 omp-web (0.5.7) jammy; urgency=medium
 
   * Full Plan mode support for web sessions (closes #68). The browser
