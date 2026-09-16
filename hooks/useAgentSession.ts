@@ -20,7 +20,7 @@ import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { ContextUsage, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
-import { planSlashCommandIntent, type WebPlanModeInfo } from "@/lib/plan-mode-web";
+import { planModeTransitionErrorMessage, planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
 
 export interface SessionData {
   sessionId: string;
@@ -1777,11 +1777,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Enter/exit plan mode through the server's ACP-semantics transition. Both
   // the composer toggle and `/plan` call this — the same path, never a prompt.
-  const handleSetPlanMode = useCallback(async (enabled: boolean): Promise<boolean> => {
+  // Returns null on success, or the (already noticed) error message: callers
+  // must treat a failed transition as an error so the composer keeps the
+  // unsent text (issue #68 follow-up: remote 0.5.6 lacks set_plan_mode and
+  // answers HTTP 500; a "handled" success would silently clear the draft).
+  const handleSetPlanMode = useCallback(async (enabled: boolean): Promise<string | null> => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
     if (!sid) {
-      addNotice({ type: "error", message: "No active session" });
-      return false;
+      const message = "No active session";
+      addNotice({ type: "error", message });
+      return message;
     }
     try {
       const result = await sendAgentCommand<{ planMode?: WebPlanModeInfo }>(sid, {
@@ -1789,12 +1794,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         enabled,
       });
       if (result?.planMode) setPlanMode(result.planMode);
-      return true;
+      return null;
     } catch (e) {
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
+      const message = planModeTransitionErrorMessage(e instanceof Error ? e.message : String(e));
+      addNotice({ type: "error", message });
+      return message;
     }
   }, [addNotice, ensureNewSession]);
+
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -1874,13 +1881,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // as the composer toggle instead of falling back to a model prompt.
           const intent = planSlashCommandIntent(text, planMode?.enabled ?? false);
           if (!intent) return { handled: false };
-          const toggled = await handleSetPlanMode(intent.enabled);
-          if (!toggled) return { handled: true };
-          return complete({
-            handled: true,
-            ...(intent.prompt ? { prompt: intent.prompt } : {}),
-            message: intent.enabled ? "Plan mode enabled" : "Plan mode disabled",
-          });
+          // A failed transition must surface as an error so ChatInput keeps
+          // the composer text and dispatches nothing — only a successful
+          // transition clears the input (issue #68 follow-up).
+          const transitionError = await handleSetPlanMode(intent.enabled);
+          return planSlashCommandOutcome(intent, transitionError);
         }
 
         default: {
