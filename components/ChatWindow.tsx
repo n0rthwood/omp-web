@@ -21,7 +21,7 @@ import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantB
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { OmpWordmark } from "./OmpWordmark";
 import { useI18n } from "@/hooks/useI18n";
@@ -226,7 +226,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, subagents,
+    slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
     agentPhase,
@@ -235,7 +235,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
-    handleBuiltinSlashCommand,
+    handleBuiltinSlashCommand, handleSetPlanMode,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, uploadSessionFiles,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed,
@@ -336,8 +336,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
-    const images = files.filter((f) => f.type.startsWith("image/"));
-    const others = files.filter((f) => !f.type.startsWith("image/"));
+    // `type` can be empty for images from some file managers; route on the same
+    // rule the composer uses so they never land on the text-upload path (#69).
+    const images = files.filter((f) => resolveImageMimeType(f) !== null);
+    const others = files.filter((f) => resolveImageMimeType(f) === null);
     if (images.length) chatInputRef?.current?.addImages(images);
     if (others.length) chatInputRef?.current?.addFiles(others);
   }, [sessionBusy, chatInputRef]);
@@ -420,6 +422,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
+      planMode={planMode}
+      onSetPlanMode={handleSetPlanMode}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}

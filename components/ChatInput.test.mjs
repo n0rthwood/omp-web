@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages, buildImageAttachErrorMessage } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages, buildImageAttachErrorMessage, resolveImageMimeType } = await jiti.import("./ChatInput.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const { MAX_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES } = await jiti.import("../lib/image-attachments.ts");
@@ -327,4 +327,16 @@ test("truncates a long list of rejected file names", () => {
 test("translates the image attachment rejection message into zh-CN", () => {
   const message = buildImageAttachErrorMessage(t("zh-CN"), ["photo.jpg"], [], 0);
   assert.match(message, /已跳过 1 张超过 10MB 的图片：photo\.jpg/);
+});
+
+test("classifies attachments as images even when the picker reports no media type", () => {
+  // `File.type` wins when present.
+  assert.equal(resolveImageMimeType({ name: "shot.png", type: "image/png" }), "image/png");
+  assert.equal(resolveImageMimeType({ name: "notes.txt", type: "text/plain" }), null);
+  // Empty type: the extension is the only signal. Before this, a typeless
+  // image was routed to the text uploader and rejected as binary (#69).
+  assert.equal(resolveImageMimeType({ name: "IMG_0421.JPG", type: "" }), "image/jpeg");
+  assert.equal(resolveImageMimeType({ name: "scan.heic", type: "" }), "image/heic");
+  assert.equal(resolveImageMimeType({ name: "archive.zip", type: "" }), null);
+  assert.equal(resolveImageMimeType({ name: "README", type: "" }), null);
 });

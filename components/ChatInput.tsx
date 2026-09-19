@@ -80,6 +80,9 @@ interface Props {
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
+  /** Current session mode (plan mode vs normal execution) and toggle. */
+  planMode?: { enabled: boolean; planFilePath?: string; available: boolean } | null;
+  onSetPlanMode?: (enabled: boolean) => void;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
@@ -119,6 +122,32 @@ const TEXT_UPLOAD_ACCEPT = [
   ".php", ".swift", ".m", ".mm", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".sql", ".graphql",
   ".proto", ".dockerfile", ".editorconfig", ".gitignore", ".diff", ".patch", ".lock",
 ].join(",");
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+};
+
+/**
+ * The image media type to attach `file` as, or null when it is not an image.
+ *
+ * `File.type` is authoritative when present, but several pickers and clipboard
+ * sources hand over an image with an empty type; the extension is then the only
+ * signal, and without it the file is misrouted to the text-upload path (#69).
+ */
+export function resolveImageMimeType(file: { name: string; type: string }): string | null {
+  if (file.type.startsWith("image/")) return file.type;
+  if (file.type) return null;
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_MIME_BY_EXTENSION[extension] ?? null;
+}
 
 function formatUploadSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -437,6 +466,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
+  planMode, onSetPlanMode,
   soundEnabled, onSoundToggle, onAudioUnlock,
   onPromptWithStreamingBehavior,
   draftKey,
@@ -504,6 +534,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const pendingImagesRef = useRef<Promise<void> | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
@@ -741,66 +772,88 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
   }, [onUploadFiles, t, insertTextAtCursor, showUploadError, isStreaming]);
 
-  const processImageFiles = useCallback(async (files: File[]) => {
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
-    );
-    const validFiles: File[] = [];
-    const tooLarge: string[] = [];
-    const unsupported: string[] = [];
-    for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        unsupported.push(file.name);
-      } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
-        tooLarge.push(file.name);
-      } else {
-        validFiles.push(file);
-      }
-    }
-    const imageFiles = validFiles.slice(0, remaining);
-    const truncatedCount = validFiles.length - imageFiles.length;
-
-    if (imageAttachErrorTimerRef.current) {
-      clearTimeout(imageAttachErrorTimerRef.current);
-      imageAttachErrorTimerRef.current = null;
-    }
-    const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
-    setImageAttachError(errorMessage);
-    if (errorMessage) {
-      imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
-    }
-
-    if (!imageFiles.length) return;
-    pendingImageCountRef.current += imageFiles.length;
-    try {
-      const newImages = await Promise.all(
-        imageFiles.map(
-          (file) =>
-            new Promise<AttachedImage>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result as string;
-                // result is "data:<mime>;base64,<data>"
-                const base64 = result.split(",")[1];
-                resolve({ data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) });
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
+  const processImageFiles = useCallback((files: File[]): Promise<void> => {
+    const work = (async () => {
+      const remaining = Math.max(
+        0,
+        MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
       );
-      setAttachedImages((prev) => {
-        const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
-        newImages.slice(accepted.length).forEach(revokeImagePreview);
-        const next = [...prev, ...accepted];
-        attachedImagesRef.current = next;
-        return next;
-      });
-    } finally {
-      pendingImageCountRef.current -= imageFiles.length;
-    }
+      const validFiles: Array<{ file: File; mimeType: string }> = [];
+      const tooLarge: string[] = [];
+      const unsupported: string[] = [];
+      for (const file of files) {
+        // Some pickers (Android share sheets, a few clipboard sources) hand over
+        // an image with an empty `type`. Falling back to the extension keeps it
+        // on the image path instead of silently classifying it unsupported.
+        const mimeType = resolveImageMimeType(file);
+        if (!mimeType) {
+          unsupported.push(file.name);
+        } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
+          tooLarge.push(file.name);
+        } else {
+          validFiles.push({ file, mimeType });
+        }
+      }
+      const imageFiles = validFiles.slice(0, remaining);
+      const truncatedCount = validFiles.length - imageFiles.length;
+
+      if (imageAttachErrorTimerRef.current) {
+        clearTimeout(imageAttachErrorTimerRef.current);
+        imageAttachErrorTimerRef.current = null;
+      }
+      const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
+      setImageAttachError(errorMessage);
+      if (errorMessage) {
+        imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
+      }
+
+      if (!imageFiles.length) return;
+      pendingImageCountRef.current += imageFiles.length;
+      try {
+        const newImages = await Promise.all(
+          imageFiles.map(
+            ({ file, mimeType }) =>
+              new Promise<AttachedImage>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const result = reader.result as string;
+                  // result is "data:<mime>;base64,<data>"
+                  const base64 = result.split(",")[1];
+                  resolve({ data: base64, mimeType, previewUrl: URL.createObjectURL(file) });
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              })
+          )
+        );
+        setAttachedImages((prev) => {
+          const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
+          newImages.slice(accepted.length).forEach(revokeImagePreview);
+          const next = [...prev, ...accepted];
+          attachedImagesRef.current = next;
+          return next;
+        });
+      } finally {
+        pendingImageCountRef.current -= imageFiles.length;
+      }
+    })();
+
+    // Reading an attachment is asynchronous, so Enter pressed right after
+    // picking one used to dispatch a text-only prompt and drop the image
+    // without any error (#69). Senders await this handle instead.
+    pendingImagesRef.current = work;
+    void work.catch(() => {}).finally(() => {
+      if (pendingImagesRef.current === work) pendingImagesRef.current = null;
+    });
+    return work;
   }, [t]);
+
+  /** Resolves once no attachment is still being read, so a send never races one. */
+  const waitForPendingImages = useCallback(async () => {
+    while (pendingImagesRef.current) {
+      await pendingImagesRef.current.catch(() => {});
+    }
+  }, []);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -891,11 +944,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
     if (isStreaming) return;
     if (uploadingFilesRef.current) return;
+    // An attachment picked moments ago may still be decoding; sending now would
+    // drop it silently (#69). Wait for it, then read the settled attachments.
+    if (pendingImagesRef.current) await waitForPendingImages();
+    const images = attachedImagesRef.current;
+    if (!msg && !images.length) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
+    if (!images.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error) {
@@ -906,12 +963,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
     clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+    onSend(msg, images.length ? images : undefined);
+  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, waitForPendingImages]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
     : null;
+
+  const planModeEnabled = planMode?.enabled ?? false;
+  const planModeAvailable = planMode?.available ?? true;
+  const planModePlanFile = planModeEnabled ? planMode?.planFilePath : undefined;
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
@@ -1130,25 +1191,31 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
-    if (attachedImages.length) return;
     if (uploadingFilesRef.current) return;
+    // Same race as handleSend: a still-decoding attachment must not turn a
+    // queued message into a text-only send (#69).
+    if (pendingImagesRef.current) await waitForPendingImages();
+    const images = attachedImagesRef.current;
+    if (!msg && !images.length) return;
+    // Queued (steer/follow-up) messages cannot carry images; the composer keeps
+    // them until the turn ends rather than dropping them.
+    if (images.length) return;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
+      onPromptWithStreamingBehavior(msg, streamingBehavior);
       return;
     }
     clearInput();
     if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
+      onSteer(msg);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
+      onFollowUp(msg);
     }
-  }, [value, attachedImages, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock]);
+  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, waitForPendingImages]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -1326,18 +1393,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    const fileItems = items.filter((item) => item.kind === "file" && !item.type.startsWith("image/"));
-    if (!imageItems.length && !fileItems.length) return;
+    const fileItems = items.filter((item) => item.kind === "file");
+    const nonFileImageItems = items.filter((item) => item.kind !== "file" && item.type.startsWith("image/"));
+    if (!fileItems.length && !nonFileImageItems.length) return;
     e.preventDefault();
-    if (imageItems.length) {
-      const imageFiles = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-      processImageFiles(imageFiles);
+    // Split on the resolved media type, not the raw one: a clipboard image can
+    // arrive with an empty `type` and must not reach the text uploader (#69).
+    const imageFiles: File[] = [];
+    const textFiles: File[] = [];
+    for (const item of [...nonFileImageItems, ...fileItems]) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      if (resolveImageMimeType(file) !== null) imageFiles.push(file);
+      else textFiles.push(file);
     }
-    if (fileItems.length) {
-      const textFiles = fileItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-      uploadTextFiles(textFiles);
-    }
+    if (imageFiles.length) processImageFiles(imageFiles);
+    if (textFiles.length) uploadTextFiles(textFiles);
   }, [processImageFiles, uploadTextFiles]);
 
   useEffect(() => {
@@ -2198,6 +2269,49 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </button>
           )}
           </div>
+        </div>
+
+        {/* Session mode indicator: execution ↔ plan mode toggle (issue #68) */}
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => onSetPlanMode?.(!planModeEnabled)}
+            disabled={!onSetPlanMode || !planModeAvailable}
+            aria-pressed={planModeEnabled}
+            title={!planModeAvailable
+              ? t("chat.planModeUnavailable")
+              : planModeEnabled ? t("chat.planModeExitHint") : t("chat.planModeEnterHint")}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 10px",
+              border: `1px solid ${planModeEnabled ? "color-mix(in srgb, var(--accent) 45%, transparent)" : "var(--border)"}`,
+              borderRadius: 999,
+              background: planModeEnabled ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "none",
+              color: planModeEnabled ? "var(--accent)" : "var(--text-muted)",
+              fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
+              cursor: onSetPlanMode && planModeAvailable ? "pointer" : "not-allowed",
+              opacity: planModeAvailable ? 1 : 0.55,
+              transition: "background 0.12s, color 0.12s, border-color 0.12s",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6, height: 6, borderRadius: 999, flexShrink: 0,
+                background: planModeEnabled ? "var(--accent)" : "var(--text-muted)",
+                boxShadow: planModeEnabled ? "0 0 6px color-mix(in srgb, var(--accent) 60%, transparent)" : "none",
+              }}
+            />
+            {planModeEnabled ? t("chat.planModeOn") : t("chat.modeExecute")}
+          </button>
+          {planModePlanFile && (
+            <span
+              style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}
+              title={planModePlanFile}
+            >
+              {planModePlanFile.split("/").pop()}
+            </span>
+          )}
         </div>
 
         {/* Bash mode status label */}
