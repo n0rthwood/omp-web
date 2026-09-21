@@ -1,3 +1,18 @@
+omp-web (0.5.9) jammy; urgency=medium
+
+  * Chat image attachments are no longer silently dropped before the
+    prompt is sent (closes #69). Enter pressed right after picking an
+    image raced the attachment's FileReader read and dispatched a
+    text-only prompt; the composer now waits for in-flight reads on
+    both the immediate and the queued (steer/follow-up) send paths.
+  * Images handed over with an empty media type by some pickers and
+    clipboard sources are classified through a shared extension
+    fallback on the picker, paste, and drag-drop paths, so they attach
+    as images instead of reaching the text uploader and being rejected
+    as binary.
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 21 Sep 2026 02:45:21 +0000
+
 omp-web (0.5.8) jammy; urgency=medium
 
   * Plan-mode transition failures no longer discard the composer
