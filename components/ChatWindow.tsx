@@ -21,7 +21,7 @@ import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantB
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { OmpWordmark } from "./OmpWordmark";
 import { useI18n } from "@/hooks/useI18n";
@@ -336,8 +336,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
-    const images = files.filter((f) => f.type.startsWith("image/"));
-    const others = files.filter((f) => !f.type.startsWith("image/"));
+    // `type` can be empty for images from some file managers; route on the same
+    // rule the composer uses so they never land on the text-upload path (#69).
+    const images = files.filter((f) => resolveImageMimeType(f) !== null);
+    const others = files.filter((f) => resolveImageMimeType(f) === null);
     if (images.length) chatInputRef?.current?.addImages(images);
     if (others.length) chatInputRef?.current?.addFiles(others);
   }, [sessionBusy, chatInputRef]);
