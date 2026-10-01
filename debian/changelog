@@ -1,3 +1,20 @@
+omp-web (0.5.10) jammy; urgency=medium
+
+  * The chat view no longer crashes with React error #31 when an
+    extension `select` prompt sends option objects (closes #71). The
+    SDK widened `select()` to accept `{ label, description }` entries
+    as well as plain strings — omp's own Codex auto-redeem prompt uses
+    them — but the dialog rendered each entry directly as a React
+    child, so the whole session view failed to mount. Because pending
+    blocking UI requests are replayed to every new SSE subscriber, the
+    crash recurred on each page load with no in-app workaround.
+  * Select options now render their label and description, matching the
+    existing "ask" dialog, and always respond with the plain label
+    string. The local `select` types were widened to match the SDK, so
+    the compiler enforces that contract.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 01 Oct 2026 00:00:00 +0000
+
 omp-web (0.5.9) jammy; urgency=medium
 
   * Chat image attachments are no longer silently dropped before the
