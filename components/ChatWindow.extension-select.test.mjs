@@ -21,8 +21,6 @@ function renderDialog(request, onRespond = () => {}) {
   );
 }
 
-// Captured verbatim from the real incident (session 01a0f779 on joysort202):
-// AgentSession#confirmCodexAutoRedeem sends {label, description} option objects.
 const codexResetRequest = {
   type: "extension_ui_request",
   id: "select-codex-reset",
