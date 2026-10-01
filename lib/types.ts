@@ -123,6 +123,13 @@ export interface FileMentionMessage {
 }
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage | FileMentionMessage;
+export interface ExtensionUiSelectOption {
+  label: string;
+  description?: string;
+}
+
+export type ExtensionUiSelectItem = string | ExtensionUiSelectOption;
+
 export interface ExtensionAskDialogOption {
   label: string;
   description?: string;
@@ -212,7 +219,7 @@ export type ExtensionUiRequest =
       id: string;
       method: "select";
       title: string;
-      options: string[];
+      options: ExtensionUiSelectItem[];
       timeout?: number;
       expiresAt?: number;
     }
