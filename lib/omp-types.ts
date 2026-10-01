@@ -5,7 +5,7 @@ import type {
   SlashCommandInfo as OmpSlashCommandInfo,
   Theme,
 } from "@oh-my-pi/pi-coding-agent";
-import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "./types";
+import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult, ExtensionUiSelectItem } from "./types";
 
 
 export interface ContextUsage {
@@ -103,7 +103,7 @@ type WidgetOptionsLike = {
 export interface ExtensionUiContextLike {
   readonly timeoutStartsOnPresentation?: boolean;
   askDialog?(questions: ExtensionAskDialogQuestion[], opts?: DialogOptionsLike): Promise<ExtensionAskDialogResult | undefined>;
-  select(title: string, options: string[], opts?: DialogOptionsLike): Promise<string | undefined>;
+  select(title: string, options: ExtensionUiSelectItem[], opts?: DialogOptionsLike): Promise<string | undefined>;
   confirm(title: string, message: string, opts?: DialogOptionsLike): Promise<boolean>;
   input(title: string, placeholder?: string, opts?: DialogOptionsLike): Promise<string | undefined>;
   editor(title: string, prefill?: string, opts?: DialogOptionsLike): Promise<string | undefined>;

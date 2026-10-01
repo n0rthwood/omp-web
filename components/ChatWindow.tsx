@@ -901,7 +901,7 @@ type ExtensionDialogRequest = Extract<
   { method: "select" | "confirm" | "input" | "editor" | "ask" | "plan_review" }
 >;
 
-function ExtensionDialog({
+export function ExtensionDialog({
   request,
   onRespond,
 }: {
@@ -1333,25 +1333,34 @@ function ExtensionDialog({
           )}
           {request.method === "select" && (
             <div style={{ display: "grid", gap: 8 }}>
-              {request.options.map((option) => (
-                <button
-                  key={option}
-                  onClick={() => onRespond(request, { value: option })}
-                  style={{
-                    width: "100%",
-                    padding: "9px 10px",
-                    borderRadius: 7,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg-panel)",
-                    color: "var(--text)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 13,
-                  }}
-                >
-                  {option}
-                </button>
-              ))}
+              {request.options.map((option, index) => {
+                const label = typeof option === "string" ? option : option.label;
+                const description = typeof option === "string" ? undefined : option.description;
+                return (
+                  <button
+                    key={`${label}:${index}`}
+                    onClick={() => onRespond(request, { value: label })}
+                    style={{
+                      width: "100%",
+                      padding: "9px 10px",
+                      borderRadius: 7,
+                      border: "1px solid var(--border)",
+                      background: "var(--bg-panel)",
+                      color: "var(--text)",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      fontSize: 13,
+                    }}
+                  >
+                    <span style={{ display: "block" }}>{label}</span>
+                    {description && (
+                      <span style={{ display: "block", marginTop: 3, color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
+                        {description}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
           {request.method === "input" && (
