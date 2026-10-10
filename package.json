@@ -92,6 +92,7 @@
     "typescript": "^5.9.3"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-coding-agent@18.1.16": "patches/@oh-my-pi%2Fpi-coding-agent@18.1.16.patch"
+    "@oh-my-pi/pi-coding-agent@18.1.16": "patches/@oh-my-pi%2Fpi-coding-agent@18.1.16.patch",
+    "@oh-my-pi/pi-ai@18.1.16": "patches/@oh-my-pi%2Fpi-ai@18.1.16.patch"
   }
 }
