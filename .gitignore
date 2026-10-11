@@ -60,9 +60,11 @@ next-env.d.ts
 /debian/*.debhelper.log
 /debian/.build-home/
 
-# release/seeds outputs are generated at build time by release/seeds/fetch-seeds.sh
-# and tools/xor-secrets.py seal — never commit fetched config or sealed secrets
+# release/seeds/{config,models}.yml are generated at build time by
+# release/seeds/fetch-seeds.sh — never commit a host's fetched config.
 release/seeds/config.yml
 release/seeds/models.yml
+# Retired sealed-secret build outputs (#74): nothing produces these any
+# more, but keep them ignored so a stale local copy can never be committed.
 release/seeds/omp-web-secrets.env.xorb64
 release/seeds/omp-web-xor.key

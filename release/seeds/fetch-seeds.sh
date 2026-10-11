@@ -8,11 +8,11 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'cat ~/.omp/agent/models.yml' 
 
 cat >> "$DIR/models.yml" <<'YAML'
 
-  # --- appended by release/seeds/fetch-seeds.sh: fleet-standard providers ---
-  # This expanded set (agent-plan, volcengine-plan, xai) is the new baseline
-  # seed going forward — it supersedes any older host's current models.yml
-  # snapshot; see docs/plans/2026-08-20-omp-web-release-pipeline.md, Design
-  # decision 14 (structural, not byte-identical, .202 parity).
+  # --- fleet-standard providers (packaged default seed) ---
+  # Installed as ~/.omp/agent/models.yml only when that file does not exist
+  # yet; an existing models.yml is never touched. Every `apiKey:` below
+  # names an ENVIRONMENT VARIABLE, not a key — no provider credential ships
+  # inside the omp-web package. Set them in ~/.omp/agent/.env (mode 0600).
   agent-plan:
     baseUrl: https://ark.cn-beijing.volces.com/api/plan/v3
     api: openai-completions

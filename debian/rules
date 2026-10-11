@@ -70,10 +70,6 @@ override_dh_auto_install:
 	install -m 0644 release/seeds/models.yml debian/omp-web/opt/omp-web/config/models.yml.default
 	install -m 0644 release/seeds/config.yml debian/omp-web/opt/omp-web/config/config.yml.default
 
-	mkdir -p debian/omp-web/opt/omp-web/secrets
-	install -m 0644 release/seeds/omp-web-secrets.env.xorb64 debian/omp-web/opt/omp-web/secrets/secrets.env.xorb64
-	install -m 0644 release/seeds/omp-web-xor.key debian/omp-web/opt/omp-web/secrets/xor.key
-
 	mkdir -p debian/omp-web/opt/omp-web/systemd
 	install -m 0644 release/systemd/omp-web.service debian/omp-web/opt/omp-web/systemd/omp-web.service
 

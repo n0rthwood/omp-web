@@ -3,11 +3,13 @@
 #
 # Fresh install / resumed-after-interruption (completion marker absent):
 # creates the joysort account if absent (never $SUDO_USER — Design
-# decision 10), resolves/installs omp, writes the unit + env file +
-# ~/.omp/agent seeds + merged secrets (every sub-step idempotent, so a
-# resumed interrupted install converges safely instead of erroring or
-# duplicating state — Design decision 9), enables the service, then writes
-# the completion marker as the LAST step via mktemp+mv (atomic rename).
+# decision 10), resolves/installs omp, writes the unit + env file (with a
+# freshly generated per-machine web password) + ~/.omp/agent seeds (every
+# sub-step idempotent, so a resumed interrupted install converges safely
+# instead of erroring or duplicating state — Design decision 9), enables
+# the service, hands joysortmain its own omp-web administrator if that
+# service is co-installed, then writes the completion marker as the LAST
+# step via mktemp+mv (atomic rename).
 #
 # Upgrade/reinstall (marker present): NEVER touches the unit, env file, or
 # anything under ~/.omp/agent/. Only overlays /opt/omp-web/current onto
@@ -22,7 +24,6 @@ ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
 OMP_WEB_SRC="${ROOT_PREFIX}/opt/omp-web/current"
 RUNTIME_DIR="${ROOT_PREFIX}/opt/omp-web/runtime"
 CONFIG_DIR="${ROOT_PREFIX}/opt/omp-web/config"
-SECRETS_DIR="${ROOT_PREFIX}/opt/omp-web/secrets"
 SYSTEMD_SEED="${ROOT_PREFIX}/opt/omp-web/systemd/omp-web.service"
 
 resolve_target_user() {
@@ -243,11 +244,13 @@ case "$1" in
       if [ ! -f "$env_file" ]; then
         local host_ip
         host_ip="$(run_as_target "hostname -I | awk '{print \$1}'")"
+        # Per-machine random web password (#74). The package ships no
+        # secret of any kind any more, so a published .deb grants access
+        # to nothing and no two machines share a password. token_urlsafe
+        # yields 43 chars of [A-Za-z0-9_-], which needs no quoting in an
+        # EnvironmentFile.
         local password
-        password="$(python3 "$OMP_WEB_SRC/tools/xor-secrets.py" get \
-          --cipher "$SECRETS_DIR/secrets.env.xorb64" \
-          --key "$SECRETS_DIR/xor.key" \
-          --var OMP_WEB_PASSWORD)"
+        password="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
         # Same-directory mktemp + mv: a kill mid-write leaves only a stray
         # temp file, never a truncated 5010.env — a marker-absent resume
         # never mistakes a half-written env file for "already seeded".
@@ -271,14 +274,14 @@ case "$1" in
       mkdir -p "$agent_dir"
       chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.omp"
 
+      # The agent .env holds provider API keys and is operator-owned: the
+      # package no longer seeds a single key into it (#74 — those keys used
+      # to travel inside the .deb). Only ever CREATE it when absent; an
+      # existing one is never truncated, rewritten, or merged into, because
+      # on a deployed host it holds live, possibly just-rotated keys.
       local env_target="$agent_dir/.env"
       [ -f "$env_target" ] || : > "$env_target"
       chmod 0600 "$env_target"
-      python3 "$OMP_WEB_SRC/tools/xor-secrets.py" merge \
-        --cipher "$SECRETS_DIR/secrets.env.xorb64" \
-        --key "$SECRETS_DIR/xor.key" \
-        --target "$env_target" \
-        --skip-var OMP_WEB_PASSWORD
       chown "$TARGET_USER:$TARGET_USER" "$env_target"
 
       [ -f "$agent_dir/models.yml" ] \
@@ -287,6 +290,258 @@ case "$1" in
       [ -f "$agent_dir/config.yml" ] \
         || install -m 0644 -o "$TARGET_USER" -g "$TARGET_USER" \
              "$CONFIG_DIR/config.yml.default" "$agent_dir/config.yml"
+    }
+
+    # joysortmain bootstrap (#75). A fresh install switches authentication
+    # on immediately (OMP_WEB_PASSWORD in 5010.env), and that file lives
+    # under $TARGET_HOME — which the joysortmain service user cannot even
+    # traverse on a sorting machine (0750 joysort:joysort). joysortmain's
+    # own bootstrap (app/core/omp_accounts.py::_ensure_admin) therefore
+    # gets 403 "Admin access required" from POST /api/web-users and gives
+    # up with `omp_bootstrap_blocked` forever, which is exactly what makes
+    # a freshly apt-installed omp-web unusable from the assistant page.
+    #
+    # This runs at the one moment something legitimately holds both sides:
+    # create joysortmain's dedicated administrator over the API using the
+    # credential seed_env_file just generated, then hand THAT account — never
+    # the omp password — to joysortmain through its own 0600 store.
+    #
+    # Idempotent: a store that already names an administrator is left
+    # completely alone, and an account that already exists on the omp-web
+    # side is never reset. Best-effort end to end (`|| true` at the call
+    # site): a convenience bridge for a co-installed service must never
+    # fail `apt install omp-web`.
+    bootstrap_joysortmain() {
+      local data_dir="${ROOT_PREFIX}/var/lib/joysortmain"
+      local creds_file="$data_dir/omp_credentials.json"
+
+      # The data dir is the ROOT_PREFIX-safe signal (fixture roots never
+      # have one, so the tests can never touch a real host's store). The
+      # dpkg fallback covers a package installed but not yet started, and
+      # is consulted only for a real (unprefixed) install.
+      if [ ! -d "$data_dir" ] \
+        && { [ -n "$ROOT_PREFIX" ] \
+             || ! dpkg-query -W -f='${Status}' joysortmain 2>/dev/null \
+                  | grep -q '^install ok installed$'; }; then
+        echo "omp-web: joysortmain bootstrap skipped — joysortmain is not on this host ($data_dir absent, package not installed)" >&2
+        return 0
+      fi
+
+      # The store is written on joysortmain's behalf, so it must end up
+      # owned by the joysortmain service user. Prefer whatever is already
+      # on disk; a root-owned data dir means joysortmain has not claimed
+      # it yet, so fall back to the account itself.
+      local owner_uid="" owner_gid=""
+      if [ -e "$creds_file" ]; then
+        owner_uid="$(stat -c '%u' "$creds_file" 2>/dev/null || true)"
+        owner_gid="$(stat -c '%g' "$creds_file" 2>/dev/null || true)"
+      elif [ -d "$data_dir" ]; then
+        owner_uid="$(stat -c '%u' "$data_dir" 2>/dev/null || true)"
+        owner_gid="$(stat -c '%g' "$data_dir" 2>/dev/null || true)"
+      fi
+      if [ "${owner_uid:-0}" = 0 ]; then
+        owner_uid="$(id -u joysortmain 2>/dev/null || true)"
+        owner_gid="$(id -g joysortmain 2>/dev/null || true)"
+      fi
+      if [ -z "$owner_uid" ] || [ -z "$owner_gid" ]; then
+        echo "omp-web: joysortmain bootstrap skipped — cannot resolve the joysortmain service user (no joysortmain account, and $data_dir is root-owned)" >&2
+        return 0
+      fi
+
+      if [ ! -d "$data_dir" ]; then
+        mkdir -p "$data_dir"
+        chown "$owner_uid:$owner_gid" "$data_dir"
+        chmod 0700 "$data_dir"
+      fi
+
+      # Everything below is python3 (already a package dependency; curl is
+      # not). The omp password is read straight out of the root-only env
+      # file inside this process — it never reaches argv, an env var, or a
+      # log line.
+      if ! OMP_WEB_BOOTSTRAP_ENV_FILE="$TARGET_HOME/omp/ops/env/5010.env" \
+           OMP_WEB_BOOTSTRAP_STORE="$creds_file" \
+           OMP_WEB_BOOTSTRAP_UID="$owner_uid" \
+           OMP_WEB_BOOTSTRAP_GID="$owner_gid" \
+           OMP_WEB_BOOTSTRAP_BASE_URL="${OMP_WEB_TEST_BASE_URL:-}" \
+           python3 - <<'PY'
+import base64
+import json
+import os
+import secrets
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+ENV_FILE = os.environ["OMP_WEB_BOOTSTRAP_ENV_FILE"]
+STORE = os.environ["OMP_WEB_BOOTSTRAP_STORE"]
+OWNER_UID = int(os.environ["OMP_WEB_BOOTSTRAP_UID"])
+OWNER_GID = int(os.environ["OMP_WEB_BOOTSTRAP_GID"])
+
+# The unit pins the service to 5010. OMP_WEB_TEST_BASE_URL is the fixture
+# seam (same family as OMP_WEB_TEST_ROOT) so the tests can drive a throwaway
+# server instead of whatever is really listening on this host.
+BASE_URL = os.environ.get("OMP_WEB_BOOTSTRAP_BASE_URL") or "http://127.0.0.1:5010"
+READY_TIMEOUT = 30.0
+ADMIN_USERNAME = "joysortmain-admin"
+# lib/web-auth.ts pins the Basic-auth identity to this literal name,
+# independent of whatever OMP_WEB_USERNAME says.
+ENV_ADMIN_USERNAME = "omp"
+
+
+def note(message):
+    # Status only. No password, no key, ever.
+    sys.stderr.write("omp-web: " + message + "\n")
+
+
+def skip(message):
+    note("joysortmain bootstrap skipped — " + message)
+    raise SystemExit(0)
+
+
+def read_env_password():
+    try:
+        handle = open(ENV_FILE, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line.startswith("OMP_WEB_PASSWORD="):
+                continue
+            value = line[len("OMP_WEB_PASSWORD="):].strip()
+            # systemd strips one matching pair of surrounding quotes when it
+            # loads an EnvironmentFile, so the in-process password is the
+            # unquoted form. Hosts seeded by the retired sealed-secrets path
+            # still carry the quoted shape on disk; match systemd exactly.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            return value or None
+    return None
+
+
+def call(method, path, payload, password):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(BASE_URL + path, data=data, method=method)
+    raw = (ENV_ADMIN_USERNAME + ":" + password).encode("utf-8")
+    req.add_header("Authorization", "Basic " + base64.b64encode(raw).decode("ascii"))
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:
+        return None, type(exc).__name__
+    with resp:
+        return resp.getcode(), resp.read().decode("utf-8", "replace")
+
+
+def error_message(body):
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return ""
+    return str(payload.get("error", "")) if isinstance(payload, dict) else ""
+
+
+def wait_until_serving():
+    # /api/auth/web-me is auth-exempt in proxy.ts, so any HTTP answer at
+    # all — including a 401 — proves the app is serving.
+    deadline = time.monotonic() + READY_TIMEOUT
+    while True:
+        try:
+            urllib.request.urlopen(BASE_URL + "/api/auth/web-me", timeout=3).close()
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except Exception:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(1.0)
+
+
+store = {"version": 1, "admin": None, "users": {}}
+if os.path.exists(STORE):
+    try:
+        with open(STORE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except Exception as exc:
+        skip("%s exists but is not readable JSON (%s); refusing to overwrite it"
+             % (STORE, type(exc).__name__))
+    if not isinstance(loaded, dict):
+        skip("%s does not hold a JSON object; refusing to overwrite it" % STORE)
+    store = loaded
+    store.setdefault("version", 1)
+    store.setdefault("users", {})
+    admin = store.get("admin")
+    if isinstance(admin, dict) and admin.get("username"):
+        note("joysortmain already holds an omp-web administrator credential — left untouched")
+        raise SystemExit(0)
+
+password = read_env_password()
+if not password:
+    skip("no OMP_WEB_PASSWORD in %s" % ENV_FILE)
+
+if not wait_until_serving():
+    skip("omp-web did not answer on %s within %ds" % (BASE_URL, int(READY_TIMEOUT)))
+
+admin_password = secrets.token_urlsafe(32)
+status, body = call("POST", "/api/web-users", {
+    "username": ADMIN_USERNAME,
+    "password": admin_password,
+    "role": "admin",
+    "projects": "*",
+}, password)
+
+if status is None:
+    skip("omp-web did not answer the create request (%s)" % body)
+if status == 400 and "exists" in error_message(body).lower():
+    note("omp-web already has an account named '%s' — left untouched, and joysortmain's "
+         "credential store was not changed" % ADMIN_USERNAME)
+    raise SystemExit(0)
+if status != 201:
+    skip("omp-web refused to create '%s' (HTTP %s %s)"
+         % (ADMIN_USERNAME, status, error_message(body)))
+
+store["admin"] = {
+    "username": ADMIN_USERNAME,
+    "password": admin_password,
+    "created": datetime.now(timezone.utc).isoformat(),
+}
+
+try:
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(STORE) or ".",
+                                    prefix=".omp_credentials.")
+    try:
+        os.fchmod(fd, 0o600)
+        os.fchown(fd, OWNER_UID, OWNER_GID)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, STORE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+except Exception as exc:
+    # The account now exists but joysortmain would never learn its password,
+    # which is the one state nothing can repair by itself. Undo it so the
+    # next install starts clean instead of hitting a permanent conflict.
+    call("DELETE", "/api/web-users/" + ADMIN_USERNAME, None, password)
+    skip("could not write %s (%s); the '%s' account just created was removed again"
+         % (STORE, type(exc).__name__, ADMIN_USERNAME))
+
+note("created the '%s' omp-web administrator and handed its credential to joysortmain via %s"
+     % (ADMIN_USERNAME, STORE))
+PY
+      then
+        echo "omp-web: joysortmain bootstrap did not complete — install continues; rerun 'apt install --reinstall omp-web' once the cause is fixed" >&2
+      fi
     }
 
     write_marker() {
@@ -322,6 +577,9 @@ case "$1" in
       fi
       sync_app
       run_as_target 'systemctl --user daemon-reload && systemctl --user enable --now omp-web.service'
+      # Only reachable with the marker absent, i.e. once per machine. Never
+      # allowed to fail the install (see the function's header).
+      bootstrap_joysortmain || true
       write_marker
     else
       echo "omp-web: completion marker present — upgrade path (unit/env/agent dir untouched)" >&2

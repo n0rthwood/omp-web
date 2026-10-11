@@ -4,7 +4,7 @@ omp-web fronts a high-privilege agent, so every request needs a valid credential
 
 1. **Cookie login** — username/password at the `/login` page, for browsers and the installed PWA.
 2. **Bearer tokens** — `Authorization: Bearer web_…`, for scripts and CLIs.
-3. **Basic Auth (migration bridge)** — the legacy `OMP_WEB_PASSWORD` environment variable, kept working so existing deployments don't break while you move to web users.
+3. **Basic Auth** — the `OMP_WEB_PASSWORD` environment variable, with the fixed username `omp`. Originally a migration bridge; on the JoySort fleet it is also each host's *machine* credential, which is why it stays set there (see [Named accounts for human administrators](#named-accounts-for-human-administrators)).
 
 When no users are configured and `OMP_WEB_PASSWORD` is unset, authentication is disabled entirely and omp-web behaves as before (a synthetic admin identity serves every request).
 
@@ -42,16 +42,53 @@ curl -H "Authorization: Bearer web_…" https://omp.example.com/api/sessions
 curl -u 'omp:your-env-password' https://omp.example.com/api/sessions
 ```
 
-While the variable is set, the implicit user `omp` is an admin and can also sign in at the `/login` page. This is a bridge — plan to move off it:
+While the variable is set, the implicit user `omp` is an admin and can also sign in at the `/login` page.
 
 **First-admin setup:**
 
 1. Start omp-web with `OMP_WEB_PASSWORD` set (or leave it set on an existing deployment).
 2. Open the web UI, authenticate with the env password (`omp`), and open **Settings → Web users**.
-3. Create your real admin user (role `admin`).
-4. Log out, log back in as the new admin, and remove `OMP_WEB_PASSWORD` from the environment.
+3. Create your real admin user (role `admin`) — named anything *except* `omp`; see [the next section](#never-name-an-account-omp).
+4. Log out, log back in as the new admin.
+5. On a **standalone** install, remove `OMP_WEB_PASSWORD` from the environment once the named admin works. On a **fleet host, leave it set** — there it is the machine's identity towards the gateway, not a leftover.
 
-The env-backed `omp` identity exists while `OMP_WEB_PASSWORD` is set (and no file user claims the name `omp`), so the env password is always an extra admin/Basic-Auth credential until you remove the variable. This also guarantees the first file user you create can never lock out every admin. While the variable is set, unauthenticated API requests still receive a `WWW-Authenticate: Basic` challenge.
+The env-backed `omp` identity exists while `OMP_WEB_PASSWORD` is set **and no file user claims the name `omp`**, so the env password is an extra admin/Basic-Auth credential until you remove the variable or shadow the name. This also guarantees the first file user you create can never lock out every admin. While the variable is set, unauthenticated API requests still receive a `WWW-Authenticate: Basic` challenge.
+
+## Named accounts for human administrators
+
+On the JoySort fleet `OMP_WEB_PASSWORD` is **not a password anyone is meant to type**. `debian/postinst` generates it per host at install time with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` and writes it to `$HOME/omp/ops/env/5010.env`, mode `0600`. No two machines share a value, the `.deb` ships none, and nobody is expected to memorise or circulate one. Three things consume it, and none of them is a person:
+
+- the fleet gateway, which keeps a copy per machine and replays it as Basic Auth on every proxied request;
+- the install-time bootstrap, which authenticates as `omp` to create the named `joysortmain-admin` account and hand its credentials to joysortmain (see [fleet-deployment.md](./fleet-deployment.md#the-joysortmain-bootstrap)) — note that it, too, is an ordinary file account, which is precisely why the name `omp` has to stay free;
+- `lib/terminals/terminal-gate.ts`, which only requires that it be set.
+
+**Humans log in with named file accounts**, over cookie sessions.
+
+### Creating one
+
+1. Authenticate once with the machine credential (username `omp`, password from that host's `5010.env`) and open **Settings → Web users** → add user, role `admin`. The API equivalent is `POST /api/web-users` with `{ "username": "alice", "password": "…", "role": "admin", "projects": "*" }`.
+2. Pick a real name — `alice`, `ops-ling`, `omp-admin`. Anything matching `[a-z0-9_-]{1,32}` **except the exact string `omp`**.
+3. The account is usable immediately. `readWebUsersConfig()` caches `omp-web-users.yml` keyed by the file's mtime and re-reads it the moment the file changes, so **no restart is needed** — which matters, because restarting omp-web kills every live `AgentSession`, terminal and running agent turn in that process.
+4. Sign in at `/login` as the new account. On a fleet host, leave `OMP_WEB_PASSWORD` alone.
+
+Give each person their own account. Revoking one person is then a delete, not a fleet-wide password rotation.
+
+### Never name an account `omp`
+
+`getEffectiveWebUsers()` appends the synthetic env-backed admin only while no file user claims that name:
+
+```ts
+// lib/web-users.ts:316 — ENV_MIGRATION_USERNAME is "omp"
+if (users.some((user) => user.username === ENV_MIGRATION_USERNAME)) return users;
+```
+
+The last-admin guard does **not** save you here. `countEffectiveAdmins()` counts the bridge only when there is no file admin at all, so creating an `omp` account with role **`admin`** passes validation and succeeds — it merely replaces the env identity with a different password. (A role-`user` `omp` is rejected with `409 Cannot remove the last admin`, but only while no other file admin exists.)
+
+The moment an `omp` file user lands:
+
+- **the gateway loses that host.** It proxies as `omp` with the machine password, which now authenticates against your file user's hash instead, so the remote answers `401`. `lib/machines/remote-request.ts` switches endpoints only on *transport* failures, so the `401` is final — no retry, no fallback — and the UI renders `<name> is unauthorized`.
+- **the install-time bootstrap breaks.** A reinstall that needs to reconcile the joysortmain account authenticates with the same credential and hits the same `401`.
+- **recovery needs filesystem access, not the UI**: rename or remove that entry in `~/.omp/agent/omp-web-users.yml`; the synthetic admin reappears on the next mtime-triggered read.
 
 ## The users file: `omp-web-users.yml`
 

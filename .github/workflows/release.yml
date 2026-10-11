@@ -65,9 +65,8 @@ jobs:
           head -3 debian/changelog
 
       - name: Build .deb
-        env:
-          OMP_WEB_OWNER_SECRETS: /home/joysort/joysort-release-credential/omp-web-secrets.env.plain
-          OMP_WEB_ASSEMBLED_SECRETS: /home/joysort/joysort-release-credential/omp-web-secrets.assembled.env.plain
+        # No secret is staged for the build any more (#74): the package
+        # carries neither provider API keys nor a shared web password.
         run: ./build-deb.sh
 
       - name: Upload .deb artifact
