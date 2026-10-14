@@ -1,4 +1,4 @@
-import type { OAuthAuthInfo, OAuthPrompt } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthAuthInfo, OAuthPrompt, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getOmpRuntime, invalidateOmpRuntime } from "@/lib/omp-runtime";
 import { resolveOAuthLoginId } from "@/lib/provider-listing-runtime";
@@ -119,7 +119,7 @@ export async function GET(
       abort.signal.addEventListener("abort", cleanup);
 
       try {
-        await authStorage.login(loginId, {
+        await authStorage.oauth.login(loginId as OAuthProviderId, {
           // Every provider prompt (paste-the-code, enterprise URL, ...) becomes
           // a browser input request keyed by a short-lived token.
           onPrompt: async (prompt: OAuthPrompt) => {

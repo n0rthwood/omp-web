@@ -4,6 +4,7 @@ import { generateSessionTitle as generateOmpSessionTitle } from "@oh-my-pi/pi-co
 import { isLowSignalTitleInput } from "@oh-my-pi/pi-coding-agent/tiny/text";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionLike } from "./omp-types";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 
 const MAX_TITLE_LENGTH = 150;
 const TITLE_MARKER_INSTRUCTION =
@@ -321,7 +322,7 @@ export async function generateSessionTitle(
     throw new Error("The session has no user messages to name");
   }
 
-  const title = session.settings.get("providers.tinyModel") === "online"
+  const title = getOmpSetting<string | undefined>(session.settings, "providers.tinyModel") === "online"
     ? await generateOnlineWebSessionTitle(session, firstMessage)
     : prependIssueAnnotationPrefix(
       await generateOmpSessionTitle(

@@ -8,6 +8,7 @@ import {
   type ModelsData,
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import { listModelRoles, readDefaultModelRole } from "@/lib/model-roles";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { getOmpRuntime, getSettingsForCwd } from "@/lib/omp-runtime";
@@ -35,7 +36,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const modelError = modelRegistry.getError()?.message;
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
   // way the CLI does instead of comparing pattern strings literally.
-  const scope = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
+  const scope = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
   const { visible, thinkingLevelPins, warnings } = scope;
   const modelList = visible.map((m) => ({
     id: m.id,

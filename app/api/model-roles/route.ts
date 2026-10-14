@@ -11,6 +11,7 @@ import {
   type ModelRoleScope,
 } from "@/lib/model-roles";
 import { resolveVisibleModels } from "@/lib/model-scope";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +36,7 @@ export async function GET(req: Request) {
   try {
     const { modelRegistry } = await getOmpRuntime();
     const settings = await getSettingsForCwd(result.cwd);
-    const { visible } = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
+    const { visible } = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
     return NextResponse.json({
       roles: listModelRoles(settings, [...visible]),
       fallbackChains: listRoleFallbackChains(settings),
@@ -90,7 +91,7 @@ export async function PUT(req: Request) {
     // the response and in the next modal load.
     const settings = await getSettingsForCwd(result.cwd);
     const { modelRegistry } = runtime;
-    const { visible } = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
+    const { visible } = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
     return NextResponse.json({ roles: listModelRoles(settings, [...visible]) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

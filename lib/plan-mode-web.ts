@@ -43,7 +43,14 @@ export interface WebPlanModeSession {
   };
   // Minimal test doubles omit settings; the availability gate then falls
   // back to the schema default (plan.enabled: true).
-  settings?: { get(path: "plan.enabled"): boolean };
+  settings?: unknown;
+}
+
+function configuredAvailability(settings: unknown): boolean {
+  if (settings && typeof settings === "object" && "get" in settings && typeof settings.get === "function") {
+    return Boolean(settings.get("plan.enabled"));
+  }
+  return true;
 }
 
 export type ModeChangeEntryLike = {
@@ -83,8 +90,7 @@ export function readPersistedPlanModeState(
 }
 
 /** Observable plan-mode state, preferring live SDK state over the journal. */
-export function webPlanModeInfo(session: WebPlanModeSession): WebPlanModeInfo {
-  const available = session.settings?.get("plan.enabled") ?? true;
+export function webPlanModeInfo(session: WebPlanModeSession, available = configuredAvailability(session.settings)): WebPlanModeInfo {
   const state = session.getPlanModeState?.();
   if (state?.enabled) {
     return { enabled: true, planFilePath: state.planFilePath, available };
@@ -114,8 +120,8 @@ export function applyWebPlanModeTransition(
   session: WebPlanModeSession,
   enabled: boolean,
   proposalHandler: WebPlanProposalHandler,
+  available = configuredAvailability(session.settings),
 ): WebPlanModeInfo {
-  const available = session.settings?.get("plan.enabled") ?? true;
   if (enabled) {
     if (!available) {
       throw new Error("Plan mode is disabled. Enable it in settings (plan.enabled).");

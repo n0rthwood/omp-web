@@ -4,6 +4,7 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import type { Settings } from "@oh-my-pi/pi-coding-agent";
 import { getKnownRoleIds } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { listRoleFallbackChains } from "./model-roles";
+import { getOmpSetting, overrideOmpSetting } from "@/lib/omp-setting-access";
 
 /**
  * Per-conversation model rotation.
@@ -202,7 +203,7 @@ export function applyConversationRotation(
   if (!state.enabled) return [];
 
   const skip = new Set(options.skipRoles ?? []);
-  const disabledProviders = settings.get("disabledProviders") ?? [];
+  const disabledProviders = getOmpSetting<string[] | undefined>(settings, "disabledProviders") ?? [];
   const chains = listRoleFallbackChains(settings);
   const chainByRole: Record<string, string[]> = {};
   for (const entry of chains) chainByRole[entry.role] = entry.effective;
@@ -223,7 +224,7 @@ export function applyConversationRotation(
     if (typeof selector === "string" && selector) modelRoles[role] = selector;
   }
   const fallbackChains: Record<string, string[]> = {};
-  for (const [key, value] of Object.entries(settings.get("retry.fallbackChains") ?? {})) {
+  for (const [key, value] of Object.entries(getOmpSetting<Record<string, string[]> | undefined>(settings, "retry.fallbackChains") ?? {})) {
     if (Array.isArray(value)) fallbackChains[key] = [...value];
   }
 
@@ -238,7 +239,7 @@ export function applyConversationRotation(
     applied.push({ role, primary: rotated.primary, index: rotated.index, poolSize: pool.length });
   }
 
-  settings.override("modelRoles", modelRoles);
-  settings.override("retry.fallbackChains", fallbackChains);
+  overrideOmpSetting(settings, "modelRoles", modelRoles);
+  overrideOmpSetting(settings, "retry.fallbackChains", fallbackChains);
   return applied;
 }

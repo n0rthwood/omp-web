@@ -1,19 +1,9 @@
 import { NextResponse } from "next/server";
-import {
-  getDefault,
-  getEnumValues,
-  getPathsForTab,
-  getType,
-  getUi,
-  hasUi,
-  isCredential,
-  SETTINGS_SCHEMA,
-  SETTING_TABS,
-  TAB_GROUPS,
-  TAB_METADATA,
-  type SettingPath,
-} from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { SETTING_TABS, TAB_GROUPS, TAB_METADATA } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { getOmpRuntime, getSettingsForCwd } from "@/lib/omp-runtime";
+import { setOmpSetting } from "@/lib/omp-setting-access";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { getAvailableWebThemes, getWebThemeConfig } from "@/lib/omp-theme";
 import type {
@@ -33,8 +23,9 @@ async function validateCwd(cwd: string | null): Promise<string | undefined> {
   return cwd;
 }
 
-function optionsFor(path: SettingPath, runtimeThemes: string[]): SettingsOption[] | undefined {
-  const ui = getUi(path);
+function optionsFor(path: string, runtimeThemes: string[]): SettingsOption[] | undefined {
+  const setting = lookup(path);
+  const ui = setting?.ui;
   if (!ui) return undefined;
   if (ui.options === "runtime") {
     return path === "theme.dark" || path === "theme.light"
@@ -42,17 +33,18 @@ function optionsFor(path: SettingPath, runtimeThemes: string[]): SettingsOption[
       : [];
   }
   if (Array.isArray(ui.options)) return ui.options.map((option) => ({ ...option }));
-  const values = getEnumValues(path);
+  const values = setting?.enumValues;
   return values?.map((value) => ({ value, label: value }));
 }
 
-function fieldTypeFor(path: SettingPath): SettingsFieldType | null {
-  const schemaType = getType(path);
-  const ui = getUi(path);
+function fieldTypeFor(path: string): SettingsFieldType | null {
+  const setting = lookup(path);
+  const schemaType = setting?.type;
+  const ui = setting?.ui;
   if (!ui) return null;
   if (schemaType === "boolean") return "boolean";
   if (schemaType === "enum") return "select";
-  if (schemaType === "string") return isCredential(path) ? "secret" : ui.options ? "select" : "text";
+  if (schemaType === "string") return setting?.isCredential ? "secret" : ui.options ? "select" : "text";
   if (schemaType === "number") return ui.options ? "select" : null;
   if (schemaType === "array") return ui.options ? "multiselect" : null;
   if (schemaType === "record") return path === "providers.maxInFlightRequests" ? "providerLimits" : "text";
@@ -71,9 +63,10 @@ function serializableValue(value: unknown): SettingsValue {
   return value as Record<string, number>;
 }
 
-function validateSettingValue(path: SettingPath, value: unknown): SettingsValue {
-  const schemaType = getType(path);
-  const ui = getUi(path);
+function validateSettingValue(path: string, value: unknown): SettingsValue {
+  const setting = lookup(path);
+  const schemaType = setting?.type;
+  const ui = setting?.ui;
   if (!ui) throw new Error("Setting is not exposed by /settings");
 
   if (schemaType === "boolean") {
@@ -89,7 +82,7 @@ function validateSettingValue(path: SettingPath, value: unknown): SettingsValue 
     return value;
   }
   if (schemaType === "enum") {
-    if (typeof value !== "string" || !getEnumValues(path)?.includes(value)) throw new Error("Invalid option");
+    if (typeof value !== "string" || !setting?.enumValues?.includes(value)) throw new Error("Invalid option");
     return value;
   }
   if (schemaType === "number") {
@@ -130,11 +123,13 @@ export async function GET(req: Request) {
     const fields: SettingsField[] = [];
 
     for (const tab of SETTING_TABS) {
-      for (const path of getPathsForTab(tab)) {
+      for (const setting of orderedSettings()) {
+        const path = setting.id;
+        if (setting.ui?.tab !== tab) continue;
         const fieldType = fieldTypeFor(path);
-        const ui = getUi(path);
+        const ui = setting.ui;
         if (!fieldType || !ui) continue;
-        const secret = isCredential(path);
+        const secret = setting.isCredential;
         fields.push({
           path,
           tab,
@@ -142,9 +137,9 @@ export async function GET(req: Request) {
           label: ui.label,
           description: ui.description,
           type: fieldType,
-          value: secret ? null : serializableValue(settings.get(path)),
-          defaultValue: secret ? null : serializableValue(getDefault(path)),
-          configured: settings.isConfigured(path),
+          value: secret ? null : serializableValue(setting.get(settings)),
+          defaultValue: secret ? null : serializableValue(setting.default),
+          configured: setting.isConfigured(settings),
           options: optionsFor(path, themeNames),
           ordered: ui.ordered === true,
           condition: ui.condition,
@@ -168,10 +163,10 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const body = await req.json() as { path?: string; value?: unknown };
-    if (!body.path || !(body.path in SETTINGS_SCHEMA) || !hasUi(body.path as SettingPath)) {
+    if (!body.path || !lookup(body.path)?.ui) {
       return NextResponse.json({ error: "Unknown setting" }, { status: 400 });
     }
-    const path = body.path as SettingPath;
+    const path = body.path;
     const value = validateSettingValue(path, body.value);
     if (
       (path === "theme.dark" || path === "theme.light")
@@ -180,9 +175,10 @@ export async function PATCH(req: Request) {
       throw new Error("Unknown omp theme");
     }
     const { settings } = await getOmpRuntime();
-    settings.set(path, value as never);
+    setOmpSetting(settings, path, value);
     await settings.flush();
-    return NextResponse.json({ success: true, value: serializableValue(settings.get(path)) });
+    const setting = lookup(path)!;
+    return NextResponse.json({ success: true, value: serializableValue(setting.get(settings)) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }

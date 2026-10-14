@@ -11,6 +11,7 @@ import {
   writeRoleFallbackChain,
 } from "@/lib/model-roles";
 import { resolveVisibleModels } from "@/lib/model-scope";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
@@ -78,7 +79,7 @@ export async function PUT(req: Request) {
     invalidateModelsCache();
 
     const settings = await getSettingsForCwd(cwd);
-    const { visible } = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
+    const { visible } = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
     return NextResponse.json({
       roles: listModelRoles(settings, [...visible]),
       fallbackChains: listRoleFallbackChains(settings),
