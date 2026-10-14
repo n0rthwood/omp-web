@@ -750,7 +750,7 @@ export class AgentSessionWrapper {
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
           subagents: this.getSubagentSnapshots(),
-          planMode: webPlanModeInfo(this.inner),
+          planMode: webPlanModeInfo(this.inner, getOmpSetting<boolean>(this.inner.settings, "plan.enabled")),
         };
       }
       case "get_subagents":
@@ -861,6 +861,7 @@ export class AgentSessionWrapper {
           this.inner,
           command.enabled === true,
           (title) => this.handlePlanProposal(title),
+          getOmpSetting<boolean>(this.inner.settings, "plan.enabled"),
         );
         this.emit({
           type: "mode_change",

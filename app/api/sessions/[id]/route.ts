@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileS
 import { dirname, join } from "path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { planModeInfoFromEntries, webPlanModeInfo } from "@/lib/plan-mode-web";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import { sessionPathKey } from "@/lib/session-path";
 import {
   resolveSessionPath,
@@ -77,7 +78,7 @@ export async function GET(
     // session opened in the web has no live wrapper yet, so derive the mode
     // from the journal when the in-process session is absent.
     const planMode = liveRpc
-      ? webPlanModeInfo(liveRpc.inner)
+      ? webPlanModeInfo(liveRpc.inner, getOmpSetting<boolean>(liveRpc.inner.settings, "plan.enabled"))
       : planModeInfoFromEntries(entries);
     return NextResponse.json({
       sessionId: id,
