@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
 import {
   createAgentSession,
   discoverSessionExtensionPaths,
@@ -29,6 +30,7 @@ import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { untrustedProjectSessionOptions } from "./project-trust";
 import { readDefaultModelRole } from "./model-roles";
 import { applyConversationRotation } from "./model-rotation";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import {
   applyWebPlanModeTransition,
@@ -381,7 +383,8 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.syncPlanModeFromSession();
-    this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+    this.unsubscribe = this.inner.subscribe((rawEvent: AgentSessionEvent) => {
+      const event = rawEvent as unknown as AgentEvent;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
@@ -1770,7 +1773,7 @@ export async function startRpcSession(
         }
       }
 
-      const scope = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
+      const scope = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
       const defaultRole = readDefaultModelRole(settings);
       const initial = hasExistingMessages
         ? { scopedModels: [...scope.scopedModels], model: undefined, thinkingLevel: undefined }
@@ -1786,7 +1789,7 @@ export async function startRpcSession(
       // supplies a distinct id. Derived from the session id, so a conversation
       // reloaded after an idle teardown keeps the same identity and any pending
       // delivery still reaches it.
-      ensureAsyncJobManager(Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100)));
+      ensureAsyncJobManager(Math.min(100, Math.max(1, getOmpSetting<number | undefined>(settings, "async.maxJobs") ?? 100)));
       const { session: inner, eventBus, setToolUIContext } = await createAgentSession({
         cwd: sessionCwd,
         agentDir,

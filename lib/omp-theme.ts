@@ -3,8 +3,9 @@ import {
   getResolvedThemeColors,
   getThemeExportColors,
   isLightTheme,
-} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/theme";
 import type { Settings } from "@oh-my-pi/pi-coding-agent";
+import { getOmpSetting } from "@/lib/omp-setting-access";
 import type { WebThemeConfig, WebThemePalette } from "@/lib/settings-api";
 
 function firstColor(...values: Array<string | undefined>): string {
@@ -249,8 +250,8 @@ export async function getWebThemePalette(name: string): Promise<WebThemePalette>
 }
 
 export async function getWebThemeConfig(settings: Settings): Promise<WebThemeConfig> {
-  const dark = settings.get("theme.dark") ?? "titanium";
-  const light = settings.get("theme.light") ?? "light";
+  const dark = getOmpSetting<string | undefined>(settings, "theme.dark") ?? "titanium";
+  const light = getOmpSetting<string | undefined>(settings, "theme.light") ?? "light";
   const [darkPalette, lightPalette] = await Promise.all([
     getWebThemePalette(dark),
     getWebThemePalette(light),

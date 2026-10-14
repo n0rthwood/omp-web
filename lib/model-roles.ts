@@ -16,6 +16,7 @@ import {
   validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { getOmpSetting, setOmpSetting } from "@/lib/omp-setting-access";
 import type {
   ModelRoleAssignment,
   ModelRoleModelRef,
@@ -104,7 +105,7 @@ export function listModelRoles(
       hidden: Boolean(MODEL_ROLES[role as ModelRole]?.hidden),
       ...(selector ? { selector } : {}),
       source: settings.getModelRoleSource(role),
-      provenance: settings.getModelRoleProvenance(role),
+      provenance: settings.getModelRoleProvenance(role) as ModelRoleAssignment["provenance"],
       ...(resolution?.model ? { resolved: toModelRef(resolution.model, resolution.thinkingLevel) } : {}),
       ...(resolution?.warning ? { warning: resolution.warning } : {}),
     };
@@ -156,7 +157,7 @@ export function formatRoleSelector(
  * backups", which is deliberately distinct from an absent key.
  */
 export function listRoleFallbackChains(settings: Settings): RoleFallbackChain[] {
-  const configured = settings.get("retry.fallbackChains") ?? {};
+    const configured = getOmpSetting<Record<string, string[]> | undefined>(settings, "retry.fallbackChains") ?? {};
   const effective = getRetryFallbackChains(settings);
   return getKnownRoleIds(settings).map((role) => {
     const own = configured[role];
@@ -182,14 +183,14 @@ export function writeRoleFallbackChain(
   role: string,
   chain: readonly string[] | null,
 ): void {
-  const existing = settings.get("retry.fallbackChains") ?? {};
+  const existing = getOmpSetting<Record<string, string[]> | undefined>(settings, "retry.fallbackChains") ?? {};
   const next: Record<string, string[]> = {};
   for (const key in existing) {
     const value = existing[key];
     if (key !== role && Array.isArray(value)) next[key] = [...value];
   }
   if (chain !== null) next[role] = [...chain];
-  settings.set("retry.fallbackChains", next);
+  setOmpSetting(settings, "retry.fallbackChains", next);
 }
 
 /**

@@ -9,6 +9,7 @@
 // (`AgentSessionWrapper.syncPlanModeFromSession`) sees the same journal the
 // TUI writes. The module stays dependency-free so the client can import the
 // slash-command intent parser from the React hook.
+import { getOmpSetting } from "@/lib/omp-setting-access";
 
 /** Mirrors the ACP agent's default plan file (`DEFAULT_PLAN_FILE_URL`). */
 export const WEB_DEFAULT_PLAN_FILE_URL = "local://PLAN.md";
@@ -43,7 +44,13 @@ export interface WebPlanModeSession {
   };
   // Minimal test doubles omit settings; the availability gate then falls
   // back to the schema default (plan.enabled: true).
-  settings?: { get(path: "plan.enabled"): boolean };
+  settings?: import("@oh-my-pi/pi-coding-agent").Settings | { get(path: "plan.enabled"): boolean };
+}
+
+function isPlanModeAvailable(settings: WebPlanModeSession["settings"]): boolean {
+  if (!settings) return true;
+  if ("get" in settings) return settings.get("plan.enabled");
+  return getOmpSetting<boolean>(settings, "plan.enabled");
 }
 
 export type ModeChangeEntryLike = {
@@ -84,7 +91,7 @@ export function readPersistedPlanModeState(
 
 /** Observable plan-mode state, preferring live SDK state over the journal. */
 export function webPlanModeInfo(session: WebPlanModeSession): WebPlanModeInfo {
-  const available = session.settings?.get("plan.enabled") ?? true;
+  const available = isPlanModeAvailable(session.settings);
   const state = session.getPlanModeState?.();
   if (state?.enabled) {
     return { enabled: true, planFilePath: state.planFilePath, available };
@@ -115,7 +122,7 @@ export function applyWebPlanModeTransition(
   enabled: boolean,
   proposalHandler: WebPlanProposalHandler,
 ): WebPlanModeInfo {
-  const available = session.settings?.get("plan.enabled") ?? true;
+  const available = isPlanModeAvailable(session.settings);
   if (enabled) {
     if (!available) {
       throw new Error("Plan mode is disabled. Enable it in settings (plan.enabled).");
