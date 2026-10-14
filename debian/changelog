@@ -1,3 +1,11 @@
+omp-web (0.5.11) jammy; urgency=medium
+
+  * Update the omp SDK packages to 18.10.4 and migrate omp-web's settings,
+    authentication, theme, thinking, skills, and session integrations to the
+    current SDK APIs. Remove the local SDK patches now included upstream.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 14 Oct 2026 00:00:00 +0000
+
 omp-web (0.5.10) jammy; urgency=medium
 
   * The chat view no longer crashes with React error #31 when an
