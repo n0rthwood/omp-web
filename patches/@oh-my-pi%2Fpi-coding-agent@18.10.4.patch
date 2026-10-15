@@ -1,0 +1,44 @@
+diff --git a/src/tools/browser.ts b/src/tools/browser.ts
+index 5d09ccc3908dadac92687c4a1d8b7616f3e91846..bc40fed53dbda7629b1a8388c07c4a57bd906202 100644
+--- a/src/tools/browser.ts
++++ b/src/tools/browser.ts
+@@ -6,6 +6,7 @@ import type { ToolSession } from "../sdk";
+ import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+ import { resolveCmuxKind } from "./browser/cmux/rpc";
+ import { describeRelayTargets, listRelayTargets, type RelayTarget, resolveSpawnArgs } from "./browser/attach";
++import { createBrowserPreludeDefinition } from "./browser/prelude-definition";
+ import {
+ 	acquireBrowser,
+ 	browserKey,
+@@ -249,9 +250,6 @@ function chromiumKind(params: BrowserParams, session: ToolSession): BrowserKind
+ 
+ /** Create the enabled-only browser host prelude for one tool session. */
+ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
+-	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+-	// JavaScript or Python kernel actually asks for its enabled preludes.
+-	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
+ 	return createBrowserPreludeDefinition(session, {
+ 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
+ 		status: describeBrowserCall,
+diff --git a/src/tools/computer.ts b/src/tools/computer.ts
+index b327abca23970da386ca550e597d6df7b651f905..5571f86851c3c8977a926adf560f7eb945504968 100644
+--- a/src/tools/computer.ts
++++ b/src/tools/computer.ts
+@@ -9,6 +9,7 @@ import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes
+ import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
+ import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+ import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
++import { computerPreludeAssets } from "./computer/prelude-definition";
+ import { type ComputerScreenshot, type ComputerSessionSnapshot, screenStateNotice } from "./computer/protocol";
+ import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
+ import type { ToolSession } from "./index";
+@@ -125,9 +126,6 @@ export function createComputerPrelude(
+ ): EvalPreludeDefinition {
+ 	const controller = createController(session);
+ 	const unregisterOwner = registerComputerController(session.getEvalKernelOwnerId?.() ?? undefined, controller);
+-	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+-	// JavaScript or Python kernel actually asks for its enabled preludes.
+-	const { computerPreludeAssets } = require("./computer/prelude-definition");
+ 	let closed = false;
+ 	const lifetime: ComputerLifetime = {
+ 		isClosed: () => closed,
