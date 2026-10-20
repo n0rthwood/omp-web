@@ -1,15 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { apiPath } from "@/lib/api-path";
 import { useMachines } from "@/lib/machine-context";
 import { useNavigation } from "./NavigationProvider";
-import type { SafeMachine, UserVisibleMachine } from "@/lib/api-types";
-
-type SwitcherHealth = {
-  state: "loading" | "online" | "offline" | "unauthorized";
-  reason?: string;
-};
+import { useMachineHealth, type SwitcherHealth } from "@/hooks/useMachineHealth";
 
 function displayStatus(status: SwitcherHealth | undefined): string {
   if (!status || status.state === "loading") return "Checking";
@@ -25,42 +19,16 @@ function statusColor(status: SwitcherHealth | undefined): string {
   return "var(--danger)";
 }
 
-async function probe(machine: SafeMachine | UserVisibleMachine, signal: AbortSignal): Promise<SwitcherHealth> {
-  try {
-    const response = await fetch(apiPath("/api/health", machine.id), { cache: "no-store", signal });
-    const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
-    if (response.status === 401 || response.status === 403) return { state: "unauthorized", reason: body.error ?? "The configured credential was rejected." };
-    if (!response.ok || !body.ok) return { state: "offline", reason: body.error ?? `HTTP ${response.status}` };
-    return { state: "online" };
-  } catch (caught) {
-    return { state: "offline", reason: caught instanceof DOMException && caught.name === "AbortError" ? "Connection timed out." : caught instanceof Error ? caught.message : String(caught) };
-  }
-}
-
 export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => void }) {
   const { machineId, machines, loading } = useMachines();
   const { navigate } = useNavigation();
   const [open, setOpen] = useState(false);
-  const [health, setHealth] = useState<Record<string, SwitcherHealth>>({});
+  const { health, refresh } = useMachineHealth(machines);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const currentMachine = machines.find((machine) => machine.id === machineId) ?? machines[0];
   const remote = Boolean(currentMachine && !currentMachine.isLocal);
   const singleMachine = machines.length <= 1;
-
-  useEffect(() => {
-    if (!machines.length) return;
-    const controllers = machines.map(() => new AbortController());
-    // Must exceed the gateway's upstream/probe deadline (15s) so the browser never pre-empts the gateway's own verdict; WAN remotes need the longer window.
-    const timers = controllers.map((controller) => window.setTimeout(() => controller.abort(), 20_000));
-    void Promise.all(machines.map((machine, index) => probe(machine, controllers[index].signal).then((status) => [machine.id, status] as const)))
-      .then((results) => setHealth(Object.fromEntries(results)))
-      .finally(() => timers.forEach((timer) => window.clearTimeout(timer)));
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-      controllers.forEach((controller) => controller.abort());
-    };
-  }, [machines]);
 
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -91,7 +59,11 @@ export function MachineSwitcher({ onManageMachines }: { onManageMachines: () => 
           aria-expanded={open}
           aria-haspopup="listbox"
           disabled={loading}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => {
+            setOpen((value) => !value);
+            // Fresh verdicts the moment the list becomes relevant.
+            if (!open) refresh();
+          }}
           title={singleMachine ? "Local machine" : `Machine: ${currentMachine.name}`}
           style={{ minWidth: 0, flex: 1, height: 28, padding: "0 8px", display: "flex", alignItems: "center", gap: 7, border: remote ? "1px solid var(--accent)" : "1px solid var(--border)", borderRadius: 6, background: remote ? "var(--bg-selected)" : "transparent", color: remote ? "var(--accent)" : "var(--text-muted)", cursor: loading ? "wait" : "pointer", font: "10px var(--font-mono)", textAlign: "left" }}
         >
