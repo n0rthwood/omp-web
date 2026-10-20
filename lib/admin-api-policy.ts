@@ -47,7 +47,11 @@ function matchesAdminOnlyPrefix(pathname: string): boolean {
  *
  * - `/api/machines` itself: admin-only for every method except `GET` (the
  *   listing is open to any authenticated user; the route filters + slims it).
- * - `/api/machines/<id>` (one extra segment): always admin-only — machine
+ * - `/api/machines/health`: `GET` is open to any authenticated user (the
+ *   aggregate status dot, issue #82; the route filters to granted machines).
+ *   Other methods on it stay admin-only.
+ * - any other `/api/machines/<id>` (one extra segment — a machine id or the
+ *   admin-only `POST /api/machines/test` probe): always admin-only — machine
  *   PATCH/DELETE stays fleet-configuration, never grantable.
  * - `/api/machines/<id>/...` (two or more extra segments): the fleet proxy
  *   catch-all. NOT blocked here — `requireMachineGrant`
@@ -60,7 +64,8 @@ export function isAdminOnlyLocalApiPath(method: string, pathname: string): boole
   if (segments[0] !== "api" || segments[1] !== "machines") return false;
   const rest = segments.slice(2);
   if (rest.length === 0) return method !== "GET";
-  return rest.length === 1;
+  if (rest.length === 1) return !(rest[0] === "health" && method === "GET");
+  return false;
 }
 
 /**
