@@ -1,3 +1,13 @@
+omp-web (0.5.13) jammy; urgency=medium
+
+  * Gateway machine status dot now follows reality without a page reload
+    (closes #82). New batched GET /api/machines/health with a 10s cache and
+    coalesced probes; the machine switcher polls it (30s healthy, 8s while
+    any machine is offline), pauses in hidden tabs, and re-probes on
+    dropdown open, tab visible, online and focus.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 21 Oct 2026 00:00:00 +0000
+
 omp-web (0.5.12) jammy; urgency=high
 
   * Fix every agent-session API call returning HTTP 500 after the 0.5.11
