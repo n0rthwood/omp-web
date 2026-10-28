@@ -465,13 +465,14 @@ gateway rollout drops that line). It takes the mode as `$1`:
 ### Install
 
 The gateway was originally installed by hand; since the v2 modes rollout
-every host — gateway plus the six remotes, all user `joysort` — is
+every host — gateway plus every registered remote (eight as of 2026-10),
+all user `joysort` — is
 deployed idempotently by
 [`ops/restart-service/deploy-fleet.sh`](../ops/restart-service/deploy-fleet.sh),
 run from the gateway checkout:
 
 ```
-ops/restart-service/deploy-fleet.sh --all      # gateway + all six remotes
+ops/restart-service/deploy-fleet.sh --all      # gateway + all remotes
 ops/restart-service/deploy-fleet.sh --gateway  # this machine only
 ops/restart-service/deploy-fleet.sh            # remotes only
 HOSTS="172.30.3.24 172.30.3.39" ops/restart-service/deploy-fleet.sh

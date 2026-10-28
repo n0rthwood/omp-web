@@ -37,7 +37,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 SRC_DIR=$(cd "$(dirname "$0")" && pwd)
 GW_ENV_FILE="$HOME/omp/ops/env/restart-service.env"
 GW_UNIT_DIR="$HOME/.config/systemd/user"
-DEFAULT_HOSTS="172.30.3.250 172.30.3.24 172.30.3.109 172.30.3.202 172.30.3.39 172.30.3.110"
+DEFAULT_HOSTS="172.30.3.250 172.30.3.24 172.30.3.109 172.30.3.202 172.30.3.39 172.30.3.110 172.30.3.187 172.30.3.164"
 HOSTS="${HOSTS:-$DEFAULT_HOSTS}"
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
