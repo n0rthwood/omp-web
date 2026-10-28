@@ -37,20 +37,22 @@ case "$MODE" in
     if systemctl --user list-unit-files omp-web-dev.service 2>/dev/null \
        | grep -q omp-web-dev.service; then
       log "dev unit present: polling http://127.0.0.1:5010/api/health"
+      # Any HTTP answer (even 401 — :5010 is authenticated) means the
+      # server is back up; curl prints 000 only on connection failure.
       healthy=""
       for _ in $(seq 1 120); do
         code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' \
                http://127.0.0.1:5010/api/health || true)
-        if [ "$code" = "200" ]; then
+        if [ "$code" != "000" ]; then
           healthy=1
           break
         fi
         sleep 1
       done
       if [ -n "$healthy" ]; then
-        log ":5010 healthy after upgrade"
+        log ":5010 answering after upgrade (http=$code)"
       else
-        log "WARNING: :5010/api/health not 200 within ~120s; restarting dev unit anyway"
+        log "WARNING: :5010 not answering within ~120s; restarting dev unit anyway"
       fi
       systemctl --user restart omp-web-dev.service
       log "omp-web-dev.service restarted: $(systemctl --user is-active omp-web-dev.service)"
