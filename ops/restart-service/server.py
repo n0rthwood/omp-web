@@ -7,9 +7,18 @@ detached from both this daemon and the calling HTTP request and survives
 omp-web.service being torn down mid-restart (which sends SIGTERM to its
 whole cgroup, including any shell that issued the restart from inside it).
 
-See ~/omp/ops/scripts/restart-payload.sh on the gateway for the real
-self-upgrade recipe. This is intentionally a single fixed-script trigger,
+The payload ships next to this file (restart-payload.sh) and is the
+default script. This is intentionally a single fixed-script trigger,
 not a generic task runner.
+
+POST /run takes an optional JSON body selecting what the script does:
+{"mode": "restart"} or {"mode": "upgrade"}. No body, invalid JSON, or a
+body without "mode" defaults to "upgrade" — the historical behavior,
+kept so existing watcher scripts that POST with no body keep upgrading.
+Any other mode value is rejected with 400 {"error": "invalid mode"}.
+The chosen mode is passed to the script as its only argument
+(`bash <script> <mode>`), and is reported as "mode" in the GET /status
+snapshot and in the 409 conflict snapshot.
 
 All configuration comes from the process environment, normally populated by
 systemd's EnvironmentFile= on the unit:
@@ -19,7 +28,8 @@ systemd's EnvironmentFile= on the unit:
                             without this set.
   RESTART_SERVICE_PORT     optional, default 8799. Bind is always 127.0.0.1
                             — loopback-only by design, not configurable.
-  RESTART_SERVICE_SCRIPT   optional, default ~/omp/ops/scripts/restart-payload.sh
+  RESTART_SERVICE_SCRIPT   optional, default restart-payload.sh shipped in
+                            this directory, next to server.py
   RESTART_SERVICE_LOG_DIR  optional, default ~/omp/ops/logs/restart-service
 """
 from __future__ import annotations
@@ -37,7 +47,9 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8799
-DEFAULT_SCRIPT = os.path.expanduser("~/omp/ops/scripts/restart-payload.sh")
+DEFAULT_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "restart-payload.sh"
+)
 DEFAULT_LOG_DIR = os.path.expanduser("~/omp/ops/logs/restart-service")
 LOG_TAIL_LINES = 50
 
@@ -45,6 +57,7 @@ TOKEN = os.environ.get("RESTART_SERVICE_TOKEN", "")
 SCRIPT_PATH = os.environ.get("RESTART_SERVICE_SCRIPT", DEFAULT_SCRIPT)
 LOG_DIR = Path(os.environ.get("RESTART_SERVICE_LOG_DIR", DEFAULT_LOG_DIR))
 PORT = int(os.environ.get("RESTART_SERVICE_PORT", str(DEFAULT_PORT)))
+VALID_MODES = ("upgrade", "restart")
 
 
 def _now_iso() -> str:
@@ -66,13 +79,14 @@ class RunState:
         self._lock = threading.Lock()
         self._running = False
         self.run_id: str | None = None
+        self.mode: str | None = None
         self.pid: int | None = None
         self.exit_code: int | None = None
         self.started_at: str | None = None
         self.ended_at: str | None = None
         self.log_path: str | None = None
 
-    def begin(self, run_id: str, log_path: str) -> bool:
+    def begin(self, run_id: str, log_path: str, mode: str) -> bool:
         with self._lock:
             if self._running:
                 return False
@@ -83,6 +97,7 @@ class RunState:
             self.started_at = _now_iso()
             self.ended_at = None
             self.log_path = log_path
+            self.mode = mode
             return True
 
     def set_pid(self, run_id: str, pid: int) -> None:
@@ -108,6 +123,7 @@ class RunState:
             log_path = self.log_path
             data = {
                 "run_id": self.run_id,
+                "mode": self.mode,
                 "pid": self.pid,
                 "running": self._running,
                 "exit_code": self.exit_code,
@@ -136,7 +152,7 @@ def _reap(run_id: str, proc: subprocess.Popen) -> None:
     STATE.finish(run_id, exit_code)
 
 
-def _start_run() -> dict:
+def _start_run(mode: str) -> dict:
     if not os.path.isfile(SCRIPT_PATH):
         raise FileNotFoundError(SCRIPT_PATH)
 
@@ -148,14 +164,14 @@ def _start_run() -> dict:
 
     # Claim the "one run at a time" slot before spawning anything, so two
     # concurrent POST /run requests can never both start a process.
-    if not STATE.begin(run_id, str(log_path)):
+    if not STATE.begin(run_id, str(log_path), mode):
         raise RunInProgress()
 
     try:
         log_fh = open(log_path, "ab", buffering=0)
         try:
             proc = subprocess.Popen(
-                ["bash", SCRIPT_PATH],
+                ["bash", SCRIPT_PATH, mode],
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
@@ -173,7 +189,7 @@ def _start_run() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "omp-web-restart-service/1.0"
+    server_version = "omp-web-restart-service/2.0"
 
     def _send_json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -182,6 +198,30 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_mode(self) -> str | None:
+        """Mode requested by the optional POST /run JSON body.
+
+        No body, unparseable JSON, or a body without "mode" → "upgrade"
+        (backward compatibility: existing watcher scripts POST with no
+        body). Any other mode value → None, which the caller rejects
+        with 400 {"error": "invalid mode"}.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return "upgrade"
+        raw = self.rfile.read(min(length, 65536))
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return "upgrade"
+        if not isinstance(body, dict):
+            return "upgrade"
+        mode = body.get("mode", "upgrade")
+        return mode if mode in VALID_MODES else None
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -207,8 +247,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "unauthorized"})
             return
 
+        mode = self._read_mode()
+        if mode is None:
+            self._send_json(400, {"error": "invalid mode"})
+            return
+
         try:
-            result = _start_run()
+            result = _start_run(mode)
         except RunInProgress:
             self._send_json(409, {"error": "run already in progress", **STATE.snapshot()})
         except FileNotFoundError as exc:

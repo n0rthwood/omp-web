@@ -12,6 +12,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { TerminalIcon } from "./FileIcons";
 import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { ServiceControlModal } from "./ServiceControlModal";
 import { OmpVersionBadge } from "./OmpVersionBadge";
 import { HomePage } from "./HomePage";
 import { BranchNavigator } from "./BranchNavigator";
@@ -21,6 +22,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
+import { useWebUser } from "@/hooks/useWebUser";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import {
@@ -96,6 +98,9 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const nav = useNavigation();
   const machines = useMachines();
   const sessionList = useSessionList();
+  const { user: webUser } = useWebUser();
+  // Fail closed: the service-control trigger (issue #85) is admin-only.
+  const isAdminUser = webUser?.role === "admin";
   const { preference, toggleTheme } = useTheme();
   const themeLabelKey =
     preference === "light" ? "theme.light" : preference === "dark" ? "theme.dark" : "theme.auto";
@@ -130,6 +135,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
+  const [serviceControlOpen, setServiceControlOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -1082,12 +1088,12 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpVersionBadge />
       </div>
-      <div style={{ padding: "8px", flexShrink: 0 }}>
+      <div style={{ padding: "8px", flexShrink: 0, display: "flex", gap: 8 }}>
         <button
           onClick={() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }}
           title={translate("common.settings")}
           style={{
-            width: "100%", height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            flex: 1, height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: "none", border: "1px solid var(--border)", borderRadius: 9,
             color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
             fontFamily: "var(--font-mono)", transition: "background 0.12s, color 0.12s, border-color 0.12s",
@@ -1101,6 +1107,26 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
           </svg>
           {translate("common.settings")}
         </button>
+        {isAdminUser && (
+          <button
+            onClick={() => setServiceControlOpen(true)}
+            title="Service restart / upgrade"
+            aria-label="Service restart / upgrade"
+            style={{
+              width: 44, height: 34, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              background: "none", border: "1px solid var(--border)", borderRadius: 9,
+              color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+              fontFamily: "var(--font-mono)", transition: "background 0.12s, color 0.12s, border-color 0.12s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.borderColor = "var(--text-dim)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.borderColor = "var(--border)"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+            </svg>
+          </button>
+        )}
       </div>
     </>
   );
@@ -2279,6 +2305,12 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
+      />
+    )}
+    {serviceControlOpen && (
+      <ServiceControlModal
+        machines={machines.machines}
+        onClose={() => setServiceControlOpen(false)}
       />
     )}
     </>

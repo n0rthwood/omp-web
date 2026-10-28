@@ -438,36 +438,72 @@ dependencies to install. Binds `127.0.0.1` only, port from
 | Endpoint | Auth | Behavior |
 | --- | --- | --- |
 | `GET /health` | none | `200 ok` |
-| `POST /run` | `X-Restart-Token` header must match `RESTART_SERVICE_TOKEN` | Missing/wrong token → `401`. A run already in flight → `409` (never starts a second concurrent run). Script file missing → `500`, daemon does not crash. Otherwise spawns `bash <script>` detached, stdout+stderr to a timestamped log under `RESTART_SERVICE_LOG_DIR`, and returns `202` with `{"status": "started", "run_id", "pid"}` immediately — before the script has necessarily finished, or even necessarily succeeded. |
-| `GET /status` | none (read-only, loopback-only anyway) | JSON: `run_id`, `pid`, `running`, `exit_code`, `started_at`, `ended_at`, `log_path`, `log_tail` (last 50 lines) for the most recent run. |
+| `POST /run` | `X-Restart-Token` header must match `RESTART_SERVICE_TOKEN` | Missing/wrong token → `401`. Optional JSON body `{"mode": "restart"}` or `{"mode": "upgrade"}`; no body, unparseable JSON, or a body without `"mode"` → `upgrade` (the historical behavior, so body-less watcher scripts keep upgrading); any other mode value → `400 {"error": "invalid mode"}`. A run already in flight → `409` (never starts a second concurrent run). Script file missing → `500`, daemon does not crash. Otherwise spawns `bash <script> <mode>` detached, stdout+stderr to a timestamped log under `RESTART_SERVICE_LOG_DIR`, and returns `202` with `{"status": "started", "run_id", "pid"}` immediately — before the script has necessarily finished, or even necessarily succeeded. |
+| `GET /status` | none (read-only, loopback-only anyway) | JSON: `run_id`, `mode`, `pid`, `running`, `exit_code`, `started_at`, `ended_at`, `log_path`, `log_tail` (last 50 lines) for the most recent run. `mode` is the mode of the current/last run, `null` before any run has happened. |
 
 This is intentionally a single fixed-script trigger, not a generic
 multi-tenant task runner. It has no TLS and is never exposed off loopback.
 
-### Install (gateway only, `172.30.3.123`, user `joysort`)
+The payload ships **in the repo**: `ops/restart-service/restart-payload.sh`,
+and `RESTART_SERVICE_SCRIPT` now defaults to that file (resolved next to
+`server.py` itself, so the unit works on any host with the checkout at
+`~/omp/ompweb` without per-host config; the old
+`~/omp/ops/scripts/restart-payload.sh` default is gone — an explicit
+`RESTART_SERVICE_SCRIPT` in the env file still wins, which is why the
+gateway rollout drops that line). It takes the mode as `$1`:
+
+- **`upgrade`** (default): proxy hygiene, `sudo apt-get update` +
+  `apt-get install --only-upgrade -y omp-web` (postinst restarts
+  `omp-web.service`), then — only where an `omp-web-dev.service` unit
+  file exists, i.e. the gateway — polls `http://127.0.0.1:5010/api/health`
+  for up to ~120 s and restarts the dev unit, so both units end up on the
+  same `.next` (the 2026-09-06 `:5020` React Client Manifest 500s lesson,
+  previously done by hand in `gw-0.5.4-watcher.sh`). Exits non-zero if
+  apt fails. Remotes have no dev unit and skip that step.
+- **`restart`**: `systemctl --user restart omp-web.service` only, no apt.
+
+### Install
+
+The gateway was originally installed by hand; since the v2 modes rollout
+every host — gateway plus the six remotes, all user `joysort` — is
+deployed idempotently by
+[`ops/restart-service/deploy-fleet.sh`](../ops/restart-service/deploy-fleet.sh),
+run from the gateway checkout:
 
 ```
-mkdir -p ~/omp/ops/env ~/omp/ops/scripts ~/omp/ops/logs/restart-service
+ops/restart-service/deploy-fleet.sh --all      # gateway + all six remotes
+ops/restart-service/deploy-fleet.sh --gateway  # this machine only
+ops/restart-service/deploy-fleet.sh            # remotes only
+HOSTS="172.30.3.24 172.30.3.39" ops/restart-service/deploy-fleet.sh
+```
+
+Per remote it pushes `server.py`, `restart-payload.sh` and the unit into
+`~/omp/ompweb/ops/restart-service/`, creates
+`~/omp/ops/env/restart-service.env` (token minted with
+`openssl rand -hex 24`, mode `600`) **only when the file does not already
+exist** — re-runs never rotate tokens, and tokens are never printed —
+installs + restarts the unit, and verifies `systemctl --user is-active`
+plus `/health` = `ok`, ending with a per-host summary table (non-zero
+exit if any host failed). `--gateway` normalizes the local env file in
+place: it keeps the existing token and the `PORT`/`LOG_DIR` lines but
+drops the legacy `RESTART_SERVICE_SCRIPT` line so the in-repo payload
+becomes the script, then reinstalls the unit and restarts the daemon.
+
+For reference, what a hand-made env file looks like post-v2 (note there
+is no `RESTART_SERVICE_SCRIPT` line any more; the payload itself ships
+in the repo, so no heredoc either):
+
+```
+mkdir -p ~/omp/ops/env ~/omp/ops/logs/restart-service
 
 TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 cat > ~/omp/ops/env/restart-service.env <<EOF
 RESTART_SERVICE_TOKEN=$TOKEN
 RESTART_SERVICE_PORT=8799
-RESTART_SERVICE_SCRIPT=/home/joysort/omp/ops/scripts/restart-payload.sh
 RESTART_SERVICE_LOG_DIR=/home/joysort/omp/ops/logs/restart-service
 EOF
 chmod 600 ~/omp/ops/env/restart-service.env
 unset TOKEN
-
-# The real self-upgrade recipe this service exists to run (see "Apt
-# upgrade" under Day-2 operations below for interactive use):
-cat > ~/omp/ops/scripts/restart-payload.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-sudo apt-get update
-sudo apt-get install -y --only-upgrade omp-web
-EOF
-chmod +x ~/omp/ops/scripts/restart-payload.sh
 
 mkdir -p ~/.config/systemd/user
 cp ~/omp/ompweb/ops/restart-service/omp-web-restart-service.service \
@@ -492,7 +528,11 @@ Run from **any** session (it does not need to be, and for the reason above
 ```
 # Unquoted on purpose — see the note in the gateway rollout section above.
 TOKEN=$(grep -oP '(?<=^RESTART_SERVICE_TOKEN=).*' ~/omp/ops/env/restart-service.env)
+# upgrade — the legacy body-less form still means upgrade:
 curl -s -X POST -H "X-Restart-Token: $TOKEN" http://127.0.0.1:8799/run
+# restart only (no apt), via the v2 mode body:
+curl -s -X POST -H "X-Restart-Token: $TOKEN" -d '{"mode":"restart"}' \
+  http://127.0.0.1:8799/run
 unset TOKEN
 ```
 
@@ -509,6 +549,14 @@ curl -s http://127.0.0.1:8799/status
 until `running` is `false`, then check `exit_code` (`0` = success) and
 `log_tail` for the `apt-get update`/`apt-get install` output.
 
+Since v2 the payload itself owns the gateway's dev-unit restart (`upgrade`
+waits for `:5010` to serve `/api/health`, then restarts
+`omp-web-dev.service`), so the old manual watcher step for that is gone.
+The remotes run the same daemon on their own loopback `:8799`; their
+omp-web UIs drive it through the `/api/service/restart` API route, which
+POSTs `{"mode": ...}` on the operator's behalf — the curl dance above is
+only for driving a host by hand.
+
 ### Verifying the loop without touching the live service
 
 Never point `RESTART_SERVICE_SCRIPT` at anything real to test the daemon
@@ -517,8 +565,8 @@ touches a marker file), `systemctl --user restart
 omp-web-restart-service` (safe — it is not `omp-web.service`), drive the
 full `401` → `202` → `409` → `GET /status` (`running: false`, `exit_code:
 0`) loop against it, confirm the marker file, then point
-`RESTART_SERVICE_SCRIPT` back at the real
-`~/omp/ops/scripts/restart-payload.sh` and restart
+`RESTART_SERVICE_SCRIPT` back at the real in-repo
+`ops/restart-service/restart-payload.sh` and restart
 `omp-web-restart-service` once more. `omp-web.service`'s own PID/uptime
 must be unchanged before and after this whole exercise.
 

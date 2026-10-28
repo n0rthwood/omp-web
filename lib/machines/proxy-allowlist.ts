@@ -51,6 +51,7 @@ const ALLOWED_ROUTES: readonly RouteRule[] = [
   { template: "/api/models", methods: ["GET"] },
   { template: "/api/plugins", methods: ["GET", "POST"] },
   { template: "/api/project-trust", methods: ["GET", "POST"] },
+  { template: "/api/service/restart", methods: ["GET", "POST"] },
   { template: "/api/sessions/:id/auto-name", methods: ["POST"] },
   { template: "/api/sessions/:id/context", methods: ["GET"] },
   { template: "/api/sessions/:id/entries/:entryId/thinking", methods: ["GET"] },
