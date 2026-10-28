@@ -114,7 +114,8 @@ function daemonRequest(
 ): Promise<DaemonResponse> {
   const { promise, resolve } = Promise.withResolvers<DaemonResponse>();
   let settled = false;
-  let timeout: NodeJS.Timeout | undefined;
+  // `timeout` is assigned after `req` exists; `finish` only runs on async
+  // events, so the closure reference below is safe.
   const finish = (result: DaemonResponse) => {
     if (settled) return;
     settled = true;
@@ -142,7 +143,7 @@ function daemonRequest(
     },
   );
 
-  timeout = setTimeout(() => {
+  const timeout = setTimeout(() => {
     const reason = `timeout after ${timeoutMs}ms`;
     req.destroy(new Error(reason));
     finish({ ok: false, reason });
