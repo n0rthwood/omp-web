@@ -1,3 +1,11 @@
+omp-web (0.5.15) jammy; urgency=medium
+
+  * Restore the user's prompt (text + images) and keep its draft whenever
+    session creation or prompt send fails; show the server's real error
+    message instead of a bare HTTP status (closes #83).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 28 Oct 2026 17:46:13 +0000
+
 omp-web (0.5.14) jammy; urgency=medium
 
   * Fleet service control (closes #85). New admin-only "Service restart /
