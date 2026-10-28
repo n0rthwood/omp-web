@@ -16,7 +16,7 @@ import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { stripAnsi } from "@/lib/ansi";
 import { apiPath } from "@/lib/api-path";
-import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { apiErrorMessage, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { ContextUsage, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
@@ -628,12 +628,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as {
-        sessionId: string;
+      const result = await res.json().catch(() => null) as {
+        sessionId?: string;
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
-      };
+        error?: string;
+      } | null;
+      // Read the body even on failure: the server's own `error` reason (e.g.
+      // "database disk image is malformed") is what must reach the notice —
+      // a bare "HTTP 500" hid the actual cause (#83). A success payload
+      // without sessionId is equally unusable, so it funnels here too.
+      if (!res.ok || !result?.sessionId) {
+        throw new Error(apiErrorMessage(res.status, result));
+      }
       const realId = result.sessionId;
       sessionIdRef.current = realId;
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
@@ -1445,6 +1452,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
+  // A send path that failed before the server accepted the submission must
+  // put the user's text (and attached images) back into the composer instead
+  // of losing it (#83). restoreSubmission re-persists the draft synchronously
+  // and merges with anything typed since — the failed text is prepended
+  // above newer input, never a clobber.
+  const restoreFailedSubmission = useCallback((
+    label: string,
+    e: unknown,
+    message: string,
+    images: AttachedImage[] | undefined,
+    targetDraftKey?: string,
+  ) => {
+    console.error(label, e);
+    addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+    opts.chatInputRef?.current?.restoreSubmission?.(
+      message,
+      images?.map(({ data, mimeType }) => ({ data, mimeType })),
+      targetDraftKey,
+    );
+  }, [addNotice, opts.chatInputRef]);
+
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
@@ -1522,7 +1550,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
     } catch (e) {
-      console.error("Failed to send message:", e);
       const definitivelyRejected = !promptRequestStarted || isPromptRejectedError(e);
       // A transport/proxy failure after dispatch is ambiguous: the server may
       // have accepted the prompt before the response was lost. Keep SSE alive
@@ -1543,14 +1570,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : prev;
         });
       }
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      // The prompt never reached the agent, so restore the user's text (and
-      // any attached images) into the input instead of losing it. Mirrors the
-      // shell-command recovery in executeBash; restoreSubmission avoids
-      // clobbering anything typed since.
-      opts.chatInputRef?.current?.restoreSubmission?.(
+      // The prompt never reached the agent: restore the user's text (and any
+      // attached images) into the composer. Mirrors the shell-command
+      // recovery in executeBash; restoreFailedSubmission also keeps the
+      // error notice.
+      restoreFailedSubmission(
+        "Failed to send message:",
+        e,
         message,
-        images?.map(({ data, mimeType }) => ({ data, mimeType })),
+        images,
         session?.id ?? sentSessionId ?? undefined,
       );
       optimisticUserMessageKeyRef.current = null;
@@ -1558,7 +1586,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, restoreFailedSubmission, cancelEventStreamGrace, closeEvents]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1928,9 +1956,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      console.error("Failed to steer:", e);
+      // The queue never took the message server-side, so it must come back
+      // to the composer — otherwise a failed steer silently eats the text
+      // (#83). The queue panel is untouched (server state).
+      restoreFailedSubmission("Failed to steer:", e, message, images, sid);
     }
-  }, []);
+  }, [restoreFailedSubmission]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
@@ -1948,9 +1979,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      console.error("Failed to queue prompt:", e);
+      restoreFailedSubmission("Failed to queue prompt:", e, message, images, sid);
     }
-  }, []);
+  }, [restoreFailedSubmission]);
 
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
     const sid = sessionIdRef.current;
@@ -1963,9 +1994,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      console.error("Failed to follow up:", e);
+      restoreFailedSubmission("Failed to follow up:", e, message, images, sid);
     }
-  }, []);
+  }, [restoreFailedSubmission]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
