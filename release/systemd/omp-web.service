@@ -10,6 +10,11 @@ WorkingDirectory=__HOME__/omp/ompweb
 
 EnvironmentFile=__HOME__/omp/ops/env/5010.env
 Environment=NODE_ENV=production
+# Bun queues `fetch` calls past this cap (default 256) forever. The gateway's
+# fleet proxy holds one upstream per live SSE subscription, so headroom keeps
+# a burst of watched sessions from starving health probes and provider calls
+# (#84). The bound in lib/machines/stream-registry.ts is the real guard.
+Environment=BUN_CONFIG_MAX_HTTP_REQUESTS=1024
 Environment=PORT=5010
 Environment=PATH=__HOME__/.bun/bin:__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=SHELL=/bin/bash
