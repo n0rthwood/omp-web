@@ -111,7 +111,13 @@ deploy_remote() {
 
   if ! out=$(ssh "${SSH_OPTS[@]}" "$host" '
       active=$(systemctl --user is-active omp-web-restart-service)
-      health=$(curl -s --noproxy "*" http://127.0.0.1:8799/health)
+      # Retry briefly: systemctl restart returns before the daemon binds.
+      health=""
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        health=$(curl -s --noproxy "*" http://127.0.0.1:8799/health)
+        [ "$health" = "ok" ] && break
+        sleep 0.5
+      done
       echo "active=$active health=$health"
       [ "$active" = "active" ] && [ "$health" = "ok" ]
     ' 2>&1); then
@@ -147,7 +153,13 @@ deploy_gateway() {
   systemctl --user restart omp-web-restart-service
 
   active=$(systemctl --user is-active omp-web-restart-service)
-  health=$(curl -s --noproxy '*' http://127.0.0.1:8799/health)
+  # Retry briefly: systemctl restart returns before the daemon binds.
+  health=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    health=$(curl -s --noproxy '*' http://127.0.0.1:8799/health)
+    [ "$health" = "ok" ] && break
+    sleep 0.5
+  done
   if [ "$active" = "active" ] && [ "$health" = "ok" ]; then
     record gateway "OK (active, health ok, in-repo payload default)"
     return 0
