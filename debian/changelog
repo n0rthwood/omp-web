@@ -1,3 +1,21 @@
+omp-web (0.5.14) jammy; urgency=medium
+
+  * Fleet service control (closes #85). New admin-only "Service restart /
+    upgrade" button: on a gateway it lists every fleet instance for the
+    operator to pick, on other hosts it restarts itself. Two modes —
+    restart-only and apt-upgrade-then-restart — with live-session warnings,
+    run log tail polling and automatic page recovery on self-restart.
+  * omp-web-restart-service v2: POST /run accepts {"mode":"restart"|
+    "upgrade"} (body-less POST still means upgrade), /status reports the
+    mode, and the payload ships in-repo. On the gateway the upgrade payload
+    also restarts omp-web-dev.service after waiting for :5010 health.
+  * New admin-only /api/service/restart route (proxied to fleet machines,
+    loopback daemon reached via node:http) and ops/restart-service/
+    deploy-fleet.sh to install/update the daemon on every host
+    idempotently.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 28 Oct 2026 17:21:06 +0000
+
 omp-web (0.5.13) jammy; urgency=medium
 
   * Gateway machine status dot now follows reality without a page reload
