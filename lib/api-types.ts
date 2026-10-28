@@ -288,3 +288,16 @@ export interface MachineTestResult {
   error?: string;
   health?: MachineHealth;
 }
+
+/** State returned by the loopback restart-service daemon. */
+export interface DaemonStatus {
+  run_id: string | null;
+  pid: number | null;
+  running: boolean;
+  exit_code: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  log_path: string | null;
+  log_tail: string[];
+  mode: string | null;
+}

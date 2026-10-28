@@ -1,5 +1,5 @@
 [Unit]
-Description=omp-web restart-trigger daemon (loopback-only, standalone from omp-web.service)
+Description=omp-web restart/upgrade trigger daemon (loopback-only, standalone from omp-web.service)
 
 [Service]
 Type=simple

@@ -23,6 +23,7 @@ export const ADMIN_ONLY_API_PREFIXES = [
   "/api/plugins",
   "/api/mcp",
   "/api/project-trust",
+  "/api/service",
   "/api/settings",
   "/api/updates",
   "/api/models-config",
