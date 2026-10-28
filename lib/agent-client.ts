@@ -27,6 +27,19 @@ export function isPromptRejectedError(error: unknown): error is AgentCommandErro
     && error.accepted === false;
 }
 
+/**
+ * The human-readable failure reason for an API response: the server's own
+ * `error` field when present, otherwise a bare status line. Shared by every
+ * client fetch so a rejected request surfaces e.g. "database disk image is
+ * malformed" instead of an opaque "HTTP 500" (#83).
+ */
+export function apiErrorMessage(
+  status: number,
+  body: { error?: unknown } | null | undefined,
+): string {
+  return typeof body?.error === "string" && body.error ? body.error : `HTTP ${status}`;
+}
+
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
   command: Record<string, unknown>,
@@ -45,7 +58,7 @@ export async function sendAgentCommand<T = unknown>(
   };
   if (!res.ok || body.error) {
     throw new AgentCommandError(
-      body.error ?? `HTTP ${res.status}`,
+      apiErrorMessage(res.status, body),
       res.status,
       body.code,
       body.accepted,

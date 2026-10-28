@@ -108,3 +108,44 @@ test("routes blocking extension requests through deduplicated browser attention 
   assert.match(attentionSource, /tag: `pi-extension-ui:\$\{request\.id\}`/);
   assert.match(appShellSource, /onAttentionNeeded=\{handleAttentionNeeded\}/);
 });
+
+test("failed sends restore the submission into the composer and surface the server reason (#83)", () => {
+  const ensureSource = source.slice(
+    source.indexOf("  const ensureNewSession = useCallback"),
+    source.indexOf("  const uploadSessionFiles = useCallback"),
+  );
+  const restoreSource = source.slice(
+    source.indexOf("  const restoreFailedSubmission = useCallback"),
+    source.indexOf("  const handleSend = useCallback"),
+  );
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+  const queuedSource = source.slice(
+    source.indexOf("  const handleSteer = useCallback"),
+    source.indexOf("  const handleAbortCompaction = useCallback"),
+  );
+
+  // ensureNewSession must read the response body even on failure so the
+  // server's own reason (e.g. "database disk image is malformed") reaches
+  // the notice instead of an opaque "HTTP 500".
+  assert.match(ensureSource, /res\.json\(\)\.catch\(\(\) => null\)/);
+  assert.match(ensureSource, /if \(!res\.ok \|\| !result\?\.sessionId\)/);
+  assert.match(ensureSource, /throw new Error\(apiErrorMessage\(res\.status, result\)\)/);
+
+  // The shared failure path keeps both halves of the contract: the error is
+  // still noticed and the text/images go back through restoreSubmission,
+  // which re-persists the draft and merges with anything typed since.
+  assert.match(restoreSource, /addNotice\(\{ type: "error", message: e instanceof Error \? e\.message : String\(e\) \}\)/);
+  assert.match(restoreSource, /restoreSubmission\?\.\(/);
+
+  // A definitively rejected prompt restores into the session's draft key.
+  assert.match(sendSource, /restoreFailedSubmission\(\s*"Failed to send message:",[\s\S]*?session\?\.id \?\? sentSessionId \?\? undefined,/);
+
+  // Every queued send path funnels failures through the same restore — a
+  // failed steer/follow-up used to eat the text with only a console.error.
+  assert.match(queuedSource, /restoreFailedSubmission\("Failed to steer:", e, message, images, sid\);/);
+  assert.match(queuedSource, /restoreFailedSubmission\("Failed to queue prompt:", e, message, images, sid\);/);
+  assert.match(queuedSource, /restoreFailedSubmission\("Failed to follow up:", e, message, images, sid\);/);
+});
