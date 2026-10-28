@@ -1,5 +1,6 @@
 import { isProxyablePath } from "./proxy-allowlist";
 import { planAttempt } from "./endpoint-state";
+import { registerStream, releaseStream } from "./stream-registry";
 import type { StoredMachine } from "./machine-store";
 
 /**
@@ -69,18 +70,82 @@ function buildOutboundHeaders(machine: StoredMachine, request: Request): Headers
   return headers;
 }
 
-function buildUpstreamResponse(upstream: Response): Response {
+/**
+ * `lifetime` aborts this attempt's upstream fetch. The inbound
+ * `request.signal` is composed into that fetch too, but under `next start` on
+ * Bun it does not fire when the browser drops an SSE connection (#84), so an
+ * SSE body is wrapped in a stream whose `cancel` aborts the upstream
+ * explicitly and whose registration bounds how many can ever be open at once.
+ * Every other response keeps the zero-copy passthrough — range requests and
+ * file downloads must not grow a per-chunk hop.
+ */
+function buildUpstreamResponse(
+  upstream: Response,
+  machineId: string,
+  lifetime: AbortController,
+): Response {
   const headers = new Headers();
   for (const name of Object.keys(PASSTHROUGH_RESPONSE_HEADERS)) {
     const value = upstream.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
   const contentType = upstream.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
+  const isEventStream = contentType.includes("text/event-stream");
+  if (isEventStream) {
     headers.set("cache-control", "no-cache, no-transform");
     headers.set("x-accel-buffering", "no");
   }
-  return new Response(upstream.body, {
+
+  let body: ReadableStream<Uint8Array> | null = upstream.body;
+  if (isEventStream && upstream.body !== null) {
+    const reader = upstream.body.getReader();
+    let id = 0;
+    let downstream: ReadableStreamDefaultController<Uint8Array> | null = null;
+    // Aborting `lifetime` is what actually frees Bun's fetch slot and closes
+    // the socket: cancelling the upstream reader alone provably does not
+    // (measured on Bun 1.3.14). Both are issued; the abort is the one that
+    // matters.
+    const closeUpstream = () => {
+      lifetime.abort();
+      void reader.cancel().catch(() => {});
+    };
+    // Eviction is not a client cancel: nothing will pull this stream again, so
+    // the consumer has to be told, or its reader would hang forever.
+    const evict = () => {
+      closeUpstream();
+      try {
+        downstream?.error(new Error("Proxied stream evicted: too many open streams for this machine"));
+      } catch {
+        // Already closed or errored — nothing left to signal.
+      }
+    };
+    body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        downstream = controller;
+        id = registerStream(machineId, evict);
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            releaseStream(id);
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          releaseStream(id);
+          controller.error(error);
+        }
+      },
+      cancel() {
+        releaseStream(id);
+        closeUpstream();
+      },
+    });
+  }
+
+  return new Response(body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
@@ -117,9 +182,12 @@ export async function proxyToMachine(
 
       // Race connect+headers against a timeout, but clear it as soon as the
       // remote answers — once the body is streaming there is no total
-      // deadline. The caller's own signal stays composed in, so a client
-      // disconnect still cancels the upstream stream.
+      // deadline. The caller's own signal stays composed in, but it is not
+      // trusted alone: `lifetime` is the handle `buildUpstreamResponse` uses
+      // to release this upstream when the proxied stream is cancelled or
+      // evicted (#84).
       const connectTimeout = new AbortController();
+      const lifetime = new AbortController();
       const timer = setTimeout(() => connectTimeout.abort(), UPSTREAM_HEADER_TIMEOUT_MS);
 
       let upstream: Response;
@@ -132,7 +200,7 @@ export async function proxyToMachine(
           body: hasBody ? attemptRequest.body : undefined,
           duplex: "half",
           redirect: "manual",
-          signal: AbortSignal.any([request.signal, connectTimeout.signal]),
+          signal: AbortSignal.any([request.signal, connectTimeout.signal, lifetime.signal]),
         } as RequestInit);
       } catch {
         if (request.signal.aborted) {
@@ -161,7 +229,7 @@ export async function proxyToMachine(
       }
 
       plan.recordSuccess(endpoint);
-      return buildUpstreamResponse(upstream);
+      return buildUpstreamResponse(upstream, machine.id, lifetime);
     }
     // plan.order is never empty (it always contains at least the primary).
     return errorResponse(502, { error: `Machine unreachable: ${machine.id}`, code: "machine_unreachable" });
