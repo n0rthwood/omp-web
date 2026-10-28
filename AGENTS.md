@@ -991,3 +991,31 @@ not by doing the leg work itself.
 The rule of thumb: if a question can be answered with a tool, a file, a
 subagent, or a search, it must be. Only questions only the user can answer go
 to the user.
+
+## Fleet service control (issue #85)
+
+The sidebar bottom cluster has an admin-only "Service restart / upgrade"
+button (`components/ServiceControlModal.tsx` + `app/api/service/restart`,
+admin-gated, proxied to remotes). It drives the `omp-web-restart-service`
+daemon — now v2 and deployed on the gateway **and every remote** — in two
+modes: `restart` (`systemctl --user restart omp-web.service`) and `upgrade`
+(apt `--only-upgrade` + postinst restart; on the gateway the payload also
+waits for :5010 health and restarts `omp-web-dev.service` because both units
+share one `.next`).
+
+Operational rules:
+
+- Restarting any host kills its live browser AgentSessions. The gateway
+  restart also drops the page you are looking at; the modal warns and
+  auto-recovers by polling `/api/health` and reloading.
+- The daemon stays loopback-only (`127.0.0.1:8799`, token in
+  `~/omp/ops/env/restart-service.env`). omp-web reaches it via `node:http`
+  (never `fetch` — Bun proxies loopback under `HTTP_PROXY`, #61), and the
+  gateway reaches remotes through the fleet proxy allowlist
+  (`GET/POST /api/service/restart`), not by exposing the daemon.
+- Deploy/update the daemon everywhere with
+  `ops/restart-service/deploy-fleet.sh --all` (idempotent; never rotates
+  tokens; the payload ships in-repo, so remotes also pick it up via deb
+  overlays on future upgrades).
+- Body-less `POST /run` still means `upgrade` — the legacy gateway watcher
+  scripts depend on that.
