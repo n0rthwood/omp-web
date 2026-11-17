@@ -5,10 +5,12 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
+  refreshProviderModels,
   serializeHeaderRows,
   setCompatBool,
   updateHeaderRow,
 } = await jiti.import("./models-config-helpers.ts");
+const { getCurrentMachineId, setCurrentMachineId } = await jiti.import("../lib/api-path.ts");
 
 const source = await readFile(new URL("./ModelsConfig.tsx", import.meta.url), "utf8");
 
@@ -69,4 +71,52 @@ test("blank header drafts are omitted until they have a name", () => {
     serializeHeaderRows(updateHeaderRow(rows, 2, { name: "X-Draft" })),
     { "X-Existing": "kept", "X-Draft": "draft value" },
   );
+});
+
+test("refresh posts the saved provider to the selected fleet machine and reloads models", async () => {
+  const previousMachineId = getCurrentMachineId();
+  let request;
+  let modelReloads = 0;
+  try {
+    setCurrentMachineId("remote #1");
+    const result = await refreshProviderModels("provider-a", () => { modelReloads += 1; }, async (url, options) => {
+      request = { url, options };
+      return Response.json({ success: true, discoveryStatus: "empty", warning: "No models reported" });
+    });
+
+    assert.equal(request.url, "/api/machines/remote%20%231/api/models-config/refresh-provider");
+    assert.equal(request.options.method, "POST");
+    assert.equal(request.options.headers["Content-Type"], "application/json");
+    assert.deepEqual(JSON.parse(request.options.body), { providerName: "provider-a" });
+    assert.equal(result.discoveryStatus, "empty");
+    assert.equal(result.warning, "No models reported");
+    assert.equal(modelReloads, 1);
+  } finally {
+    setCurrentMachineId(previousMachineId);
+  }
+});
+
+test("refresh surfaces server failure and still reloads models after a possible partial change", async () => {
+  let modelReloads = 0;
+  await assert.rejects(
+    refreshProviderModels("provider-a", () => { modelReloads += 1; }, async () => (
+      Response.json({ error: "Discovery unavailable" }, { status: 502 })
+    )),
+    { message: "Discovery unavailable" },
+  );
+  assert.equal(modelReloads, 1);
+});
+
+test("refresh reloads models when the connection fails or an error response is not JSON", async () => {
+  let modelReloads = 0;
+  const offline = new Error("connection lost");
+  await assert.rejects(
+    refreshProviderModels("provider-a", () => { modelReloads += 1; }, async () => { throw offline; }),
+    (error) => error === offline,
+  );
+  await assert.rejects(
+    refreshProviderModels("provider-a", () => { modelReloads += 1; }, async () => new Response("bad gateway", { status: 502 })),
+    { message: "HTTP 502" },
+  );
+  assert.equal(modelReloads, 2);
 });

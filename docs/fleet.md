@@ -140,6 +140,35 @@ relaxed on the remote side:
   hostname must be listed in the remote's allow-list or every proxied request
   dies with `403 Untrusted API request`.
 
+## Refreshing provider models
+
+An administrator can explicitly refresh a provider's models without restarting
+the selected omp-web instance. The API is
+`POST /api/models-config/refresh-provider` with JSON
+`{"providerName":"provider-id"}`; use
+`POST /api/machines/<machineId>/api/models-config/refresh-provider` for a
+remote. The gateway still requires admin permission even when an ordinary user
+has a grant for that machine, and the remote credential must itself have admin
+access when authentication is enabled.
+
+This performs an online refresh on the process's shared model registry and
+re-runs command-backed credentials for that provider. It invalidates the
+instance's model-list response cache without replacing the registry or stopping
+running sessions. Sessions that share this registry see refreshed models;
+sessions created before a separate configuration/auth change replaced the
+runtime may still reference the earlier registry. Provider configuration files
+are not rewritten.
+
+A successful response is `{"success":true}` with optional `discoveryStatus` and
+`warning` fields. A provider that returns an empty list or has no discovery
+status can succeed with a warning. Providers with only static models reload
+their configured data but do not acquire new models through discovery. Unknown
+providers return 404; discovery, authentication and configuration failures
+return a non-2xx response with an `error`. Idle discovery or a cached or stale
+fallback does not mean the online refresh succeeded. Even on failure the
+registry may have partially changed, so the model-list cache is invalidated
+and clients should reload the model list.
+
 ## What is never proxied
 
 The proxy is allow-listed by route template **and** method

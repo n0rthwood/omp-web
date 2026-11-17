@@ -9,6 +9,7 @@ import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model
 import type { DiscoveredModel } from "@/lib/model-discovery";
 import { apiPath } from "@/lib/api-path";
 import {
+  refreshProviderModels,
   serializeHeaderRows,
   setCompatBool,
   updateHeaderRow,
@@ -166,6 +167,12 @@ type ModelDiscoveryState =
   | { phase: "success"; models: DiscoveredModel[]; endpoint: string }
   | { phase: "error"; message: string };
 
+type ProviderRefreshState =
+  | { phase: "idle" }
+  | { phase: "loading"; providerName: string }
+  | { phase: "success"; providerName: string; warning?: string }
+  | { phase: "error"; providerName: string; message: string };
+
 type ModelCatalogState =
   | { phase: "idle" }
   | { phase: "loading" }
@@ -319,12 +326,52 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{children}</div>;
 }
 
+function ProviderRefreshControl({ name, isPersisted, refreshState, refreshBusy, onRefresh }: {
+  name: string; isPersisted: boolean; refreshState: ProviderRefreshState; refreshBusy: boolean; onRefresh: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, display: "flex", flexDirection: "column", gap: 7 }}>
+      <button
+        onClick={onRefresh}
+        disabled={!isPersisted || refreshBusy}
+        style={{
+          alignSelf: "flex-start", height: 30, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 5,
+          background: "var(--bg-panel)", color: !isPersisted || refreshBusy ? "var(--text-dim)" : "var(--text-muted)",
+          cursor: !isPersisted || refreshBusy ? "not-allowed" : "pointer", fontSize: 11,
+        }}
+      >
+        {refreshState.phase === "loading" && refreshState.providerName === name ? t("models.refreshingProvider") : t("models.refreshProvider")}
+      </button>
+      <span style={{ color: "var(--text-dim)", fontSize: 10, lineHeight: 1.4 }}>
+        {isPersisted ? t("models.refreshSavedHelp", { provider: name }) : t("models.refreshSaveFirst")}
+      </span>
+      {refreshState.phase === "success" && refreshState.providerName === name && (
+        <div role="status" style={{ color: "#16a34a", fontSize: 11, lineHeight: 1.4 }}>
+          {t("models.refreshSuccess")}
+        </div>
+      )}
+      {refreshState.phase === "success" && refreshState.providerName === name && refreshState.warning && (
+        <div role="status" style={{ padding: "7px 9px", border: "1px solid rgba(245,158,11,0.4)", borderRadius: 5, color: "#d97706", fontSize: 11, lineHeight: 1.4 }}>
+          {refreshState.warning}
+        </div>
+      )}
+      {refreshState.phase === "error" && refreshState.providerName === name && (
+        <div role="alert" style={{ padding: "7px 9px", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 5, color: "#ef4444", fontSize: 11, lineHeight: 1.4 }}>
+          {refreshState.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Provider detail ───────────────────────────────────────────────────────────
 
-function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddModels }: {
+function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddModels, isPersisted, refreshState, refreshBusy, onRefresh }: {
   name: string; provider: ProviderEntry;
   onChange: (p: ProviderEntry) => void; onRename: (n: string) => void; onDelete: () => void;
   onAddModels: (models: DiscoveredModel[]) => void;
+  isPersisted: boolean; refreshState: ProviderRefreshState; refreshBusy: boolean; onRefresh: () => void;
 }) {
   const { t } = useI18n();
   const [editingName, setEditingName] = useState(name);
@@ -460,6 +507,8 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
           Added to every request from this provider (e.g. User-Agent). Useful for gateways with bot detection.
         </span>
       </Field>
+
+      <ProviderRefreshControl name={name} isPersisted={isPersisted} refreshState={refreshState} refreshBusy={refreshBusy} onRefresh={onRefresh} />
 
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         {discoveryState.phase !== "success" && (
@@ -1751,6 +1800,9 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
+  const [savedProviderNames, setSavedProviderNames] = useState<string[]>([]);
+  const [providerRefresh, setProviderRefresh] = useState<ProviderRefreshState>({ phase: "idle" });
+  const providerRefreshPendingRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1788,6 +1840,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
       .then((r) => r.json())
       .then((d: ModelsJson) => {
         setConfig(d.providers ? d : { ...d, providers: {} });
+        setSavedProviderNames(Object.keys(d.providers ?? {}));
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
@@ -1881,7 +1934,26 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     setSelection({ type: "provider", name: providerName });
   }, []);
 
+  const handleProviderRefresh = useCallback(async (providerName: string) => {
+    const isPersisted = savedProviderNames.includes(providerName)
+      || oauthProviders.some((provider) => provider.id === providerName)
+      || apiKeyProviders.some((provider) => provider.id === providerName);
+    if (providerRefreshPendingRef.current || saving || !isPersisted) return;
+    providerRefreshPendingRef.current = true;
+    setProviderRefresh({ phase: "loading", providerName });
+    try {
+      const result = await refreshProviderModels(providerName, onModelsChanged);
+      setProviderRefresh({ phase: "success", providerName, warning: result.warning });
+    } catch (error) {
+      setProviderRefresh({ phase: "error", providerName, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      providerRefreshPendingRef.current = false;
+    }
+  }, [apiKeyProviders, oauthProviders, onModelsChanged, savedProviderNames, saving]);
+
   const handleSave = useCallback(async () => {
+    if (providerRefreshPendingRef.current) return;
+    setProviderRefresh({ phase: "idle" });
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
@@ -1894,6 +1966,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
       const d = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
       else {
+        setSavedProviderNames(Object.keys(config.providers ?? {}));
         setSavedOk(true);
         onModelsChanged?.();
         setTimeout(() => setSavedOk(false), 2000);
@@ -1905,6 +1978,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     }
   }, [config, onModelsChanged]);
 
+  const refreshInProgress = providerRefresh.phase === "loading";
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
   const activeApiKey = apiKeyProviders.filter((p) => p.configured);
@@ -1918,12 +1992,28 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <OAuthDetail key={p.id} provider={p} onRefresh={refreshAuthProviders} />;
+      return (
+        <div key={p.id} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <OAuthDetail provider={p} onRefresh={refreshAuthProviders} />
+          <ProviderRefreshControl
+            name={p.id} isPersisted refreshState={providerRefresh} refreshBusy={saving || refreshInProgress}
+            onRefresh={() => { void handleProviderRefresh(p.id); }}
+          />
+        </div>
+      );
     }
     if (selection.type === "apikey") {
       const p = apiKeyProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <ApiKeyDetail key={p.id} provider={p} onRefresh={refreshAuthProviders} />;
+      return (
+        <div key={p.id} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <ApiKeyDetail provider={p} onRefresh={refreshAuthProviders} />
+          <ProviderRefreshControl
+            name={p.id} isPersisted refreshState={providerRefresh} refreshBusy={saving || refreshInProgress}
+            onRefresh={() => { void handleProviderRefresh(p.id); }}
+          />
+        </div>
+      );
     }
     if (selection.type === "provider") {
       const provider = config.providers?.[selection.name];
@@ -1937,6 +2027,10 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
           onRename={(n) => renameProvider(selection.name, n)}
           onDelete={() => deleteProvider(selection.name)}
           onAddModels={(models) => addDiscoveredModels(selection.name, models)}
+          isPersisted={savedProviderNames.includes(selection.name)}
+          refreshState={providerRefresh}
+          refreshBusy={saving || refreshInProgress}
+          onRefresh={() => { void handleProviderRefresh(selection.name); }}
         />
       );
     }
@@ -2129,14 +2223,14 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
           <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
              {t("i18n.cancel")}
           </button>
-          <button onClick={handleSave} disabled={saving || savedOk} style={{
+          <button onClick={handleSave} disabled={saving || savedOk || refreshInProgress} style={{
             position: "relative",
             padding: "6px 16px",
             minWidth: 92,
-            background: savedOk ? "#16a34a" : saving ? "var(--bg-panel)" : "var(--accent)",
+            background: savedOk ? "#16a34a" : saving || refreshInProgress ? "var(--bg-panel)" : "var(--accent)",
             border: "none", borderRadius: 6,
-            color: savedOk ? "#fff" : saving ? "var(--text-muted)" : "#fff",
-            cursor: (saving || savedOk) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
+            color: savedOk ? "#fff" : saving || refreshInProgress ? "var(--text-muted)" : "#fff",
+            cursor: (saving || savedOk || refreshInProgress) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
             display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
             transition: "background-color 0.2s ease, color 0.2s ease",
             animation: savedOk ? "saved-pop 0.45s ease" : undefined,

@@ -457,3 +457,33 @@ test("?force=1 on the session-list route is still filtered", async (t) => {
     ["s-granted", "s-worktree"],
   );
 });
+
+test("provider refresh forwards the JSON body for admins but denies granted non-admins", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const admin = await loginAs("root");
+  const granted = await loginAs("granted");
+  const { POST } = await loadRoute();
+  const path = "/api/machines/gpu-1/api/models-config/refresh-provider";
+  const context = params({ machineId: "gpu-1", path: ["api", "models-config", "refresh-provider"] });
+  const request = (cookie) => new Request(`http://localhost${path}`, {
+    method: "POST",
+    headers: { host: "localhost", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ providerName: "my-provider" }),
+  });
+
+  const denied = await withStubbedFetch(() => POST(request(granted), context));
+  assert.equal(denied.result.status, 403);
+  assert.deepEqual(await denied.result.json(), { error: "Admin access required" });
+  assert.equal(denied.calls.length, 0);
+
+  const forwarded = await withStubbedFetch(() => POST(request(admin), context));
+  assert.equal(forwarded.result.status, 200);
+  assert.equal(forwarded.calls.length, 1);
+  assert.equal(forwarded.calls[0].url, "http://gpu-1.local/api/models-config/refresh-provider");
+  assert.equal(forwarded.calls[0].init.method, "POST");
+  assert.equal(forwarded.calls[0].init.headers.get("content-type"), "application/json");
+  assert.deepEqual(JSON.parse(await new Response(forwarded.calls[0].init.body).text()), { providerName: "my-provider" });
+});
