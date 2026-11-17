@@ -1,3 +1,15 @@
+omp-web (0.5.18) jammy; urgency=medium
+
+  * A turn's real answer is no longer folded into "Process details" when the
+    turn continues after it (closes #91). When omp's todo-completion reminder
+    re-wakes the agent after it already replied, the model's short recap used
+    to become the displayed final message and fold the full answer away. Any
+    assistant message that ended with stopReason "stop" and carries answer text
+    now stays visible; only the intermediate tool-use messages between them
+    fold, one group per run.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 17 Nov 2026 05:00:00 +0000
+
 omp-web (0.5.17) jammy; urgency=medium
 
   * A typed prompt is never lost (closes #88, part of #70). Composer drafts
