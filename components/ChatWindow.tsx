@@ -17,7 +17,7 @@ import type {
 } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, findStoppedAnswerIndices, getAssistantErrorMessage, getDisplayableAssistantBlocks, hasFinalAnswerBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
@@ -83,16 +83,10 @@ export function projectBasename(path: string): string {
 
 const CHAT_COLUMN_PADDING = 16;
 
-function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
-  ));
-}
-
 function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
   for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
+    const candidate = messages[candidateIdx];
+    if (candidate.role === "assistant" && hasFinalAnswerBlocks(candidate)) return candidateIdx;
   }
   for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
     if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
@@ -681,11 +675,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   }
                 }
 
-                const processIndices: number[] = [];
-                for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-                  processIndices.push(processIdx);
-                }
-                const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
                 const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
                 const finalSplit = splitFinalAssistantBlocks(finalAssistant);
                 const finalProcessMessage = finalSplit.processBlocks.length > 0
@@ -695,25 +684,69 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
 
-                const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
-                if (processCount > 0) {
-                  const processGroup = (
-                    <ProcessDetailsGroup
-                      messageCount={processCount}
-                      defaultExpanded={!finalAnswerMessage}
-                      t={t}
-                      toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
-                    >
-                      {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { keyPrefix: "process" }))}
-                      {finalProcessMessage && renderMessage(finalAssistantIdx, { keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
-                    </ProcessDetailsGroup>
-                  );
+                // Messages that already ended their model turn with an answer
+                // (stopReason "stop") stay visible even when the turn went on
+                // — e.g. omp's todo reminder re-woke the agent and its short
+                // recap became the "final" message. Only the process messages
+                // between them fold, one group per run.
+                const stoppedAnswers = new Set(findStoppedAnswerIndices(messages, userIdx, finalAssistantIdx));
+                let run: { start: number; nodes: ReactNode[]; count: number; toolCalls: number } | null = null;
+                const addToRun = (start: number, node: ReactNode, toolCalls: number) => {
+                  if (!run) run = { start, nodes: [], count: 0, toolCalls: 0 };
+                  run.nodes.push(node);
+                  run.count += 1;
+                  run.toolCalls += toolCalls;
+                };
+                const flushRun = (isLast: boolean) => {
+                  if (!run) return;
+                  const { start, nodes, count, toolCalls } = run;
+                  run = null;
                   rendered.push(
-                    <div key={`process-group-${userIdx}-${finalAssistantIdx}`}>
-                      {processGroup}
+                    <div key={`process-group-${userIdx}-${isLast ? finalAssistantIdx : start}`}>
+                      <ProcessDetailsGroup
+                        messageCount={count}
+                        defaultExpanded={isLast && !finalAnswerMessage}
+                        t={t}
+                        toolCallCount={toolCalls}
+                      >
+                        {nodes}
+                      </ProcessDetailsGroup>
                     </div>,
                   );
+                };
+
+                for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
+                  const processMessage = messages[processIdx];
+                  if (stoppedAnswers.has(processIdx)) {
+                    const stoppedMessage = processMessage as AssistantMessage;
+                    const split = splitFinalAssistantBlocks(stoppedMessage);
+                    if (split.processBlocks.length > 0) {
+                      addToRun(
+                        processIdx,
+                        renderMessage(processIdx, {
+                          keyPrefix: "process-stopped",
+                          messageOverride: withAssistantBlocks(stoppedMessage, split.processBlocks, { omitUsage: true }),
+                          showTimestamp: false,
+                        }),
+                        countToolCallBlocks(split.processBlocks),
+                      );
+                    }
+                    flushRun(false);
+                    rendered.push(renderMessage(processIdx, { messageOverride: withAssistantBlocks(stoppedMessage, split.answerBlocks) }));
+                    continue;
+                  }
+                  if (hasDisplayableProcessMessage(processMessage)) {
+                    addToRun(processIdx, renderMessage(processIdx, { keyPrefix: "process" }), countToolCalls(messages, [processIdx]));
+                  }
                 }
+                if (finalProcessMessage) {
+                  addToRun(
+                    finalAssistantIdx,
+                    renderMessage(finalAssistantIdx, { keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false }),
+                    countToolCallBlocks(finalSplit.processBlocks),
+                  );
+                }
+                flushRun(true);
 
                 if (finalAnswerMessage) {
                   // Each tool call is stored as its own assistant entry, so the
