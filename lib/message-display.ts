@@ -1,4 +1,4 @@
-import type { AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
@@ -44,4 +44,32 @@ export function splitFinalAssistantBlocks(
 
 export function countToolCallBlocks(blocks: AssistantContentBlock[]): number {
   return blocks.filter((block): block is ToolCallContent => block.type === "toolCall").length;
+}
+
+export function hasFinalAnswerBlocks(message: AssistantMessage): boolean {
+  return splitFinalAssistantBlocks(message).answerBlocks.some((block) => (
+    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
+  ));
+}
+
+/**
+ * Indices in the open range (userIdx, finalIdx) of assistant messages that
+ * already delivered an answer: they ended the model's turn (`stopReason:
+ * "stop"`) with answer text. The turn only continued because something else
+ * (e.g. omp's todo-completion reminder) re-woke the agent, so these must stay
+ * visible instead of being folded into the process details.
+ */
+export function findStoppedAnswerIndices(
+  messages: readonly AgentMessage[],
+  userIdx: number,
+  finalIdx: number,
+): number[] {
+  const indices: number[] = [];
+  for (let idx = userIdx + 1; idx < finalIdx; idx++) {
+    const message = messages[idx];
+    if (message.role !== "assistant") continue;
+    if (message.stopReason !== "stop") continue;
+    if (hasFinalAnswerBlocks(message)) indices.push(idx);
+  }
+  return indices;
 }
