@@ -1,3 +1,20 @@
+omp-web (0.5.20) jammy; urgency=medium
+
+  * OAuth login paste input stays visible and retryable on remote servers
+    (closes #90). In Settings → Models, the redirect-URL/authorization-code
+    input now remains mounted for the whole auth→success/error window: SDK
+    progress messages show alongside it instead of replacing it, and a
+    rejected paste (no code, or CSRF state mismatch) returns an inline
+    localized error while keeping the same login token retryable. The POST
+    route pre-validates pastes with the SDK's parseCallbackInput against the
+    state advertised in the authorization URL, and a defensive
+    input_rejected SSE event hands the client a fresh token if the SDK
+    re-prompts. All OAuth hint/status/error strings are localized (en,
+    zh-CN); the EventSource no longer auto-reconnects into a new login
+    attempt. Works unchanged through the fleet gateway proxy.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 18 Nov 2026 03:13:32 +0000
+
 omp-web (0.5.19) jammy; urgency=medium
 
   * Refresh a provider's model list without restarting omp-web (closes #93).
