@@ -1,3 +1,26 @@
+omp-web (0.5.21) jammy; urgency=medium
+
+  * Split session execution and terminal PTYs out of the web server into
+    independently-surviving host processes (#94): restarting or upgrading
+    omp-web no longer interrupts conversations or terminals.
+  * Session hosts: one supervised Bun process per conversation
+    (systemd-run --user transient units), UDS wire protocol with
+    multi-client attach, seq-based gap replay, activity-aware idle
+    reaping, crash-restore markers; web tier is a lease-free proxy and
+    refuses foreign-owned journals with 409 instead of silent forks.
+  * Terminal daemon: persistent omp-terminal-host.service owns all PTYs
+    and scrollback; web relay auto-starts it and reconnects
+    transparently; postinst never restarts an active daemon.
+  * Surviving hosts are re-discovered after a web restart: socket-key
+    probing plus host .info sidecars resolve the real session id to its
+    host, read/running feeds refresh without attaching (idle reaping
+    stays intact), and state/events/prompt routes re-attach so a
+    mid-flight turn completes in the UI after a single reload.
+  * Prod-build fix: repo-root resolution no longer relies on Bun-only
+    import.meta.dir inside webpack-compiled server chunks.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 18 Nov 2026 12:28:21 +0000
+
 omp-web (0.5.20) jammy; urgency=medium
 
   * OAuth login paste input stays visible and retryable on remote servers
