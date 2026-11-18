@@ -1,13 +1,24 @@
 import type { OAuthAuthInfo, OAuthPrompt, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth";
+import { parseCallbackInput } from "@oh-my-pi/pi-ai/oauth/callback-server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getOmpRuntime, invalidateOmpRuntime } from "@/lib/omp-runtime";
 import { resolveOAuthLoginId } from "@/lib/provider-listing-runtime";
 
 export const dynamic = "force-dynamic";
 
-// In-memory registry: loginToken -> resolve/reject for the manualCodeInput promise
+// In-memory registry: loginToken -> pending browser-input request.
+// `manual` entries carry the OAuth redirect URL/code and are pre-validated on
+// POST; `prompt` entries are free-form provider prompts (enterprise URL, ...)
+// and pass through untouched.
+type PendingInput = {
+  kind: "manual" | "prompt";
+  expectedState: string;
+  resolve: (v: string) => void;
+  reject: (e: Error) => void;
+};
+
 declare global {
-  var __ompLoginCallbacks: Map<string, { resolve: (v: string) => void; reject: (e: Error) => void }> | undefined;
+  var __ompLoginCallbacks: Map<string, PendingInput> | undefined;
 }
 
 function getCallbackRegistry() {
@@ -15,30 +26,60 @@ function getCallbackRegistry() {
   return globalThis.__ompLoginCallbacks;
 }
 
-// POST /api/auth/login/[provider] — frontend sends redirect URL or auth code
+// POST /api/auth/login/[provider] — frontend sends redirect URL or auth code.
+// Invalid pastes are rejected synchronously WITHOUT consuming the token, so
+// the client can retry with the same token (issue #90).
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
-  const { token, code } = (await req.json()) as { token?: string; code?: string };
+  let body: { token?: unknown; code?: unknown };
+  try {
+    body = (await req.json()) as { token?: unknown; code?: unknown };
+  } catch {
+    return Response.json({ error: "Invalid JSON body", code: "invalid_json" }, { status: 400 });
+  }
+  const { token, code } = body ?? {};
 
-  if (!token || !code) {
-    return Response.json({ error: "token and code required" }, { status: 400 });
+  if (typeof token !== "string" || !token || typeof code !== "string") {
+    return Response.json({ error: "token and code required", code: "missing_fields" }, { status: 400 });
+  }
+  if (!code.trim()) {
+    return Response.json({ error: "code must not be empty", code: "invalid_input" }, { status: 400 });
   }
 
   const registry = getCallbackRegistry();
-  const callbacks = registry.get(token);
-  if (!callbacks) {
-    return Response.json({ error: "No pending login for token" }, { status: 404 });
+  const entry = registry.get(token);
+  if (!entry) {
+    return Response.json({ error: "No pending login for token", code: "unknown_token" }, { status: 404 });
   }
   // Verify token belongs to this provider (token format: "<provider>-<ts>-<random>")
   if (!token.startsWith(`${provider}-`)) {
-    return Response.json({ error: "Token does not match provider" }, { status: 400 });
+    return Response.json({ error: "Token does not match provider", code: "token_provider_mismatch" }, { status: 400 });
   }
 
-  callbacks.resolve(code);
-  registry.delete(token);
+  // Pre-validate manual OAuth input with the SDK's own parser and the state
+  // the SDK advertised in the authorization URL. The SDK silently drops
+  // code-less or state-mismatched pastes and re-prompts with a token the
+  // client never sees; rejecting here keeps the current token retryable.
+  if (entry.kind === "manual") {
+    const parsed = parseCallbackInput(code);
+    if (!parsed.code) {
+      return Response.json(
+        { error: "No authorization code found in the pasted input", code: "missing_code" },
+        { status: 400 }
+      );
+    }
+    if (entry.expectedState && parsed.state && parsed.state !== entry.expectedState) {
+      return Response.json(
+        { error: "State does not match this login attempt; paste the redirect URL from the current sign-in", code: "state_mismatch" },
+        { status: 400 }
+      );
+    }
+  }
+
+  entry.resolve(code);
   return Response.json({ ok: true, provider });
 }
 
@@ -51,7 +92,13 @@ export async function GET(
 
   const encoder = new TextEncoder();
   const send = (controller: ReadableStreamDefaultController, data: unknown) => {
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+    // The client may disconnect mid-login; the SDK's final callbacks can then
+    // race the stream's cancel. Dropping those frames is safe — nobody reads.
+    try {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+    } catch {
+      // stream already closed
+    }
   };
 
   // AbortController propagates client disconnect into AuthStorage.login().
@@ -71,13 +118,21 @@ export async function GET(
       const registry = getCallbackRegistry();
       const activeTokens = new Set<string>();
       let pendingManualRequest: { token: string; promise: Promise<string> } | undefined;
+      // CSRF state the SDK put in the authorization URL; manual pastes are
+      // checked against it exactly like the SDK's own callback handler.
+      let expectedState = "";
+      // The SDK calls onManualCodeInput once per wait; a second call means it
+      // silently discarded the previous paste and is asking again.
+      let manualInputCalls = 0;
 
-      const createClientInputRequest = () => {
+      const createClientInputRequest = (kind: PendingInput["kind"]) => {
         const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         activeTokens.add(token);
 
         const promise = new Promise<string>((resolve, reject) => {
           registry.set(token, {
+            kind,
+            expectedState: kind === "manual" ? expectedState : "",
             resolve: (value) => {
               activeTokens.delete(token);
               registry.delete(token);
@@ -96,7 +151,7 @@ export async function GET(
 
       const getManualInputRequest = () => {
         if (!pendingManualRequest) {
-          pendingManualRequest = createClientInputRequest();
+          pendingManualRequest = createClientInputRequest("manual");
           pendingManualRequest.promise
             .finally(() => {
               pendingManualRequest = undefined;
@@ -120,10 +175,11 @@ export async function GET(
 
       try {
         await authStorage.oauth.login(loginId as OAuthProviderId, {
-          // Every provider prompt (paste-the-code, enterprise URL, ...) becomes
-          // a browser input request keyed by a short-lived token.
+          // Every provider prompt (enterprise URL, ...) becomes a browser
+          // input request keyed by a short-lived token. Prompts are free-form
+          // answers, not OAuth redirect URLs, so POST passes them through.
           onPrompt: async (prompt: OAuthPrompt) => {
-            const request = createClientInputRequest();
+            const request = createClientInputRequest("prompt");
             send(controller, {
               type: "prompt_request",
               message: prompt.message,
@@ -134,8 +190,29 @@ export async function GET(
           },
           // Manual-code flows resolve through the same pending request as the
           // auth URL so a user who pastes the redirect completes the login.
-          onManualCodeInput: () => getManualInputRequest().promise,
+          onManualCodeInput: () => {
+            manualInputCalls += 1;
+            const request = getManualInputRequest();
+            if (manualInputCalls > 1) {
+              // Defense in depth: POST pre-validation should make this
+              // unreachable, but if the SDK ever drops an accepted paste,
+              // hand the client the fresh token instead of leaving it stuck
+              // on a consumed one (issue #90).
+              send(controller, {
+                type: "input_rejected",
+                token: request.token,
+                message:
+                  "The pasted input was rejected (no authorization code, or state mismatch). Paste the redirect URL or code again.",
+              });
+            }
+            return request.promise;
+          },
           onAuth: (info: OAuthAuthInfo) => {
+            try {
+              expectedState = new URL(info.url).searchParams.get("state") ?? "";
+            } catch {
+              expectedState = "";
+            }
             const request = getManualInputRequest();
             send(controller, {
               type: "auth",
@@ -166,7 +243,11 @@ export async function GET(
         }
       } finally {
         cleanup();
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // stream already closed (client disconnect)
+        }
       }
     },
     cancel() {

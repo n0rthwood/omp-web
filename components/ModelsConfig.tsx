@@ -9,11 +9,20 @@ import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model
 import type { DiscoveredModel } from "@/lib/model-discovery";
 import { apiPath } from "@/lib/api-path";
 import {
+  beginOAuthVerification,
+  clearOAuthLoginError,
+  failOAuthVerification,
+  oauthInputRequest,
+  OAUTH_POST_ERROR_KEYS,
+  OAUTH_SERVER_MESSAGE_KEYS,
+  reduceOAuthLoginEvent,
   refreshProviderModels,
   serializeHeaderRows,
   setCompatBool,
   updateHeaderRow,
   type HeaderRow,
+  type OAuthLoginEvent,
+  type OAuthLoginState,
 } from "./models-config-helpers";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
@@ -115,17 +124,6 @@ interface ApiKeyProvider {
   /** Provider also supports OAuth, so it appears in both picker sections. */
   supportsOAuth?: boolean;
 }
-
-type OAuthLoginState =
-  | { phase: "idle" }
-  | { phase: "connecting" }
-  | { phase: "auth"; url: string; instructions: string | null; token: string }
-  | { phase: "device_code"; userCode: string; verificationUri: string; intervalSeconds: number | null; expiresInSeconds: number | null }
-  | { phase: "prompt"; message: string; placeholder: string | null; token: string }
-  | { phase: "select"; message: string; options: { id: string; label: string }[]; token: string }
-  | { phase: "progress"; message: string }
-  | { phase: "success" }
-  | { phase: "error"; message: string };
 
 interface ModelEntry {
   id: string;
@@ -1235,11 +1233,25 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
   const eventSourceRef = useRef<EventSource | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // The paste input stays mounted for the whole auth→success/error window,
+  // including while a paste is being verified (issue #90).
+  const inputRequest = oauthInputRequest(loginState);
+  const hasInput = inputRequest !== null;
+  const verifying = loginState.phase === "progress";
+
+  // Fixed server/SDK strings get a localized equivalent; provider-specific
+  // messages are shown verbatim so nothing is lost in translation.
+  const localizeServerMessage = (message: string | null | undefined): string | null => {
+    if (!message) return null;
+    const key = OAUTH_SERVER_MESSAGE_KEYS[message];
+    return key ? t(key) : message;
+  };
+
   useEffect(() => {
-    if (loginState.phase === "auth" || loginState.phase === "prompt") {
+    if (hasInput) {
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [loginState.phase]);
+  }, [hasInput]);
 
   // Reset state when provider changes
   useEffect(() => {
@@ -1262,47 +1274,27 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
-      const data = JSON.parse(e.data) as {
-        type: string; url?: string; instructions?: string | null;
-        token?: string; message?: string; placeholder?: string | null;
-        userCode?: string; verificationUri?: string; intervalSeconds?: number | null; expiresInSeconds?: number | null;
-        options?: { id: string; label: string }[];
-      };
-      if (data.type === "auth") {
-        setLoginState({ phase: "auth", url: data.url!, instructions: data.instructions ?? null, token: data.token! });
-        window.open(data.url!, "_blank", "noopener,noreferrer");
-      } else if (data.type === "device_code") {
-        setLoginState({
-          phase: "device_code",
-          userCode: data.userCode!,
-          verificationUri: data.verificationUri!,
-          intervalSeconds: data.intervalSeconds ?? null,
-          expiresInSeconds: data.expiresInSeconds ?? null,
-        });
-        window.open(data.verificationUri!, "_blank", "noopener,noreferrer");
-      } else if (data.type === "prompt_request") {
-        setLoginState({ phase: "prompt", message: data.message!, placeholder: data.placeholder ?? null, token: data.token! });
-      } else if (data.type === "select_request") {
-        setLoginState({ phase: "select", message: data.message!, options: data.options ?? [], token: data.token! });
-      } else if (data.type === "progress") {
-        setLoginState({ phase: "progress", message: data.message! });
+      const data = JSON.parse(e.data) as OAuthLoginEvent;
+      if (data.type === "auth" && data.url) {
+        window.open(data.url, "_blank", "noopener,noreferrer");
+      } else if (data.type === "device_code" && data.verificationUri) {
+        window.open(data.verificationUri, "_blank", "noopener,noreferrer");
       } else if (data.type === "success") {
         es.close();
-        setLoginState({ phase: "success" });
         onRefresh();
-      } else if (data.type === "error") {
+      } else if (data.type === "error" || data.type === "cancelled") {
         es.close();
-        setLoginState({ phase: "error", message: data.message! });
-      } else if (data.type === "cancelled") {
-        es.close();
-        setLoginState({ phase: "idle" });
       }
+      setLoginState((prev) => reduceOAuthLoginEvent(prev, data));
     };
     es.onerror = () => {
+      // Never let EventSource auto-reconnect: a reconnect starts a NEW login
+      // attempt with a different state, silently invalidating the paste the
+      // user is about to make. Any drop is terminal — close and report it.
       es.close();
-      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: "Connection lost" });
+      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: t("models.oauthConnectionLost") });
     };
-  }, [provider.id, onRefresh]);
+  }, [provider.id, onRefresh, t]);
 
   const handleLogout = useCallback(async () => {
     await fetch(apiPath(`/api/auth/logout/${encodeURIComponent(provider.id)}`), { method: "POST" });
@@ -1312,7 +1304,9 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
   const submitCode = useCallback(async (token: string, code: string) => {
     if (!code.trim()) return;
-    setLoginState({ phase: "progress", message: "Verifying…" });
+    const next = beginOAuthVerification(loginState);
+    if (!next) return;
+    setLoginState(next);
     try {
       const res = await fetch(apiPath(`/api/auth/login/${encodeURIComponent(provider.id)}`), {
         method: "POST",
@@ -1320,19 +1314,26 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
         body: JSON.stringify({ token, code: code.trim() }),
       });
       if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setLoginState({ phase: "error", message: d.error ?? `Server error ${res.status}` });
+        // 4xx rejects the paste WITHOUT consuming the token: restore the
+        // input with an inline error so the same token can be retried.
+        const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
+        const key = d.code ? OAUTH_POST_ERROR_KEYS[d.code] : undefined;
+        const message = key ? t(key) : (d.error ?? t("models.oauthServerError", { status: res.status }));
+        setLoginState((prev) => failOAuthVerification(prev, message));
         return;
       }
+      // 200 only means the paste was accepted for processing; the outcome
+      // arrives via SSE success/error. Keep verifying until then.
       setInputValue("");
-      // Success path: SSE stream will emit "success" and update state
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
+    } catch {
+      setLoginState((prev) => failOAuthVerification(prev, t("i18n.networkError")));
     }
-  }, [provider.id]);
+  }, [provider.id, t, loginState]);
 
   const submitSelection = useCallback(async (token: string, value: string) => {
-    setLoginState({ phase: "progress", message: "Continuing…" });
+    const next = beginOAuthVerification(loginState);
+    if (!next) return;
+    setLoginState(next);
     try {
       const res = await fetch(apiPath(`/api/auth/login/${encodeURIComponent(provider.id)}`), {
         method: "POST",
@@ -1340,17 +1341,22 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
         body: JSON.stringify({ token, code: value }),
       });
       if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setLoginState({ phase: "error", message: d.error ?? `Server error ${res.status}` });
+        const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
+        const key = d.code ? OAUTH_POST_ERROR_KEYS[d.code] : undefined;
+        const message = key ? t(key) : (d.error ?? t("models.oauthServerError", { status: res.status }));
+        setLoginState((prev) => failOAuthVerification(prev, message));
       }
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
+    } catch {
+      setLoginState((prev) => failOAuthVerification(prev, t("i18n.networkError")));
     }
-  }, [provider.id]);
+  }, [provider.id, t, loginState]);
 
   const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
     loginState.phase === "auth" || loginState.phase === "device_code" ||
     loginState.phase === "prompt" || loginState.phase === "select";
+
+  const progressMessage = loginState.phase === "progress" ? loginState.message : (inputRequest?.progress ?? null);
+  const showProgress = verifying || Boolean(inputRequest?.progress);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1368,7 +1374,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
       <div style={{ minHeight: 48 }}>
         {loginState.phase === "idle" && (
           <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-             {provider.loggedIn ? "Already connected. You can re-login or disconnect." : `Connect your ${provider.name} account.`}
+             {provider.loggedIn ? t("models.oauthAlreadyConnected") : t("models.oauthConnectAccount", { provider: provider.name })}
           </p>
         )}
         {loginState.phase === "connecting" && (
@@ -1384,53 +1390,71 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
                 <button
                   key={option.id}
                   onClick={() => submitSelection(loginState.token, option.id)}
-                  style={{ padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", cursor: "pointer", fontSize: 12, textAlign: "left" }}
+                  disabled={loginState.verifying}
+                  style={{ padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", cursor: loginState.verifying ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left" }}
                 >
                   {option.label}
                 </button>
               ))}
             </div>
+            {loginState.verifying && (
+              <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.continuing")}</p>
+            )}
+            {loginState.error && (
+              <p role="alert" style={{ margin: 0, fontSize: 12, color: "#f87171", lineHeight: 1.5 }}>
+                {localizeServerMessage(loginState.error)}
+              </p>
+            )}
           </div>
         )}
-        {(loginState.phase === "auth" || loginState.phase === "prompt") && (
+        {inputRequest && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {loginState.phase === "auth"
-                ? "Complete sign-in in the browser, then copy the redirect URL from the address bar and paste it below."
-                : loginState.message}
+              {inputRequest.phase === "auth"
+                ? t("models.oauthPasteHint")
+                : (inputRequest.message || t("models.oauthPasteHint"))}
             </p>
-            {loginState.phase === "auth" && (
+            {inputRequest.phase === "auth" && (
               <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-                If the browser window did not open,{" "}
-                <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
-                  click here to open the login page
+                {t("models.oauthBrowserNotOpened")}{" "}
+                <a href={inputRequest.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
+                  {t("models.oauthOpenLoginPage")}
                 </a>
-                .
+              </p>
+            )}
+            {showProgress && (
+              <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>
+                {localizeServerMessage(progressMessage) ?? t("models.oauthVerifying")}
               </p>
             )}
             <div style={{ display: "flex", gap: 6 }}>
               <input
                 ref={inputRef}
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitCode(loginState.token, inputValue); }}
-                placeholder={loginState.phase === "auth" ? "http://localhost:1455/auth/callback?code=…" : (loginState.placeholder ?? "Enter value…")}
+                onChange={(e) => { setInputValue(e.target.value); setLoginState((prev) => clearOAuthLoginError(prev)); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && !verifying) submitCode(inputRequest.token, inputValue); }}
+                placeholder={inputRequest.phase === "auth" ? t("models.oauthPastePlaceholder") : (inputRequest.placeholder ?? t("models.oauthEnterValue"))}
                 style={{ flex: 1, padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 12, outline: "none", fontFamily: "var(--font-mono)", boxSizing: "border-box" }}
               />
               <button
-                onClick={() => submitCode(loginState.token, inputValue)}
-                disabled={!inputValue.trim()}
-                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "#fff" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
+                onClick={() => submitCode(inputRequest.token, inputValue)}
+                disabled={!inputValue.trim() || verifying}
+                style={{ padding: "6px 12px", background: inputValue.trim() && !verifying ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() && !verifying ? "#fff" : "var(--text-dim)", cursor: inputValue.trim() && !verifying ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
               >
                  {t("i18n.submit")}
               </button>
             </div>
+            {inputRequest.error && (
+              <p role="alert" style={{ margin: 0, fontSize: 12, color: "#f87171", lineHeight: 1.5 }}>
+                {localizeServerMessage(inputRequest.error)}
+              </p>
+            )}
           </div>
         )}
         {loginState.phase === "device_code" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              Open the verification page and enter this code:
+              {t("models.oauthDeviceCodeHint")}
             </p>
             <div style={{ padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: 0 }}>
               {loginState.userCode}
@@ -1439,18 +1463,20 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
               <a href={loginState.verificationUri} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
                 {loginState.verificationUri}
               </a>
-              {loginState.expiresInSeconds ? ` Expires in ${Math.ceil(loginState.expiresInSeconds / 60)} minutes.` : ""}
+              {loginState.expiresInSeconds ? ` ${t("models.oauthExpiresIn", { minutes: Math.ceil(loginState.expiresInSeconds / 60) })}` : ""}
             </p>
           </div>
         )}
-        {loginState.phase === "progress" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{loginState.message}</p>
+        {verifying && !inputRequest && (
+          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>
+            {localizeServerMessage(loginState.phase === "progress" ? loginState.message : null) ?? t("models.oauthVerifying")}
+          </p>
         )}
         {loginState.phase === "success" && (
              <p style={{ margin: 0, fontSize: 12, color: "#4ade80" }}>{t("i18n.connectedSuccessfully")}</p>
         )}
         {loginState.phase === "error" && (
-          <p style={{ margin: 0, fontSize: 12, color: "#f87171" }}>{loginState.message}</p>
+          <p role="alert" style={{ margin: 0, fontSize: 12, color: "#f87171" }}>{localizeServerMessage(loginState.message)}</p>
         )}
       </div>
 
