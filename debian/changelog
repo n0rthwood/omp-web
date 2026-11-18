@@ -1,3 +1,14 @@
+omp-web (0.5.19) jammy; urgency=medium
+
+  * Refresh a provider's model list without restarting omp-web (closes #93).
+    Settings → Models now has a per-provider "Refresh models" control that
+    re-fetches the provider catalog through the running server's shared model
+    registry, invalidates the /api/models cache, and reloads the model
+    selector. Discovery failures are reported instead of silently succeeding;
+    the route is admin-only and proxied through the fleet gateway.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 18 Nov 2026 01:59:36 +0000
+
 omp-web (0.5.18) jammy; urgency=medium
 
   * A turn's real answer is no longer folded into "Process details" when the
