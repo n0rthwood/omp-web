@@ -454,12 +454,10 @@ gateway rollout drops that line). It takes the mode as `$1`:
 
 - **`upgrade`** (default): proxy hygiene, `sudo apt-get update` +
   `apt-get install --only-upgrade -y omp-web` (postinst restarts
-  `omp-web.service`), then — only where an `omp-web-dev.service` unit
-  file exists, i.e. the gateway — polls `http://127.0.0.1:5010/api/health`
-  for up to ~120 s and restarts the dev unit, so both units end up on the
-  same `.next` (the 2026-09-06 `:5020` React Client Manifest 500s lesson,
-  previously done by hand in `gw-0.5.4-watcher.sh`). Exits non-zero if
-  apt fails. Remotes have no dev unit and skip that step.
+  `omp-web.service`). Exits non-zero if apt fails. Every host — gateway
+  included — runs exactly one omp-web unit; the gateway dev instance
+  (`omp-web-dev.service`, :5020) and the payload's dev-restart step were
+  removed in #95.
 - **`restart`**: `systemctl --user restart omp-web.service` only, no apt.
 
 ### Install
@@ -550,9 +548,9 @@ curl -s http://127.0.0.1:8799/status
 until `running` is `false`, then check `exit_code` (`0` = success) and
 `log_tail` for the `apt-get update`/`apt-get install` output.
 
-Since v2 the payload itself owns the gateway's dev-unit restart (`upgrade`
-waits for `:5010` to serve `/api/health`, then restarts
-`omp-web-dev.service`), so the old manual watcher step for that is gone.
+The gateway dev instance (`omp-web-dev.service`, :5020) and the payload's
+dev-restart step were removed in #95; `upgrade` now only apt-upgrades and
+lets postinst restart `omp-web.service`.
 The remotes run the same daemon on their own loopback `:8799`; their
 omp-web UIs drive it through the `/api/service/restart` API route, which
 POSTs `{"mode": ...}` on the operator's behalf — the curl dance above is

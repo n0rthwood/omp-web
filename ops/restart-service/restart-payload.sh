@@ -4,10 +4,7 @@
 # Invoked by server.py as `bash restart-payload.sh <mode>` with stdout+stderr
 # captured into the daemon's run log. Modes:
 #   upgrade (default) — apt upgrade omp-web (postinst restarts
-#       omp-web.service on :5010), then on gateway-shaped hosts (a second
-#       omp-web-dev.service unit sharing the same repo-root .next) wait for
-#       :5010 to come back before restarting the dev unit. Remotes have no
-#       dev unit and skip that step.
+#       omp-web.service on :5010).
 #   restart — systemctl --user restart omp-web.service only, no apt.
 set -euo pipefail
 
@@ -31,34 +28,6 @@ case "$MODE" in
     log "mode=upgrade: apt-get install --only-upgrade omp-web"
     sudo apt-get install --only-upgrade -y omp-web
 
-    # Gateway only: nothing else restarts omp-web-dev.service, and both
-    # units share one .next — leaving it stale is what produced the
-    # 2026-09-06 React Client Manifest 500s on :5020.
-    if systemctl --user list-unit-files omp-web-dev.service 2>/dev/null \
-       | grep -q omp-web-dev.service; then
-      log "dev unit present: polling http://127.0.0.1:5010/api/health"
-      # Any HTTP answer (even 401 — :5010 is authenticated) means the
-      # server is back up; curl prints 000 only on connection failure.
-      healthy=""
-      for _ in $(seq 1 120); do
-        code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' \
-               http://127.0.0.1:5010/api/health || true)
-        if [ "$code" != "000" ]; then
-          healthy=1
-          break
-        fi
-        sleep 1
-      done
-      if [ -n "$healthy" ]; then
-        log ":5010 answering after upgrade (http=$code)"
-      else
-        log "WARNING: :5010 not answering within ~120s; restarting dev unit anyway"
-      fi
-      systemctl --user restart omp-web-dev.service
-      log "omp-web-dev.service restarted: $(systemctl --user is-active omp-web-dev.service)"
-    else
-      log "no omp-web-dev.service unit file; dev restart skipped"
-    fi
     log "mode=upgrade: done"
     ;;
   restart)

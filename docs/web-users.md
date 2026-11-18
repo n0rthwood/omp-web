@@ -107,5 +107,5 @@ The Terminal tab (see the README) requires authentication on non-loopback binds.
 ## Deployment notes
 
 - Serve omp-web over HTTPS (a reverse proxy is the usual setup). The session cookie is marked `Secure` automatically on non-loopback hosts.
-- Canonical production hostnames: **omp.joyai.dev** and **omp.joysort.cn**. `ompdev.joyai.dev` is a temporary/dev instance — don't use it as a stable URL.
+- Canonical production hostnames: **omp.joyai.dev** and **omp.joysort.cn**. The former dev hostname `ompdev.joyai.dev` was retired with the gateway dev instance (#95).
 - Remember the host allow-list: `OMP_WEB_ALLOWED_HOSTS` must include the proxy hostname(s), or requests are rejected with `400`/`403` before authentication is even attempted.

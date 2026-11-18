@@ -408,7 +408,6 @@ runbook: `docs/fleet-deployment.md`; gateway/proxy design: `docs/fleet.md`.
 | Host | IP | Unit | Notes |
 |---|---|---|---|
 | gateway (this box) | 172.30.3.123 | `omp-web.service` | port 5010, repo root checkout, authenticated, terminals on. PM2 is retired for omp-web but still runs `agent-canvas` + `omp-tunnel` here — `pm2 kill`/`restart all` remains destructive |
-| gateway dev instance | 172.30.3.123 | `omp-web-dev.service` | port 5020, published publicly as https://ompdev.joyai.dev via the pm2 `omp-tunnel`; **authenticated** since 2026-09-06 — it shares prod's users file (see the shared-users note below), not because its own env sets a password. No terminals |
 | joysort-ai-server | 172.30.3.250 | `omp-web.service` | remote, `~/omp/ompweb`, `main` |
 | joysort24 | 172.30.3.24 | `omp-web.service` | remote |
 | joysort109 | 172.30.3.109 | `omp-web.service` | remote |
@@ -422,29 +421,23 @@ The gateway reaches each remote through the fleet proxy
 `OMP_WEB_PASSWORD` set — mandatory for both the gateway's Basic auth and the
 terminal host gate on a non-loopback bind.
 
-- **Env files** (all mode 600): gateway `~/omp/ops/env/5010.env` and `5020.env`;
+- **Env files** (all mode 600): gateway `~/omp/ops/env/5010.env`;
   each remote `~/omp/ops/env/5010.env` with exactly three keys
   (`OMP_WEB_HOSTNAME`, `OMP_WEB_PASSWORD`, `OMP_WEB_TERMINALS=1`). The
   gateway mirrors each remote's password at `~/omp/ops/env/fleet/<IP>.env` —
   the operator's copy. Values are double-quoted: systemd strips the quotes, a
   naive `sed` does not (use `sed 's/^"//; s/"$//'` or read
   `/proc/<pid>/environ`).
-- **Both gateway instances share one web-users file, so 5020 is authenticated.**
-  Neither `5010.env` nor `5020.env` sets `OMP_WEB_USERS_FILE`, so
-  `getWebUsersFilePath()` (`lib/web-users.ts`) resolves both processes to the
-  same default `~/.omp/agent/omp-web-users.yml`, and `authEnabled()` is
-  `isWebPasswordEnabled() || users.length > 0`. Adding four real users on
-  2026-09-06 therefore flipped 5020 from open to authenticated — it answers
-  `302 → /login` today — even though 5020's own env file sets no password.
-  **Do not "restore" 5020 to an unauthenticated state.**
+- **Gateway auth**: `5010.env` sets no `OMP_WEB_USERS_FILE`, so
+  `getWebUsersFilePath()` (`lib/web-users.ts`) resolves to the default
+  `~/.omp/agent/omp-web-users.yml`, and `authEnabled()` is
+  `isWebPasswordEnabled() || users.length > 0`.
   `getWebUserOrSynthetic()` (`lib/web-auth-context.ts`) short-circuits to an
-  anonymous `role:"admin"` user whenever `authEnabled()` is false, so an
-  unauthenticated 5020 hands full admin over the gateway's API to anyone who
-  reaches the *public* https://ompdev.joyai.dev. Those user additions closed
-  that hole by accident; keep it closed. If an isolated dev auth realm is
-  genuinely needed, the only safe form is a dev-specific `OMP_WEB_USERS_FILE`
-  **plus** `OMP_WEB_PASSWORD`, so the instance can never fall back to the
-  anonymous admin — never a dev users file that is left empty.
+  anonymous `role:"admin"` user whenever `authEnabled()` is false — an
+  unauthenticated instance hands full admin over its API to anyone who
+  reaches it. Any future instance must therefore set `OMP_WEB_PASSWORD`
+  and/or a non-empty users file (a dev-specific `OMP_WEB_USERS_FILE`
+  **plus** `OMP_WEB_PASSWORD`); never run one with auth disabled.
 - **Provider keys live only in `~/.omp/agent/.env` on each host**
   (`pi-utils/src/env.ts` parses it at module init; process env wins over it).
   Duplicating a key into a systemd env file silently overrides the rotation
@@ -469,15 +462,9 @@ terminal host gate on a non-loopback bind.
   sessions (they survive in host processes); on pre-0.5.21 remotes a restart
   still aborts every in-process turn, so check `/api/agent/running` first
   there. The terminal daemon is never restarted by postinst while active.
-- **Both gateway units share one `.next`, so any rebuild must restart *both*.**
-  `omp-web.service` and `omp-web-dev.service` declare the same
-  `WorkingDirectory=/home/joysort/omp/ompweb` and therefore serve one build.
-  On 2026-09-06 that `.next` was rebuilt in place and only 5010 was restarted;
-  5020 kept running against the replaced build and 500'd on *every* request
-  until it was restarted on 2026-09-09. Symptom signature: one instance
-  healthy while its sibling returns 500 with
-  `Could not find the module ... in the React Client Manifest` (for
-  `LoginForm.tsx`, `layout-router.js`, `global-error.js`) on every request.
+- **The gateway runs only `omp-web.service` (:5010).** The dev instance
+  (:5020 / `omp-web-dev.service`) was removed in #95, so a rebuild or
+  restart affects only that one unit.
 - Secrets in tool output are persistent and browsable via this very UI:
   `cut -d= -f1` for env key names, `jq 'del(.machines[].token)'` for the
   registry, status-code-only curls. Still avoid printing secrets (they
@@ -651,8 +638,8 @@ release/systemd/
   restart to outlive the requesting turn's HTTP response:
   `systemd-run --user --on-active=150 --unit=omp-web-recover-once systemctl
   --user restart omp-web.service` — a backgrounded `sleep && systemctl
-  restart` dies with the web cgroup. Alternatively restart 5010 from 5020,
-  a TUI, or an ssh shell.
+  restart` dies with the web cgroup. Alternatively restart 5010 from an
+  ssh shell or a TUI.
 - **Two instances share `~/.omp/agent`.** Journal writes are now guarded by
   the SDK lease: whichever process's host holds a session's lease owns its
   writes; the other instance's web tier refuses mutation with 409 instead
@@ -1046,9 +1033,8 @@ button (`components/ServiceControlModal.tsx` + `app/api/service/restart`,
 admin-gated, proxied to remotes). It drives the `omp-web-restart-service`
 daemon — now v2 and deployed on the gateway **and every remote** — in two
 modes: `restart` (`systemctl --user restart omp-web.service`) and `upgrade`
-(apt `--only-upgrade` + postinst restart; on the gateway the payload also
-waits for :5010 health and restarts `omp-web-dev.service` because both units
-share one `.next`).
+(apt `--only-upgrade` + postinst restart of `omp-web.service`; the gateway
+has no second unit since the dev instance was removed in #95).
 
 Operational rules:
 
