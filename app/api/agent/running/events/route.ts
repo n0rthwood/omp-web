@@ -1,4 +1,5 @@
 import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { refreshHostDiscovery } from "@/lib/session-host-transport";
 import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import { filterVisibleSessionIds } from "@/lib/web-session-guard";
 
@@ -36,7 +37,12 @@ export async function GET(req: Request) {
 
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
-      void emitVisible(getRunningRpcSessionIds());
+      void (async () => {
+        // Defect 2: pick up hosts that survived a web restart before the
+        // first snapshot (non-attaching — the idle reaper must stay intact).
+        await refreshHostDiscovery();
+        await emitVisible(getRunningRpcSessionIds());
+      })();
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
       const heartbeat = setInterval(() => {
@@ -45,6 +51,13 @@ export async function GET(req: Request) {
         } catch {
           // controller already closed
         }
+        // Re-scan sidecars each heartbeat: discovered hosts emit no local
+        // running-change events, so refresh + re-emit keeps the set honest
+        // after a web restart without attaching (idle reaper unaffected).
+        void (async () => {
+          await refreshHostDiscovery();
+          await emitVisible(getRunningRpcSessionIds());
+        })();
       }, 30_000);
 
       const cleanup = () => {

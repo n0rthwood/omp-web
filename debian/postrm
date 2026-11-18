@@ -2,7 +2,7 @@
 # debian/postrm — omp-web
 # Only ever touches /opt/omp-web (this package's own tree). Never removes
 # anything under a user's $HOME: ~/omp/ompweb (synced app copy),
-# ~/.config/systemd/user/omp-web.service{,.d/}, ~/omp/ops/env/5010.env, or
+# ~/.config/systemd/user/omp-web.service{,.d/} and omp-terminal-host.service,
 # ~/.omp/agent/{.env,config.yml,models.yml,sessions,...} — those are the
 # user's live data and configuration, not package-owned files, and survive
 # both `apt remove` and `apt purge`. An operator who wants those gone runs

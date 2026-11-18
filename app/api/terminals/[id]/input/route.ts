@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { isTerminalFeatureAvailable } from "@/lib/terminals/terminal-gate";
-import { writeToTerminal } from "@/lib/terminals/terminal-service";
+import { writeToTerminal, type WriteResult } from "@/lib/terminals/terminal-service";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +32,13 @@ export async function POST(
     return NextResponse.json({ error: "data must be a string" }, { status: 400 });
   }
 
-  switch (writeToTerminal(id, data)) {
+  let result: WriteResult;
+  try {
+    result = await writeToTerminal(id, data);
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
+  switch (result) {
     case "not-found":
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     case "exited":

@@ -3,19 +3,27 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createJiti } from "jiti";
+
 
 const listRoute = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const detailRoute = await readFile(new URL("./[id]/route.ts", import.meta.url), "utf8");
 const contextRoute = await readFile(new URL("./[id]/context/route.ts", import.meta.url), "utf8");
 const stateRoute = await readFile(new URL("./[id]/state/route.ts", import.meta.url), "utf8");
-const jiti = createJiti(import.meta.url, {
-  alias: { "@": process.cwd() },
-  interopDefault: true,
-  moduleCache: false,
-});
-const { GET: getSessionDetail } = await jiti.import("./[id]/route.ts");
-const { GET: getSessionState } = await jiti.import("./[id]/state/route.ts");
+async function loadRoute(path) {
+  try {
+    const { createJiti } = await import("jiti");
+    const jiti = createJiti(import.meta.url, {
+      alias: { "@": process.cwd() },
+      interopDefault: true,
+      moduleCache: false,
+    });
+    return await jiti.import(path);
+  } catch {
+    return import(path);
+  }
+}
+const { GET: getSessionDetail } = await loadRoute("./[id]/route.ts");
+const { GET: getSessionState } = await loadRoute("./[id]/state/route.ts");
 
 /**
  * Run `fn` with web auth disabled: an ambient OMP_WEB_PASSWORD or users file
@@ -51,13 +59,19 @@ test("session listing merges live registry snapshots and honors force refresh", 
   assert.match(listRoute, /"Cache-Control": "no-store"/);
 });
 
-test("session reads use the live SessionManager before requiring a JSONL path", () => {
-  for (const source of [detailRoute, contextRoute]) {
+test("session reads use the live host session before requiring a JSONL path", () => {
+  // Issue #94: live reads go through the host wire (get_entries/get_tree/
+  // get_state); SessionManager.open is only the non-live read-only fallback.
+  const liveFirst = [
+    [detailRoute, /liveRpc \? undefined : await SessionManager\.open/],
+    [contextRoute, /liveRpc\n      \? \(\(await liveRpc\.send/],
+  ];
+  for (const [source, pattern] of liveFirst) {
     const liveLookup = source.indexOf("getRpcSession(id)");
     const pathLookup = source.indexOf("resolveSessionPath(id)");
     assert.ok(liveLookup >= 0);
     assert.ok(pathLookup > liveLookup);
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? (?:await )?SessionManager\.open/);
+    assert.match(source, pattern);
   }
 });
 
@@ -80,22 +94,32 @@ test("live detail and state routes work without a persisted JSONL file", async (
     timestamp,
     message: { role: "user", content: "hello live" },
   };
-  const sessionManager = {
-    getHeader: () => ({ type: "session", id, cwd: "/tmp", timestamp }),
-    getEntries: () => [entry],
-    getLeafId: () => entry.id,
-    getTree: () => [],
-    getSessionName: () => undefined,
-    getSessionFile: () => `/tmp/pi-web-live-route-not-persisted-${process.pid}.jsonl`,
-  };
+  const sessionFile = `/tmp/pi-web-live-route-not-persisted-${process.pid}.jsonl`;
   globalThis.__ompSessions = new Map([[id, {
     isAlive: () => true,
     isRunning: () => true,
-    inner: { sessionManager },
-    sessionFile: sessionManager.getSessionFile(),
+    sessionInfo: {
+      type: "session_info",
+      sessionId: id,
+      sessionFile,
+      cwd: "/tmp",
+      created: timestamp,
+      modified: timestamp,
+      messageCount: 1,
+      firstMessage: "hello live",
+      persisted: false,
+      status: "pending",
+      isRunning: true,
+    },
+    sessionFile,
     sessionId: id,
     cwd: "/tmp",
-    send: async () => ({ isStreaming: true }),
+    send: async (command) => {
+      if (command.type === "get_entries") return { entries: [entry], leafId: entry.id };
+      if (command.type === "get_tree") return { tree: [] };
+      if (command.type === "get_state") return { isStreaming: true };
+      return {};
+    },
   }]]);
   t.after(() => {
     globalThis.__ompSessions = previousRegistry;

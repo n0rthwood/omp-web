@@ -23,7 +23,11 @@ export async function GET(req: Request) {
   if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
     return NextResponse.json({ error: "Access denied" }, { status: 403 });
   }
-  return NextResponse.json(listTerminals(cwd));
+  try {
+    return NextResponse.json(await listTerminals(cwd));
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
 }
 
 // POST /api/terminals body: { cwd, cols?, rows?, name? }
@@ -47,9 +51,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    // cols/rows default 80/24 inside createTerminal when omitted or invalid.
+    // cols/rows default 80/24 inside the terminal-host daemon when omitted or invalid.
     return NextResponse.json(
-      createTerminal({ cwd: body.cwd, cols: body.cols, rows: body.rows, name: body.name }),
+      await createTerminal({ cwd: body.cwd, cols: body.cols, rows: body.rows, name: body.name }),
       { status: 201 },
     );
   } catch (error) {

@@ -1,0 +1,17 @@
+[Unit]
+Description=omp-web terminal host daemon (PTYs survive web-server restarts)
+Documentation=https://github.com/n0rthwood/omp-web
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/omp/ompweb
+Environment=PATH=__HOME__/.bun/bin:__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SHELL=/bin/bash
+
+ExecStart=__HOME__/.bun/bin/bun __HOME__/omp/ompweb/ops/terminal-host/main.ts
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

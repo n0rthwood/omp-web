@@ -1,16 +1,35 @@
 #!/bin/bash
 # systemctl --user SUBCOMMAND [unit] — records invocations; is-active
-# reflects a state file the test can pre-seed so postinst's
-# active/inactive branching is exercisable.
+# reflects a per-unit state file the test can pre-seed so postinst's
+# active/inactive branching is exercisable independently for omp-web.service
+# and omp-terminal-host.service (issue #94). The legacy shared
+# omp-web.service.state filename is kept for the web unit so existing
+# assertions/pre-seeds still work.
 LOG="${OMP_WEB_TEST_ROOT}/systemctl.log"
 echo "$*" >> "$LOG"
-STATE_FILE="${OMP_WEB_TEST_ROOT}/omp-web.service.state"
+UNIT=""
+for arg in "$@"; do
+  case "$arg" in
+    *.service) UNIT="$arg";;
+  esac
+done
+if [ "$UNIT" = "omp-web.service" ]; then
+  STATE_FILE="${OMP_WEB_TEST_ROOT}/omp-web.service.state"
+else
+  STATE_FILE="${OMP_WEB_TEST_ROOT}/${UNIT:-unknown}.state"
+fi
 case "$2" in
   is-active)
     [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE")" = active ] && exit 0
     exit 3
     ;;
-  enable|start|restart)
+  enable)
+    # real systemctl enable does not start the unit — only --now does
+    case " $* " in
+      *" --now "*) echo active > "$STATE_FILE";;
+    esac
+    ;;
+  start|restart)
     echo active > "$STATE_FILE"
     ;;
   stop)

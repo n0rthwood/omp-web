@@ -1,4 +1,5 @@
 import { getRpcSession } from "./rpc-manager";
+import { discoveredHostCwd, hasDiscoveredLiveHost, refreshHostDiscovery } from "./session-host-transport";
 import { readSessionHeader, resolveSessionPath } from "./session-reader";
 import { resolveProject } from "./worktree";
 import { getWebUserOrSynthetic } from "./web-auth-context";
@@ -20,13 +21,19 @@ function visibilityError(status: number, error: string): Response {
   });
 }
 
-/** Resolve a session's recorded cwd, preferring a live in-process session's header. */
+/** Resolve a session's recorded cwd, preferring the live host's session-info mirror. */
 export async function resolveSessionCwd(sessionId: string): Promise<string | null> {
   const rpc = getRpcSession(sessionId);
   if (rpc?.isAlive()) {
-    const cwd = rpc.inner.sessionManager.getHeader()?.cwd ?? rpc.cwd;
+    const cwd = rpc.sessionInfo?.cwd || rpc.cwd;
     if (cwd) return cwd;
   }
+  // Defect 2: a host that survived a web restart is discoverable by sidecar
+  // without attaching (attaching here would reset its idle reaper on every
+  // visibility check).
+  await refreshHostDiscovery();
+  const discoveredCwd = discoveredHostCwd(sessionId);
+  if (discoveredCwd) return discoveredCwd;
   const filePath = await resolveSessionPath(sessionId);
   if (!filePath) return null;
   try {
@@ -57,6 +64,8 @@ export async function resolveSessionProjectRoot(sessionId: string): Promise<stri
  */
 export async function sessionExists(sessionId: string): Promise<boolean> {
   if (getRpcSession(sessionId)?.isAlive()) return true;
+  await refreshHostDiscovery();
+  if (hasDiscoveredLiveHost(sessionId)) return true;
   const filePath = await resolveSessionPath(sessionId);
   return filePath !== null;
 }

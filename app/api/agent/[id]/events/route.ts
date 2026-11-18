@@ -1,5 +1,5 @@
 import { resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
+import { attachLiveHostIfExists, getRpcSession, startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { requireVisibleSession } from "@/lib/web-session-guard";
 
@@ -29,8 +29,9 @@ export async function GET(
   if (blocked) return blocked;
 
 
-  // Fast path: already-running session
-  let session = getRpcSession(id);
+  // Fast path: already-running session; otherwise re-attach a host that
+  // survived a web restart (defect 2), spawning only when none answers.
+  let session = getRpcSession(id) ?? await attachLiveHostIfExists(id);
   if (!session || !session.isAlive()) {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
@@ -38,8 +39,11 @@ export async function GET(
     }
     try {
       ({ session } = await startRpcSession(id, filePath, undefined));
-    } catch {
-      return new Response("Failed to start agent", { status: 500 });
+    } catch (error) {
+      // Surface the real cause (e.g. the foreign-lease refusal) instead of a
+      // bare failure string; the client shows this text on reconnect errors.
+      const message = error instanceof Error ? error.message : String(error);
+      return new Response(`Failed to start agent: ${message}`, { status: 500 });
     }
   }
 

@@ -20,6 +20,10 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  closeTerminal(id); // no-op for unknown/already-closed ids
+  try {
+    await closeTerminal(id); // no-op for unknown/already-closed ids
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
   return NextResponse.json({ closed: true });
 }

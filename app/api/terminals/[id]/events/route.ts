@@ -17,12 +17,16 @@ export async function GET(
   }
 
   const { id } = await params;
-  if (!getTerminalInfo(id)) {
-    return new Response("Not found", { status: 404 });
+  try {
+    if (!(await getTerminalInfo(id))) {
+      return new Response("Not found", { status: 404 });
+    }
+  } catch (error) {
+    return new Response(String(error), { status: 500 });
   }
 
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
       const encoder = new TextEncoder();
       const encode = (data: unknown) => {
         const text = `data: ${JSON.stringify(data)}\n\n`;
@@ -53,18 +57,27 @@ export async function GET(
         }
       };
 
-      // subscribeTerminal itself delivers the replay buffer (and the exit
-      // state, if already exited) synchronously to the listener before
-      // returning — do NOT re-send the buffer here, that would double the
-      // scrollback on every connect.
-      const unsubscribe = subscribeTerminal(id, (event) => {
-        encode(event);
-        if (event.type === "exit") {
-          // The client treats `exit` as terminal and stops reconnecting;
-          // flush the frame and close the stream.
-          closeStream();
-        }
-      });
+      // subscribeTerminal delivers the replay buffer (and the exit state, if
+      // already exited) to the listener before its promise resolves — do NOT
+      // re-send the buffer here, that would double the scrollback on every
+      // connect.
+      let unsubscribe: (() => void) | undefined;
+      try {
+        unsubscribe = await subscribeTerminal(id, (event) => {
+          encode(event);
+          if (event.type === "exit") {
+            // The client treats `exit` as terminal and stops reconnecting;
+            // flush the frame and close the stream.
+            closeStream();
+          }
+        });
+      } catch {
+        // Relay/daemon failure after the existence check — tell the client
+        // to stop reconnecting and close, same as a vanished terminal.
+        encode({ type: "exit", exitCode: null });
+        closeStream();
+        return;
+      }
 
       if (!unsubscribe) {
         // Terminal vanished between the existence check and subscribe —
@@ -78,10 +91,12 @@ export async function GET(
       // A disconnect is a normal page reload/backgrounding event; the shell
       // must keep running so scrollback + a running command survive it.
       // Cleanup when client disconnects via abort signal.
-      req.signal?.addEventListener("abort", () => {
-        unsubscribe();
+      const detach = () => {
+        unsubscribe?.();
         closeStream();
-      });
+      };
+      req.signal?.addEventListener("abort", detach);
+      if (req.signal?.aborted) detach(); // aborted while the attach was in flight
     },
   });
 

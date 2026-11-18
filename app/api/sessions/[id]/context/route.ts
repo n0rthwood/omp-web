@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { resolveSessionPath, buildSessionContext, getHistoricalContextUsage } from "@/lib/session-reader";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { attachLiveHostIfExists, getRpcSession } from "@/lib/rpc-manager";
 import { requireVisibleSession } from "@/lib/web-session-guard";
 
 export async function GET(
@@ -17,15 +17,18 @@ export async function GET(
   const deferToolResultImages = url.searchParams.has("deferMedia");
 
   try {
-    const rpc = getRpcSession(id);
+    const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
     const liveRpc = rpc?.isAlive() ? rpc : undefined;
     const filePath = liveRpc ? null : await resolveSessionPath(id);
     if (!liveRpc && !filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? await SessionManager.open(filePath!);
-    const entries = sm.getEntries() as never;
+    // Live hosts own the journal: read entries over the wire; the read-only
+    // SessionManager fallback is for dead sessions' history files only.
+    const entries = liveRpc
+      ? ((await liveRpc.send({ type: "get_entries" })) as { entries: unknown }).entries as never
+      : (await SessionManager.open(filePath!)).getEntries() as never;
     const context = buildSessionContext(entries, leafId, {
       deferThinking,
       deferToolResultImages,

@@ -76,6 +76,12 @@ override_dh_auto_install:
 
 	mkdir -p debian/omp-web/opt/omp-web/systemd
 	install -m 0644 release/systemd/omp-web.service debian/omp-web/opt/omp-web/systemd/omp-web.service
+	# omp-terminal-host.service seed (issue #94): the terminal PTY daemon runs
+	# as its own systemd --user unit outside omp-web.service's cgroup so an
+	# omp-web upgrade never kills live terminal PTYs. postinst installs/enables
+	# it (idempotent) the same way it ships omp-web.service. Session hosts need
+	# no seed — they are launched as transient `systemd-run --user` units.
+	install -m 0644 release/systemd/omp-terminal-host.service debian/omp-web/opt/omp-web/systemd/omp-terminal-host.service
 
 override_dh_auto_test:
 	true

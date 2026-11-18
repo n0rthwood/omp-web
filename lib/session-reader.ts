@@ -199,7 +199,15 @@ export function invalidateSessionPathCache(sessionId: string): void {
 }
 
 export function readSessionHeader(filePath: string): SessionHeader | null {
-  const fd = openSync(filePath, "r");
+  // A transient (not-yet-persisted) session has no journal file yet; that is
+  // "no header", not an error — callers fall back to the live mirror.
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw error;
+  }
   try {
     // omp rewrites the `title` entry to the top of the file when a session is
     // named, so the `session` header may not be line 1: scan leading lines

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { isTerminalFeatureAvailable } from "@/lib/terminals/terminal-gate";
-import { resizeTerminal } from "@/lib/terminals/terminal-service";
+import { resizeTerminal, type WriteResult } from "@/lib/terminals/terminal-service";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +34,13 @@ export async function POST(
     return NextResponse.json({ error: "cols and rows must be positive finite numbers" }, { status: 400 });
   }
 
-  switch (resizeTerminal(id, cols, rows)) {
+  let result: WriteResult;
+  try {
+    result = await resizeTerminal(id, cols, rows);
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
+  switch (result) {
     case "not-found":
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     case "exited":

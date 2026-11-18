@@ -62,6 +62,12 @@ BUNEOF
   printf 'modelRoles:\n  plan: {}\n' > "$root/opt/omp-web/config/config.yml.default"
   printf 'providers:\n  deepseek: {}\n' > "$root/opt/omp-web/config/models.yml.default"
   cp "$REPO_ROOT/release/systemd/omp-web.service" "$root/opt/omp-web/systemd/omp-web.service"
+  cp "$REPO_ROOT/release/systemd/omp-terminal-host.service" "$root/opt/omp-web/systemd/omp-terminal-host.service"
+  # issue #94: host payloads ride the same tar-overlay as the app; ship
+  # placeholders so overlay inclusion is observable in the fixture home.
+  mkdir -p "$root/opt/omp-web/current/ops/terminal-host" "$root/opt/omp-web/current/ops/session-host"
+  echo "fixture-terminal-host-entry" > "$root/opt/omp-web/current/ops/terminal-host/main.ts"
+  echo "fixture-session-host-entry" > "$root/opt/omp-web/current/ops/session-host/main.ts"
   printf '{\n  "name": "omp-web-fixture",\n  "version": "0.0.0"\n}\n' \
     > "$root/opt/omp-web/current/package.json"
   printf '{\n  "lockfileVersion": 1,\n  "packages": {}\n}\n' \
@@ -311,6 +317,74 @@ else
   assert_file_exists "ensure_env: bun install succeeded (patchedDependencies resolved) leaving node_modules materialized" \
     "$ENV_DIR14/node_modules/.fixture-installed"
 fi
+
+# --- Test 15 (issue #94): fresh install ships the terminal-host unit
+# (rendered __HOME__/PATH, enabled+started), overlays both host payloads,
+# and creates the shared UDS run dir. ---
+ROOT15="$(new_fixture_root)"
+build_fake_payload "$ROOT15"
+run_postinst "$ROOT15"
+HOME15="$ROOT15/home/joysort"
+TH_UNIT15="$HOME15/.config/systemd/user/omp-terminal-host.service"
+assert_file_exists "terminal-host: unit installed on fresh install" "$TH_UNIT15"
+assert_eq "terminal-host: no unsubstituted __HOME__ placeholders" "0" \
+  "$(grep -c '__HOME__' "$TH_UNIT15" || true)"
+assert_eq "terminal-host: PATH rendered with bun + omp dirs" "1" \
+  "$(grep -c "^Environment=PATH=$HOME15/.bun/bin:$HOME15/.local/bin:" "$TH_UNIT15" || true)"
+assert_eq "terminal-host: enabled" "1" \
+  "$(grep -c 'enable omp-terminal-host.service' "$ROOT15/systemctl.log" || true)"
+assert_eq "terminal-host: active after fresh install" "active" \
+  "$(cat "$ROOT15/omp-terminal-host.service.state")"
+assert_file_exists "terminal-host: payload overlaid into app dir" \
+  "$HOME15/omp/ompweb/ops/terminal-host/main.ts"
+assert_file_exists "session-host: payload overlaid into app dir" \
+  "$HOME15/omp/ompweb/ops/session-host/main.ts"
+assert_eq "hosts run dir created" "1" "$( [ -d "$HOME15/.omp/run/omp-web-hosts" ] && echo 1 || echo 0 )"
+
+# --- Test 16 (issue #94): upgrades NEVER restart an active terminal daemon
+# (live PTYs survive every omp-web upgrade) — not on payload changes and not
+# on unit-seed changes (leave-running policy: the new unit is installed +
+# daemon-reloaded, applied at the next natural start); an inactive daemon
+# is started, never restarted. ---
+TH_SUM16="$(sha256sum "$TH_UNIT15" | cut -d' ' -f1)"
+LINES16="$(wc -l < "$ROOT15/systemctl.log")"
+echo "fixture-daemon-code-v2" >> "$ROOT15/opt/omp-web/current/ops/terminal-host/main.ts"
+run_postinst "$ROOT15"
+DELTA16="$(tail -n +"$((LINES16 + 1))" "$ROOT15/systemctl.log")"
+assert_eq "upgrade: terminal daemon not restarted/stopped on payload-only change" "0" \
+  "$(printf '%s\n' "$DELTA16" | grep -cE '(restart|stop|start) omp-terminal-host.service' || true)"
+assert_eq "upgrade: terminal unit byte-identical" "$TH_SUM16" \
+  "$(sha256sum "$TH_UNIT15" | cut -d' ' -f1)"
+assert_eq "upgrade: changed daemon payload still overlaid" "1" \
+  "$(grep -c 'fixture-daemon-code-v2' "$HOME15/omp/ompweb/ops/terminal-host/main.ts" || true)"
+assert_eq "upgrade: omp-web still stopped+restarted (pre-existing behavior)" "1" \
+  "$(printf '%s\n' "$DELTA16" | grep -c 'restart omp-web.service' || true)"
+echo '# fixture unit tweak' >> "$ROOT15/opt/omp-web/systemd/omp-terminal-host.service"
+LINES16B="$(wc -l < "$ROOT15/systemctl.log")"
+run_postinst "$ROOT15"
+DELTA16B="$(tail -n +"$((LINES16B + 1))" "$ROOT15/systemctl.log")"
+assert_eq "upgrade: changed unit seed does NOT restart the active daemon (leave-running)" "0" \
+  "$(printf '%s\n' "$DELTA16B" | grep -cE '(restart|stop|start) omp-terminal-host.service' || true)"
+assert_eq "upgrade: changed unit seed installed on disk" "1" \
+  "$(grep -c '# fixture unit tweak' "$TH_UNIT15" || true)"
+assert_eq "upgrade: unit change daemon-reloaded" "1" \
+  "$(printf '%s\n' "$DELTA16B" | grep -q 'daemon-reload' && echo 1 || echo 0)"
+echo inactive > "$ROOT15/omp-terminal-host.service.state"
+LINES16C="$(wc -l < "$ROOT15/systemctl.log")"
+run_postinst "$ROOT15"
+DELTA16C="$(tail -n +"$((LINES16C + 1))" "$ROOT15/systemctl.log")"
+assert_eq "upgrade: inactive daemon with unchanged unit is started (not restarted)" "1" \
+  "$(printf '%s\n' "$DELTA16C" | grep -c 'start omp-terminal-host.service' || true)"
+assert_eq "upgrade: no restart for start-only recovery" "0" \
+  "$(printf '%s\n' "$DELTA16C" | grep -c 'restart omp-terminal-host.service' || true)"
+
+# --- Test 17 (issue #94): prerm remove stops the terminal daemon too;
+# postrm purge keeps the user unit files (user data survives purge). ---
+OMP_WEB_TEST_ROOT="$ROOT15" PATH="$HERE/fixtures/bin:$PATH" bash "$REPO_ROOT/debian/prerm" remove
+assert_eq "prerm: terminal daemon stopped on remove" "inactive" \
+  "$(cat "$ROOT15/omp-terminal-host.service.state")"
+OMP_WEB_TEST_ROOT="$ROOT15" PATH="$HERE/fixtures/bin:$PATH" bash "$REPO_ROOT/debian/postrm" purge
+assert_file_exists "postrm purge: terminal unit kept (user data)" "$TH_UNIT15"
 
 echo "---"
 if [ "$FAIL" = "1" ]; then

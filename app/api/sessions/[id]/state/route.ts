@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { attachLiveHostIfExists, getRpcSession } from "@/lib/rpc-manager";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { requireVisibleSession } from "@/lib/web-session-guard";
 
@@ -11,7 +11,9 @@ export async function GET(
   const blocked = await requireVisibleSession(req, id);
   if (blocked) return blocked;
   try {
-    const rpc = getRpcSession(id);
+    // Defect 2: a host that survived a web restart is discovered and
+    // re-attached here; getRpcSession alone misses it (registry is per-process).
+    const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
     if (rpc?.isAlive()) {
       const state = await rpc.send({ type: "get_state" });
       return NextResponse.json({ running: true, state });

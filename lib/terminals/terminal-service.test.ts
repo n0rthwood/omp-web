@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,13 +12,22 @@ import {
 import {
   closeTerminal,
   createTerminal,
+  disconnectTerminalHostForTest,
   getTerminalInfo,
   listTerminals,
   resizeTerminal,
   subscribeTerminal,
+  terminalHostPid,
+  terminalPid,
   writeToTerminal,
   type TerminalStreamEvent,
 } from "./terminal-service";
+
+// Isolate the suite from any real terminal-host daemon: the relay spawns a
+// dedicated daemon on this socket (dev fallback path — no systemctl unit in
+// test environments) and every request goes over the wire like production.
+const TEST_SOCK_DIR = mkdtempSync(join(tmpdir(), "terminal-host-test-"));
+process.env.OMP_TERMINAL_HOST_SOCK = join(TEST_SOCK_DIR, "terminal-host.sock");
 
 const CWD = import.meta.dir;
 const ENV_KEYS = [
@@ -72,16 +81,22 @@ function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<void> {
   return promise;
 }
 
-/** White-box pid access for kill-verification (the registry is internal). */
-function pidOfTerminal(id: string): number | undefined {
-  const registry = (globalThis as {
-    __ompTerminals?: Map<string, { proc: { pid?: number } }>;
-  }).__ompTerminals;
-  return registry?.get(id)?.proc.pid;
-}
+beforeAll(async () => {
+  // Warm the relay: starts the isolated daemon and completes the handshake
+  // so the first real test is not racing daemon startup.
+  await listTerminals(CWD);
+});
 
-afterAll(() => {
-  for (const info of listTerminals(CWD)) closeTerminal(info.id);
+afterAll(async () => {
+  for (const info of await listTerminals(CWD)) await closeTerminal(info.id);
+  // Stop the isolated daemon so no test shells linger; the pid comes from
+  // the relay's hello handshake.
+  const daemonPid = terminalHostPid();
+  if (daemonPid) {
+    try { process.kill(daemonPid, "SIGTERM"); } catch { /* already gone */ }
+  }
+  disconnectTerminalHostForTest();
+  rmSync(TEST_SOCK_DIR, { recursive: true, force: true });
 });
 
 /**
@@ -298,35 +313,35 @@ for (const [flag, hostname, password, expected] of availabilityCases) {
   );
 }
 
-// --- terminal-service.ts (real ptys) ---
+// --- terminal relay + daemon (real ptys over UDS) ---
 
 test("create -> write -> subscriber observes the echoed marker", async () => {
-  const info = createTerminal({ cwd: CWD, name: "service-test" });
+  const info = await createTerminal({ cwd: CWD, name: "service-test" });
   expect(info.cwd).toBe(CWD);
   expect(info.name).toBe("service-test");
   expect(info.exited).toBe(false);
 
   const events: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
+  const unsubscribe = await subscribeTerminal(info.id, (event) => events.push(event));
   expect(unsubscribe).toBeTypeOf("function");
 
-  expect(writeToTerminal(info.id, "echo TERMINAL_SERVICE_MARKER_7f3a\n")).toBe("ok");
+  expect(await writeToTerminal(info.id, "echo TERMINAL_SERVICE_MARKER_7f3a\n")).toBe("ok");
   await waitFor(() =>
     events.some((event) => event.type === "output" && event.data.includes("TERMINAL_SERVICE_MARKER_7f3a"))
   );
 
   unsubscribe?.();
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 }, 20_000);
 
 test("bulk output is coalesced into far fewer frames than pty chunks", async () => {
   // Regression guard for the SSE frame explosion: a screenful of output used to
   // fan out one frame per pty chunk. Batching must not lose or reorder bytes.
-  const info = createTerminal({ cwd: CWD, cols: 80, rows: 24 });
+  const info = await createTerminal({ cwd: CWD, cols: 80, rows: 24 });
   const events: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
+  const unsubscribe = await subscribeTerminal(info.id, (event) => events.push(event));
 
-  expect(writeToTerminal(info.id, "seq 1 4000\n")).toBe("ok");
+  expect(await writeToTerminal(info.id, "seq 1 4000\n")).toBe("ok");
   // Wait for the tail marker AND for the frame count to stop growing, rather
   // than sleeping a guessed interval: the last batch is what is being counted.
   let previousFrameCount = -1;
@@ -351,78 +366,79 @@ test("bulk output is coalesced into far fewer frames than pty chunks", async () 
   expect(text.indexOf("\r\n4000\r\n")).toBeGreaterThan(text.indexOf("\r\n999\r\n"));
 
   unsubscribe?.();
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 }, 30_000);
 
 test("a late subscriber receives the replay buffer exactly once, as a replay frame", async () => {
-  const info = createTerminal({ cwd: CWD });
+  const info = await createTerminal({ cwd: CWD });
   const first: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => first.push(event));
-  writeToTerminal(info.id, "echo REPLAY_MARKER_91c2\n");
+  const unsubscribe = await subscribeTerminal(info.id, (event) => first.push(event));
+  await writeToTerminal(info.id, "echo REPLAY_MARKER_91c2\n");
   await waitFor(() =>
     first.some((event) => event.type === "output" && event.data.includes("REPLAY_MARKER_91c2"))
   );
 
   const replayed: TerminalStreamEvent[] = [];
-  subscribeTerminal(info.id, (event) => replayed.push(event));
-  // The buffer is delivered synchronously on subscribe — no waiting — as a
-  // single `replay` frame. The client gates input while parsing that frame, so
-  // scrollback must never arrive labelled as live `output`: that is what left a
-  // freshly created terminal unable to accept typing (issue #4).
+  await subscribeTerminal(info.id, (event) => replayed.push(event));
+  // The buffer is delivered before the subscribe promise resolves — no
+  // waiting — as a single `replay` frame. The client gates input while parsing
+  // that frame, so scrollback must never arrive labelled as live `output`:
+  // that is what left a freshly created terminal unable to accept typing
+  // (issue #4).
   expect(replayed.some((event) => event.type === "replay" && event.data.includes("REPLAY_MARKER_91c2"))).toBe(true);
   expect(replayed.filter((event) => event.type === "replay").length).toBe(1);
   expect(replayed.some((event) => event.type === "output")).toBe(false);
 
   unsubscribe?.();
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 }, 20_000);
 
 test("a first subscriber to a fresh terminal gets live output, never a replay frame", async () => {
   // Regression guard for issue #4: the client only suppresses input while a
   // `replay` frame is parsing, so a terminal with no scrollback must not emit
   // one — otherwise its first keystrokes are dropped.
-  const info = createTerminal({ cwd: CWD });
+  const info = await createTerminal({ cwd: CWD });
   const events: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
-  writeToTerminal(info.id, "echo FRESH_MARKER_4d17\n");
+  const unsubscribe = await subscribeTerminal(info.id, (event) => events.push(event));
+  await writeToTerminal(info.id, "echo FRESH_MARKER_4d17\n");
   await waitFor(() =>
     events.some((event) => event.type === "output" && event.data.includes("FRESH_MARKER_4d17"))
   );
   expect(events.some((event) => event.type === "replay")).toBe(false);
 
   unsubscribe?.();
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 }, 20_000);
 
-test("resize reports ok and does not throw", () => {
-  const info = createTerminal({ cwd: CWD });
-  expect(resizeTerminal(info.id, 120, 40)).toBe("ok");
-  expect(resizeTerminal(info.id, 80, 24)).toBe("ok");
-  closeTerminal(info.id);
+test("resize reports ok and does not throw", async () => {
+  const info = await createTerminal({ cwd: CWD });
+  expect(await resizeTerminal(info.id, 120, 40)).toBe("ok");
+  expect(await resizeTerminal(info.id, 80, 24)).toBe("ok");
+  await closeTerminal(info.id);
 }, 20_000);
 
 test("shell exit propagates an exit event and blocks further writes", async () => {
-  const info = createTerminal({ cwd: CWD });
+  const info = await createTerminal({ cwd: CWD });
   const events: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
+  const unsubscribe = await subscribeTerminal(info.id, (event) => events.push(event));
 
-  writeToTerminal(info.id, "exit\n");
+  await writeToTerminal(info.id, "exit\n");
   await waitFor(() => events.some((event) => event.type === "exit"));
 
-  expect(getTerminalInfo(info.id)?.exited).toBe(true);
-  expect(writeToTerminal(info.id, "x")).toBe("exited");
+  expect((await getTerminalInfo(info.id))?.exited).toBe(true);
+  expect(await writeToTerminal(info.id, "x")).toBe("exited");
 
   unsubscribe?.();
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 }, 20_000);
 
 test("close kills the whole process group, removes the record, and is idempotent", async () => {
-  const info = createTerminal({ cwd: CWD });
-  const pid = pidOfTerminal(info.id);
+  const info = await createTerminal({ cwd: CWD });
+  const pid = await terminalPid(info.id);
   expect(typeof pid).toBe("number");
   expect(pid!).toBeGreaterThan(0);
 
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
 
   // Both the shell pid and its process group (negative pid) must be gone.
   await waitFor(() => {
@@ -440,25 +456,61 @@ test("close kills the whole process group, removes the record, and is idempotent
     }
   }, 5_000);
 
-  expect(listTerminals(CWD).some((t) => t.id === info.id)).toBe(false);
+  expect((await listTerminals(CWD)).some((t) => t.id === info.id)).toBe(false);
 
   // A second close on the already-closed id must be a no-op, not an error.
-  closeTerminal(info.id);
+  await closeTerminal(info.id);
   expect(true).toBe(true);
 }, 20_000);
 
 test("listTerminals omits and reaps exited terminals", async () => {
-  const info = createTerminal({ cwd: CWD, name: "prune-test" });
-  expect(listTerminals(CWD).some((t) => t.id === info.id)).toBe(true);
+  const info = await createTerminal({ cwd: CWD, name: "prune-test" });
+  expect((await listTerminals(CWD)).some((t) => t.id === info.id)).toBe(true);
 
   const events: TerminalStreamEvent[] = [];
-  const unsubscribe = subscribeTerminal(info.id, (event) => events.push(event));
-  writeToTerminal(info.id, "exit\n");
+  const unsubscribe = await subscribeTerminal(info.id, (event) => events.push(event));
+  await writeToTerminal(info.id, "exit\n");
   await waitFor(() => events.some((event) => event.type === "exit"));
   unsubscribe?.();
 
   // The exited record must not be listed, and listing reaps it from the
   // registry so it cannot grow unbounded.
-  expect(listTerminals(CWD).some((t) => t.id === info.id)).toBe(false);
-  expect(getTerminalInfo(info.id)).toBeUndefined();
+  expect((await listTerminals(CWD)).some((t) => t.id === info.id)).toBe(false);
+  expect(await getTerminalInfo(info.id)).toBeUndefined();
+}, 20_000);
+
+test("relay disconnect does not kill the pty; reconnect replays and stays live", async () => {
+  // The daemon must outlive any single relay connection (web restart / SSE
+  // drop): after a forced disconnect the shell keeps running, a fresh attach
+  // delivers the scrollback as replay, and input still works.
+  const info = await createTerminal({ cwd: CWD, name: "survive-test" });
+  const first: TerminalStreamEvent[] = [];
+  const unsubscribe = await subscribeTerminal(info.id, (event) => first.push(event));
+  expect(await writeToTerminal(info.id, "echo SURVIVE_MARKER_b2e4\n")).toBe("ok");
+  await waitFor(() =>
+    first.some((event) => event.type === "output" && event.data.includes("SURVIVE_MARKER_b2e4"))
+  );
+  unsubscribe?.();
+
+  // Simulate the relay's parent dying: hard-close the relay's UDS connection.
+  disconnectTerminalHostForTest();
+
+  // The next request transparently reconnects; the shell must still be alive
+  // daemon-side (no fixed sleep — the reconnect itself proves the daemon
+  // processed the disconnect without killing the pty).
+  const pid = await terminalPid(info.id);
+  expect(typeof pid).toBe("number");
+  expect(() => process.kill(pid!, 0)).not.toThrow();
+
+  // Reconnect: replay carries the earlier output, then live input works.
+  const second: TerminalStreamEvent[] = [];
+  const unsubscribe2 = await subscribeTerminal(info.id, (event) => second.push(event));
+  expect(second.some((event) => event.type === "replay" && event.data.includes("SURVIVE_MARKER_b2e4"))).toBe(true);
+  expect(await writeToTerminal(info.id, "echo AFTER_RECONNECT_5c9d\n")).toBe("ok");
+  await waitFor(() =>
+    second.some((event) => event.type === "output" && event.data.includes("AFTER_RECONNECT_5c9d"))
+  );
+
+  unsubscribe2?.();
+  await closeTerminal(info.id);
 }, 20_000);

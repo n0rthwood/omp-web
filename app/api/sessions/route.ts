@@ -5,6 +5,7 @@ import {
   mergeSessionLists,
 } from "@/lib/session-reader";
 import { getRpcSessionInfos, getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { refreshHostDiscovery } from "@/lib/session-host-transport";
 import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import { filterVisibleSessions } from "@/lib/web-visibility";
 
@@ -23,6 +24,8 @@ export async function GET(req: Request) {
     }
 
     const force = new URL(req.url).searchParams.get("force") === "1";
+    // Defect 2: merge hosts that survived a web restart into the runtime list.
+    await refreshHostDiscovery();
     const [persistedSessions, runtimeSessions] = await Promise.all([
       listAllSessions({ force }),
       attachSessionProjectInfo(getRpcSessionInfos()),

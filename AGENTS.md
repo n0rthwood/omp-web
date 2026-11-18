@@ -366,25 +366,36 @@ This project is indexed by GitNexus as **omp-web** (2786 symbols, 7305 relations
 ## Architecture
 
 ```
-Browser                Next.js Server (Bun)        AgentSession (in-process)
+Browser                Next.js Server (Bun)        Session host (separate Bun process)
   │                        │                               │
   ├─ GET /api/sessions ────▶ reads ~/.omp/agent/sessions/  │
-  ├─ GET /api/sessions/[id] reads .jsonl file directly     │
-  ├─ GET /api/agent/running ───────▶ running id snapshot   │
+  ├─ GET /api/sessions/[id] reads .jsonl (dead) or wire (live)
+  ├─ GET /api/agent/running ───────▶ registry + host discovery
   │                        │                               │
   ├─ send message ─────────▶ POST /api/agent/[id]          │
-  │                        │   startRpcSession() ─────────▶│ createAgentSession()
-  │                        │   session.send(cmd) ─────────▶│ session.prompt()
+  │                        │   startRpcSession() ──UDS────▶│ createAgentSession()
+  │                        │   wrapper.send(cmd) ─────────▶│ runRpcMode (in-host)
   │                        │                               │
   ├─ SSE connect ──────────▶ GET /api/agent/[id]/events    │
-  │                        │   session.onEvent() ◀─────────│ session.subscribe()
+  │                        │   wrapper.onEvent() ◀───UDS───│ session.subscribe()
   │◀── data: {...} ─────────│                               │
 ```
 
+Since #94 (0.5.21) the AgentSession lives in a **per-conversation host
+process** (`ops/session-host/main.ts`), launched via
+`systemd-run --user --collect --unit=omp-web-host-<socketKey>` OUTSIDE
+`omp-web.service`'s cgroup, talking NDJSON over
+`~/.omp/run/omp-web-hosts/<socketKey>.sock`. Terminal PTYs live in a second
+persistent daemon, `omp-terminal-host.service` (`ops/terminal-host/`), with
+the web tier as an async UDS relay.
+
 **Session browsing** (read-only): reads `.jsonl` files through SDK helpers and
-`lib/session-reader.ts` — no AgentSession created.
-**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` creates an
-AgentSession in-process.
+`lib/session-reader.ts` — no host needed for dead sessions.
+**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` attaches to
+a live host (discovered by socket probe) or spawns one; the wrapper is a
+lease-free UDS proxy. Restarting omp-web detaches wrappers but never kills
+hosts — turns, bash, subagents and terminals survive, and the UI re-attaches
+on the next request.
 
 ---
 
@@ -442,8 +453,11 @@ terminal host gate on a non-loopback bind.
   `Environment=PATH=`.
 - **Redeploy a remote**:
   `ssh <host> 'sudo apt-get update && sudo apt-get install -y --only-upgrade omp-web'`
-  — one host at a time (the package's `postinst` restarts `omp-web.service`,
-  which kills every live `AgentSession` on that host); never target
+  — one host at a time. Since 0.5.21 (#94) the `postinst` restart of
+  `omp-web.service` no longer kills conversations or terminals: session
+  hosts and the terminal daemon live in their own units/cgroups and the
+  web tier re-attaches. (Pre-0.5.21 hosts still run sessions in-process —
+  their first upgrade restart DOES abort live turns.) Never target
   `omp-web=0.3.9` explicitly — that version's `ensure_env()` omits
   `patches/` from the freshly materialized env dir, so
   `bun install --frozen-lockfile` dies with "Couldn't find patch file" and
@@ -451,9 +465,10 @@ terminal host gate on a non-loopback bind.
   `debian/changelog`); `0.5.0` is a version-number-only relabel of
   `0.3.10` with no further code changes. Full detail and the gateway
   self-upgrade path: `docs/fleet-deployment.md`.
-- **Never restart a remote's omp-web while an agent session is running on it**
-  through the gateway — same in-process-session rule as above. One host at a
-  time when rolling out.
+- **Roll out one host at a time.** Since 0.5.21 a restart is safe for live
+  sessions (they survive in host processes); on pre-0.5.21 remotes a restart
+  still aborts every in-process turn, so check `/api/agent/running` first
+  there. The terminal daemon is never restarted by postinst while active.
 - **Both gateway units share one `.next`, so any rebuild must restart *both*.**
   `omp-web.service` and `omp-web-dev.service` declare the same
   `WorkingDirectory=/home/joysort/omp/ompweb` and therefore serve one build.
@@ -538,7 +553,10 @@ lib/
   omp-runtime.ts       shared Settings + AuthStorage + ModelRegistry
   omp-types.ts         structural view of omp's AgentSession
   project-trust.ts     gates a project's executable resources
-  rpc-manager.ts       AgentSessionWrapper + registry + startRpcSession
+  rpc-manager.ts       AgentSessionWrapper (UDS proxy) + registry + startRpcSession + host discovery/attach
+  session-host-protocol.ts  host wire frame types (host_hello/session_info/…)
+  session-host-transport.ts host run dir/socket/unit names, connect, liveness probe, .info discovery
+  terminals/terminal-service.ts  async UDS relay to the terminal daemon (auto-start, reconnect, replay)
   session-reader.ts    session listing + path cache + buildSessionContext adapter
   session-title.ts     thin wrapper over omp's own title generator
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
@@ -574,6 +592,14 @@ hooks/
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook
   useTheme.ts         theme state
+
+ops/
+  session-host/        per-conversation host process: main (lifecycle), transport (UDS + ring replay),
+                       web-compat (web commands over runRpcMode), ui-decoration, idle reap, restore
+  terminal-host/       persistent PTY daemon: main, terminals (Bun.Terminal), protocol
+
+release/systemd/
+  omp-terminal-host.service  unit seed rendered by debian/postinst
 ```
 
 ---
@@ -581,39 +607,59 @@ hooks/
 ## Key Design Decisions & Traps
 
 ### AgentSession lifecycle (`lib/rpc-manager.ts`)
-- One `AgentSessionWrapper` per session id, keyed in `globalThis.__ompSessions`
-- `globalThis` survives Next.js hot-reload; plain module-level Map does not
-- Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__ompStartLocks`)
+- One `AgentSessionWrapper` per session id, keyed in `globalThis.__ompSessions`.
+  The wrapper is a **detach-only UDS proxy** to a host process; the real
+  AgentSession runs in `ops/session-host/main.ts` (createAgentSession +
+  exported `runRpcMode`, in-host).
+- `globalThis` survives Next.js hot-reload; plain module-level Map does not.
+- Host idle reap: settled + 10 minutes (`OMP_WEB_HOST_IDLE_MS` override);
+  NEVER reaps turns, queues, subagents or background bash. Next message
+  transparently re-spawns. Concurrent `startRpcSession()` calls share a
+  single start Promise (`globalThis.__ompStartLocks`).
+- **Socket key ≠ session id.** `/api/agent/new` spawns under a temp key
+  `__new__<uuid>`; socket/unit/marker are keyed by it while the registry and
+  all routes use the real session id. Discovery resolves real id → socket
+  key by probing `host_hello` (and the host-written `.info` sidecar for
+  non-attaching feed refresh). Never assume `hostSocketPath(realId)` exists.
+- **A live answering socket is proof of our OWN host** — attach skips the
+  foreign-lease probe. Only the spawn branch probes
+  `refuseForeignSessionLease`; a foreign live holder (TUI/CLI/other
+  instance) yields `FOREIGN_LEASE_ERROR` → 409, never a silent sibling fork.
+  The SDK lease is an abstract-socket flock: `~/.omp/run/session-owners/`
+  is always EMPTY on Linux — never use it as a liveness signal.
 - Extensions are bound with omp's own `initializeExtensions()` from
   `@oh-my-pi/pi-coding-agent/modes/runtime-init` — the same wiring `omp --mode rpc`
   uses — with a browser-backed `ExtensionUIContext` layered on top. Do not
   reimplement the action set; a mismatch shows up as extensions silently doing
   nothing.
-- **A browser session runs *inside* the server, so restarting the server kills
-  the turn.** `bash` tool commands are children of the Next.js process. Any
-  `systemctl --user restart|stop omp-web` (or `kill`, or rebuild-and-restart)
-  issued from a session opened in the browser signals its own host: the unit's
-  `KillSignal=SIGTERM` reaches `next`, the `cleanup` handler at
-  `lib/rpc-manager.ts` destroys every wrapper, and *all* live sessions — not
-  just the one that ran the command — get
-  `{"type":"custom","customType":"session_exit",...}` followed by an assistant
-  message with `stopReason:"aborted"`. In the UI this looks like the agent
-  randomly stopping mid tool call. TUI sessions are separate processes and are
-  immune, which is the tell.
-- **Restarting the gateway from *inside* the gateway, safely:**
+- **Since #94 a browser session runs OUTSIDE the server, so restarting the
+  server no longer kills the turn.** Hosts live in their own transient units
+  (`systemd-run --user --collect`), outside `omp-web.service`'s cgroup;
+  `bash` tool commands are children of the HOST. Web exit/SIGTERM handlers
+  only DETACH wrappers. The UI re-attaches on the next request (state/GET/
+  events discover the live host), replays the ring buffer from seq 0, and
+  the turn completes normally. History: pre-0.5.21 the cleanup handler
+  destroyed every in-process wrapper and all live turns aborted with
+  `stopReason:"aborted"` — that failure mode is what #94 removed.
+- **Feed discovery must NOT attach.** `host_attach` resets the host's idle
+  reaper; a polling feed that attached would keep hosts immortal. The
+  running/list feeds read the `.info` sidecars (bare-connect liveness probe
+  only), and only explicit session routes attach.
+- **Restarting the gateway from *inside* the gateway** is now safe for
+  conversations (they survive in hosts), but the page still drops its SSE
+  and reloads. The transient-timer recipe still applies when you want the
+  restart to outlive the requesting turn's HTTP response:
   `systemd-run --user --on-active=150 --unit=omp-web-recover-once systemctl
-  --user restart omp-web.service` schedules a transient timer owned by systemd,
-  outside the agent's control group, so it survives the very restart it
-  triggers — a backgrounded `sleep && systemctl restart` does not. Warn the
-  user first: the turn aborts and the session resumes on the new process.
-  Alternatively restart 5010 from the dev instance on 5020, from a TUI, or from
-  an ssh shell — separate process, separate `globalThis.__ompSessions`.
-- **Two instances share `~/.omp/agent`.** Each process holds its own
-  `AuthStorage` SQLite handle on `agent.db` and its own session writers, so
-  never open the same session id in both UIs — two AgentSessions appending to
-  one `.jsonl` interleave entries. `invalidateOmpRuntime()` is also
-  process-local: a credential or `models.yml` change made in one instance is
-  invisible to the other until it restarts.
+  --user restart omp-web.service` — a backgrounded `sleep && systemctl
+  restart` dies with the web cgroup. Alternatively restart 5010 from 5020,
+  a TUI, or an ssh shell.
+- **Two instances share `~/.omp/agent`.** Journal writes are now guarded by
+  the SDK lease: whichever process's host holds a session's lease owns its
+  writes; the other instance's web tier refuses mutation with 409 instead
+  of forking a sibling `.jsonl`. Reading journals is always safe.
+  `invalidateOmpRuntime()` remains process-local: a credential or
+  `models.yml` change in one instance is invisible to the other until it
+  restarts (hosts pick up settings via their own watchers).
 
 ### One runtime, many requests (`lib/omp-runtime.ts`)
 omp's CLI builds `Settings` + `AuthStorage` + `ModelRegistry` once per process.
@@ -1006,9 +1052,11 @@ share one `.next`).
 
 Operational rules:
 
-- Restarting any host kills its live browser AgentSessions. The gateway
-  restart also drops the page you are looking at; the modal warns and
-  auto-recovers by polling `/api/health` and reloading.
+- Since 0.5.21 restarting a host does NOT kill its conversations or
+  terminals (they live in session hosts / the terminal daemon); the page
+  still drops SSE and reloads. The modal warns and auto-recovers by polling
+  `/api/health` and reloading. On pre-0.5.21 remotes a restart still aborts
+  every in-process turn.
 - The daemon stays loopback-only (`127.0.0.1:8799`, token in
   `~/omp/ops/env/restart-service.env`). omp-web reaches it via `node:http`
   (never `fetch` — Bun proxies loopback under `HTTP_PROXY`, #61), and the

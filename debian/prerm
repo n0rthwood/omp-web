@@ -25,6 +25,11 @@ case "$1" in
     TARGET_USER="$(find_running_user)" || exit 0
     TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || echo 0)"
     runuser -l "$TARGET_USER" -c "export XDG_RUNTIME_DIR=/run/user/$TARGET_UID; systemctl --user stop omp-web.service" 2>/dev/null || true
+    # issue #94: the terminal PTY daemon is package-managed too — stop it on
+    # remove so it doesn't keep running against files about to be deleted.
+    # (Never stopped on upgrade: postinst leaves an active daemon running —
+    # even across unit/payload changes — keeping live PTYs alive.)
+    runuser -l "$TARGET_USER" -c "export XDG_RUNTIME_DIR=/run/user/$TARGET_UID; systemctl --user stop omp-terminal-host.service" 2>/dev/null || true
     ;;
   upgrade|deconfigure|failed-upgrade)
     :

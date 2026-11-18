@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, attachLiveHostIfExists } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { requireVisibleSession } from "@/lib/web-session-guard";
 
@@ -69,7 +69,8 @@ export async function GET(
   if (blocked) return blocked;
 
   try {
-    const session = getRpcSession(id);
+    // Defect 2: re-attach a host that survived a web restart before giving up.
+    const session = getRpcSession(id) ?? await attachLiveHostIfExists(id);
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }

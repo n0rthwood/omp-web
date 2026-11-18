@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, statSync } from "fs";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent";
-import { planModeInfoFromEntries, webPlanModeInfo } from "@/lib/plan-mode-web";
-import { getOmpSetting } from "@/lib/omp-setting-access";
-import { sessionPathKey } from "@/lib/session-path";
+import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { planModeInfoFromEntries, type WebPlanModeInfo } from "@/lib/plan-mode-web";
+
 import {
   resolveSessionPath,
   resolveSessionIdByPath,
@@ -14,7 +13,8 @@ import {
   getHistoricalContextUsage,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { attachLiveHostIfExists, getRpcSession, startRpcSession } from "@/lib/rpc-manager";
+import { FOREIGN_LEASE_ERROR } from "@/lib/session-host-transport";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { requireVisibleSession } from "@/lib/web-session-guard";
 import { projectTreeForResponse } from "@/lib/project-tree";
@@ -31,36 +31,46 @@ export async function GET(
   const blocked = await requireVisibleSession(req, id);
   if (blocked) return blocked;
   try {
-    const rpc = getRpcSession(id);
+    const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
     const liveRpc = rpc?.isAlive() ? rpc : undefined;
     const resolvedPath = liveRpc ? null : await resolveSessionPath(id);
     if (!liveRpc && !resolvedPath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? await SessionManager.open(resolvedPath!);
-    const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
-    const entries = sm.getEntries() as never;
-    const leafId = sm.getLeafId();
-    const tree = projectTreeForResponse(sm.getTree());
+    // Live hosts own the journal: read over the wire. The read-only
+    // SessionManager fallback is for dead sessions' history files only —
+    // the web tier never writes .jsonl (issue #94).
+    const mirror = liveRpc?.sessionInfo;
+    const sm = liveRpc ? undefined : await SessionManager.open(resolvedPath!);
+    const liveEntries = liveRpc
+      ? (await liveRpc.send({ type: "get_entries" })) as { entries: unknown; leafId: string | null }
+      : undefined;
+    const filePath = liveRpc?.sessionFile || sm?.getSessionFile() || resolvedPath || "";
+    const entries = (liveEntries ? liveEntries.entries : sm!.getEntries()) as never;
+    const leafId = liveEntries ? liveEntries.leafId : sm!.getLeafId();
+    const liveTree = liveRpc
+      ? (await liveRpc.send({ type: "get_tree" })) as { tree: SessionTreeNode[] }
+      : undefined;
+    const tree = projectTreeForResponse(liveTree ? liveTree.tree : sm!.getTree());
     const searchParams = new URL(req.url).searchParams;
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
     const contextUsage = await getHistoricalContextUsage(entries, leafId);
     const totalActiveMs = computeSessionTotalActiveMs(entries);
-    const header = sm.getHeader();
-    let modified = header?.timestamp ?? new Date().toISOString();
+    const header = sm ? sm.getHeader() : (filePath ? readSessionHeader(filePath) : null);
+    let modified = header?.timestamp ?? mirror?.created ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
-    const info = header ? {
+    const info = header || mirror ? {
       path: filePath,
-      id: header.id,
-      cwd: header.cwd ?? "",
-      name: sm.getSessionName(),
-      created: header.timestamp,
+      id: header?.id ?? mirror!.sessionId,
+      cwd: header?.cwd ?? mirror?.cwd ?? "",
+      name: sm ? sm.getSessionName() : mirror?.name,
+      created: header?.timestamp ?? mirror!.created,
       modified,
       messageCount: context.messages.length,
       firstMessage: context.messages.find((m) => m.role === "user")
@@ -71,15 +81,16 @@ export async function GET(
         })()
         : "(no messages)",
       parentSessionId,
-      transient: !filePath || !existsSync(filePath),
+      transient: mirror ? !mirror.persisted : !filePath || !existsSync(filePath),
     } : null;
 
-    // Plan mode display must survive the TUI↔Web boundary: a TUI-planned
-    // session opened in the web has no live wrapper yet, so derive the mode
-    // from the journal when the in-process session is absent.
-    const planMode = liveRpc
-      ? webPlanModeInfo(liveRpc.inner, getOmpSetting<boolean>(liveRpc.inner.settings, "plan.enabled"))
-      : planModeInfoFromEntries(entries);
+    // Plan mode display must survive the TUI↔Web boundary: the host's
+    // get_state carries the live mode; sessions with no live host derive it
+    // from the journal.
+    const liveState = liveRpc
+      ? (await liveRpc.send({ type: "get_state" })) as { planMode?: WebPlanModeInfo }
+      : undefined;
+    const planMode = liveState?.planMode ?? planModeInfoFromEntries(entries);
     return NextResponse.json({
       sessionId: id,
       filePath,
@@ -116,15 +127,23 @@ export async function PATCH(
     if (typeof name !== "string") {
       return NextResponse.json({ error: "name is required" }, { status: 400 });
     }
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+    const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
+    const liveRpc = rpc?.isAlive() ? rpc : undefined;
+    const filePath = liveRpc ? null : await resolveSessionPath(id);
+    if (!liveRpc && !filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-    const sm = await SessionManager.open(filePath);
-    await sm.setSessionName(name.trim(), "user");
+    // Renames are writes: route them through the lease-owning host (attach
+    // when live, spawn otherwise). A foreign lease refuses at spawn — the
+    // web tier never writes .jsonl itself (issue #94).
+    const session = liveRpc ?? (await startRpcSession(id, filePath!, undefined)).session;
+    await session.send({ type: "set_session_name", name: name.trim() });
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
+    if (error instanceof Error && error.message === FOREIGN_LEASE_ERROR) {
+      return NextResponse.json({ error: FOREIGN_LEASE_ERROR }, { status: 409 });
+    }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
@@ -142,48 +161,31 @@ export async function DELETE(
   const blocked = await requireVisibleSession(req, id);
   if (blocked) return blocked;
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+    const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
+    const liveRpc = rpc?.isAlive() ? rpc : undefined;
+    const filePath = liveRpc ? null : await resolveSessionPath(id);
+    if (!liveRpc && !filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    // Read only the bounded header before deleting.
-    const parentSessionPath = readSessionHeader(filePath)?.parentSession;
-
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    const targetPathKey = sessionPathKey(filePath);
-    const dir = dirname(filePath);
-    try {
-      const files = readdirSync(dir).filter(
-        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey
-      );
-      for (const file of files) {
-        const childPath = join(dir, file);
-        try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-          if (
-            header.type === "session" &&
-            header.parentSession &&
-            sessionPathKey(header.parentSession) === targetPathKey
-          ) {
-            // Rewrite header with new parentSession
-            header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
-            writeFileSync(childPath, lines.join("\n"));
-          }
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* skip if dir unreadable */ }
-
-    await getRpcSession(id)?.shutdown();
-    unlinkSync(filePath);
+    // Deletion is a write (unlink + cascade re-parenting of child journals):
+    // only the lease-owning host may do it (issue #94). The host reparents
+    // children under held child leases, unlinks the target last, and tears
+    // itself down after the response — treat the response as terminal.
+    const session = liveRpc ?? (await startRpcSession(id, filePath!, undefined)).session;
+    const result = await session.send({ type: "delete_session" }) as {
+      reparented?: number;
+      refusedForeign?: string[];
+    } | null;
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      ...(result?.refusedForeign?.length ? { refusedForeign: result.refusedForeign } : {}),
+    });
   } catch (error) {
+    if (error instanceof Error && error.message === FOREIGN_LEASE_ERROR) {
+      return NextResponse.json({ error: FOREIGN_LEASE_ERROR }, { status: 409 });
+    }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }

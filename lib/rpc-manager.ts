@@ -1,59 +1,48 @@
+/**
+ * Session proxy (issue #94, contract §5).
+ *
+ * The web tier no longer runs AgentSession in-process. Each conversation lives
+ * in its own `ops/session-host` process, reachable over a per-session UDS
+ * (contract §3). This module keeps the exact export surface the routes and UI
+ * already use, but every command is forwarded as raw NDJSON with wrapper-owned
+ * `web-<n>` ids; the host owns the SDK session, extensions, plan mode, idle
+ * reaping, auto-title, and all write leases.
+ *
+ * The wrapper taps the raw socket bytes itself: RpcClient is used only for its
+ * start() lifecycle (ready interception + protocol v2 negotiation). Browser
+ * events are emitted from the wrapper's own decode of forwarded frames, since
+ * RpcClient drops several event types the web UI needs.
+ */
+
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent";
-import {
-  createAgentSession,
-  discoverSessionExtensionPaths,
-  getAgentDir,
-  initTheme,
-  SessionManager,
-  Theme,
-} from "@oh-my-pi/pi-coding-agent";
-import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
-import { BUILTIN_SLASH_COMMAND_DEFS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { executeAcpBuiltinSlashCommand, type AcpBuiltinSlashCommandResult } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { discoverCustomToolPaths } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
-import { readPlanFile } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-files";
-import {
-  readRpcSubagentTranscript,
-  RpcSubagentRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
-import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
-import { randomUUID } from "crypto";
-import { existsSync, realpathSync, statSync, writeFileSync } from "fs";
-import { resolve } from "path";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent";
+import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { RpcFrameDecoder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
+import { realpathSync, statSync } from "fs";
+import { join, resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
-import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
-import { untrustedProjectSessionOptions } from "./project-trust";
-import { readDefaultModelRole } from "./model-roles";
-import { applyConversationRotation } from "./model-rotation";
-import { getOmpSetting } from "@/lib/omp-setting-access";
-import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
+import { cacheSessionPath, invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "./session-reader";
 import {
-  applyWebPlanModeTransition,
-  readPersistedPlanModeState,
-  webPlanModeInfo,
-  type ModeChangeEntryLike,
-} from "./plan-mode-web";
-import { PRESET_FULL } from "./tool-presets";
-import { persistExplicitStartupPreferences } from "./startup-preferences";
-import { generateSessionTitle, shouldAutoGenerateTitle } from "./session-title";
-import type { SlashCommandInfo } from "./omp-types";
-import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
-import type {
-  ExtensionAskDialogResult,
-  ExtensionUiRequest,
-  ExtensionUiResponse,
-  ExtensionWidgetItem,
-  SessionInfo,
-  SessionMessageEntry,
-  SessionStatus,
-  SubagentSnapshot,
-} from "./types";
-import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+  FOREIGN_LEASE_ERROR,
+  HostConnection,
+  connectToHost,
+  connectToHostWithRetry,
+  findHostSocketKeyForSession,
+  getDiscoveredHosts,
+  hasDiscoveredLiveHost,
+  hostSocketPath,
+  hostUnitName,
+  probeHostSocket,
+  refreshHostDiscovery,
+} from "./session-host-transport";
+import {
+  isHostHelloFrame,
+  isHostSessionInfoFrame,
+  type HostSessionInfoFrame,
+  type HostStartOptions,
+} from "./session-host-protocol";
+import type { SessionInfo, SubagentSnapshot } from "./types";
 
 // ============================================================================
 // Types
@@ -66,301 +55,137 @@ export interface AgentEvent {
 
 type EventListener = (event: AgentEvent) => void;
 
-type PendingUiResponse = {
-  resolve: (response: ExtensionUiResponse) => void;
-  cancel: () => void;
-};
-
-type CustomUiComponent = {
-  render: (width: number) => string[];
-  handleInput?: (data: string) => void;
-  dispose?: () => void;
-  invalidate?: () => void;
-};
-
-type ActiveCustomUi = {
-  component: CustomUiComponent;
-  width: number;
-  resolve: (value: unknown) => void;
+type PromptTracker = {
+  promptEvent: Record<string, unknown>;
+  streamingBehavior: "steer" | "followUp" | undefined;
   settled: boolean;
 };
 
-type ExtensionUiRequestBody = Record<string, unknown> & {
-  method: ExtensionUiRequest["method"];
-  timeout?: number;
-  expiresAt?: number;
+type PendingCommand = {
+  command: string;
+  resolve: (data: unknown) => void;
+  reject: (error: Error) => void;
 };
 
-type ExtensionBindingOptions = {
-  forceEmptySystemPrompt?: boolean;
+const RUNNING_STATE_EVENT_TYPES: Record<string, true> = {
+  agent_start: true,
+  agent_end: true,
+  agent_settled: true,
+  auto_compaction_start: true,
+  auto_compaction_end: true,
+  compaction_start: true,
+  compaction_end: true,
 };
-
-const RUNNING_STATE_EVENT_TYPES = new Set([
-  "agent_start",
-  "agent_end",
-  "agent_settled",
-  "auto_compaction_start",
-  "auto_compaction_end",
-  "compaction_start",
-  "compaction_end",
-]);
-
-const IDLE_RESET_EVENT_TYPES = new Set([
-  "agent_end",
-  "agent_settled",
-  "auto_compaction_end",
-  "compaction_end",
-]);
 
 const MAX_SUBAGENT_HISTORY = 128;
+
+/** How long shutdown() waits for the host to close its socket after the
+ *  shutdown frame before falling back to stopping its transient unit. */
+const HOST_SHUTDOWN_GRACE_MS = 5_000;
 
 export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
   thinkingLevel?: ThinkingLevel;
-}
-
-const CODING_TOOL_NAMES: Record<string, true> = Object.fromEntries(
-  PRESET_FULL.map((name) => [name, true]),
-);
-
-// Extensions require a complete Theme, while the web UI applies its own styling.
-class PlainTextTheme extends Theme {
-  constructor() {
-    super(
-      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
-      "truecolor",
-      "unicode",
-      {},
-    );
-  }
-
-  override fg(...[, text]: Parameters<Theme["fg"]>): string { return text; }
-  override bg(...[, text]: Parameters<Theme["bg"]>): string { return text; }
-  override bold(text: string): string { return text; }
-  override italic(text: string): string { return text; }
-  override underline(text: string): string { return text; }
-  override inverse(text: string): string { return text; }
-  override strikethrough(text: string): string { return text; }
-  override getFgAnsi(): string { return ""; }
-  override getBgAnsi(): string { return ""; }
-  override getThinkingBorderColor(): (text: string) => string {
-    return (text) => text;
-  }
-  override getBashModeBorderColor(): (text: string) => string { return (text) => text; }
-}
-
-const PLAIN_TEXT_THEME = new PlainTextTheme();
-const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
-
-function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
-  if (toolNames.length === 0) return [];
-
-  const extensionToolNames = session
-    .getAllToolNames()
-    .filter((name) => CODING_TOOL_NAMES[name] !== true);
-
-  return [...new Set([...toolNames, ...extensionToolNames])];
-}
-
-/** Tool descriptors for the browser's tool picker. */
-function listTools(session: AgentSessionLike): ToolInfo[] {
-  return session.getAllToolNames().map((name) => ({
-    name,
-    description: session.getToolByName(name)?.description ?? "",
-  }));
-}
-
-type AvailableCommandsSession = Parameters<typeof buildAvailableSlashCommands>[0];
-
-function appendSlashCommand(
-  commands: SlashCommandInfo[],
-  seenNames: Set<string>,
-  command: SlashCommandInfo,
-): void {
-  const name = command.name.trim();
-  if (!name || seenNames.has(name)) return;
-  seenNames.add(name);
-  commands.push({ ...command, name });
-}
-
-/**
- * Keep the browser palette aligned with omp's own command registry and
- * discovery pipeline. The SDK's ACP list intentionally omits TUI-only
- * commands; the web palette still exposes their canonical metadata because
- * they are part of omp's user-facing slash-command surface.
- */
-export async function getAvailableSlashCommands(session: AgentSessionLike): Promise<SlashCommandInfo[]> {
-  const commands: SlashCommandInfo[] = [];
-  const seenNames = new Set<string>();
-
-  for (const builtin of BUILTIN_SLASH_COMMAND_DEFS) {
-    const hint = builtin.inlineHint;
-    appendSlashCommand(commands, seenNames, {
-      name: builtin.name,
-      aliases: builtin.aliases,
-      description: builtin.description,
-      source: "builtin",
-      ...(hint ? { input: { hint } } : {}),
-      ...(builtin.subcommands ? { subcommands: builtin.subcommands } : {}),
-    });
-  }
-
-  const discovered = await buildAvailableSlashCommands(session as unknown as AvailableCommandsSession);
-  for (const command of discovered) {
-    // Builtins were taken from the complete registry above, including
-    // commands without an ACP/text-mode handler such as /plan and /handoff.
-    if (command.source === "builtin") continue;
-    appendSlashCommand(commands, seenNames, command);
-  }
-
-  // Prompt templates are a separate SDK resource from custom commands and
-  // file-based commands, so retain them explicitly in the browser contract.
-  for (const template of session.promptTemplates) {
-    appendSlashCommand(commands, seenNames, {
-      name: template.name,
-      description: template.description,
-      source: "prompt",
-      ...(template.source ? { path: template.source } : {}),
-    });
-  }
-
-  return commands;
+  /** Read-only reattach: never spawn when no live host answers (defect 2). */
+  attachOnly?: boolean;
 }
 
 // ============================================================================
-// AgentSessionWrapper
-// Wraps AgentSession with the same interface the rest of the app expects
+// AgentSessionWrapper — UDS proxy preserving the legacy route-facing surface
 // ============================================================================
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
-  private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
-  private activeCustomUis = new Map<string, ActiveCustomUi>();
-  private extensionStatuses = new Map<string, string>();
-  private extensionWidgets = new Map<string, ExtensionWidgetItem>();
+  private pendingCommands = new Map<string, PendingCommand>();
+  private requestId = 0;
   private promptRunning = false;
-  private extensionsBound = false;
-  private extensionBindingPromise: Promise<void> | null = null;
-  private extensionBindingError: unknown = null;
-  private forceEmptySystemPrompt = false;
-  private unsubscribe: (() => void) | null = null;
-  private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private onDestroyCallback: (() => void) | null = null;
-  private shutdownPromise: Promise<void> | null = null;
-  private readonly subagents: RpcSubagentRegistry;
-  // The SDK registry removes terminal entries after emitting their lifecycle frame.
-  // Keep a bounded per-session copy so state requests can still expose history.
+  private promptTrackers = new Map<string, PromptTracker>();
+  /** command id → client draft identity, from the host_prompt_identity frame. */
+  private promptIdentities = new Map<string, { promptId: string; streamingBehavior?: string }>();
+  private streaming = false;
+  private compacting = false;
+  private bashRunning = false;
   private readonly subagentHistory = new Map<string, SubagentSnapshot>();
+  private sessionInfoMirror: HostSessionInfoFrame | undefined;
+  private realSessionIdValue: string;
+  /** Socket/unit key the host was spawned under; differs from the real id
+   *  after reattach (hosts spawned via /api/agent/new carry __new__ keys). */
+  private hostKeyValue: string;
+  private sessionFileValue: string;
+  private cwdValue: string;
+  private lastSeenSeq = 0;
+  private sawReady = false;
+  // Gap replay may re-deliver frames a connected-but-unattached client already
+  // saw live (duplicate ready + live/replay copies). Dedupe by ring end offset
+  // until the host_attach ack makes lastSeenSeq authoritative.
+  private attached = false;
+  private readonly seenFrameEnds = new Set<number>();
+  private readonly decoder = new RpcFrameDecoder();
+  private lineBuffer = Buffer.alloc(0);
+  private readonly terminate: { allowed: boolean };
+  private readonly attachToHost: () => void;
+  private shutdownPromise: Promise<void> | null = null;
+  private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
+  private readonly client: RpcClient;
+  private startPromise: Promise<void> | null = null;
 
   constructor(
-    public readonly inner: AgentSessionLike,
-    eventBus: ConstructorParameters<typeof RpcSubagentRegistry>[0],
+    private readonly connection: HostConnection,
+    requested: { sessionId: string; sessionFile: string; cwd: string },
+    attachOptions: { attach: () => void; terminate: { allowed: boolean }; hostKey?: string },
   ) {
-    this.subagents = new RpcSubagentRegistry(eventBus, (frame) => {
-      const event = frame as unknown as AgentEvent;
-      this.rememberSubagentFrame(event);
-      this.emit(event);
-      this.resetIdleTimer();
-      notifyRunningChange();
-    });
-    this.subagents.setSubscriptionLevel("progress");
-  }
-
-  private rememberSubagentSnapshot(snapshot: SubagentSnapshot): void {
-    this.subagentHistory.set(snapshot.id, snapshot);
-    if (this.subagentHistory.size <= MAX_SUBAGENT_HISTORY) return;
-    const removable = [...this.subagentHistory.values()]
-      .filter((entry) => entry.status !== "pending" && entry.status !== "running")
-      .sort((left, right) => left.lastUpdate - right.lastUpdate);
-    while (this.subagentHistory.size > MAX_SUBAGENT_HISTORY && removable.length > 0) {
-      const oldest = removable.shift();
-      if (oldest) this.subagentHistory.delete(oldest.id);
-    }
-  }
-
-  private rememberSubagentFrame(event: AgentEvent): void {
-    if (event.type === "subagent_progress") {
-      const payload = event.payload as { progress?: { id?: string } } | undefined;
-      const id = payload?.progress?.id;
-      if (!id) return;
-      const live = this.subagents.getSubagents().find((entry) => entry.id === id);
-      if (live) this.rememberSubagentSnapshot(live as unknown as SubagentSnapshot);
-      return;
-    }
-    if (event.type !== "subagent_lifecycle") return;
-    const payload = event.payload as {
-      id?: string;
-      index?: number;
-      agent?: string;
-      agentSource?: "bundled" | "user" | "project";
-      description?: string;
-      status?: "started" | "completed" | "failed" | "aborted";
-      sessionFile?: string;
-      parentToolCallId?: string;
-    } | undefined;
-    if (!payload?.id || !payload.status) return;
-    const live = this.subagents.getSubagents().find((entry) => entry.id === payload.id);
-    if (payload.status === "started") {
-      if (live) this.rememberSubagentSnapshot(live as unknown as SubagentSnapshot);
-      return;
-    }
-    const previous = (live as unknown as SubagentSnapshot | undefined) ?? this.subagentHistory.get(payload.id);
-    const terminalStatus: SubagentSnapshot["status"] = payload.status === "failed"
-      ? "failed"
-      : payload.status === "aborted"
-        ? "aborted"
-        : "completed";
-    this.rememberSubagentSnapshot({
-      id: payload.id,
-      index: payload.index ?? previous?.index ?? 0,
-      agent: payload.agent ?? previous?.agent ?? payload.id,
-      agentSource: payload.agentSource ?? previous?.agentSource ?? "bundled",
-      description: payload.description ?? previous?.description,
-      status: terminalStatus,
-      task: previous?.task,
-      assignment: previous?.assignment,
-      sessionFile: payload.sessionFile ?? previous?.sessionFile,
-      lastUpdate: Date.now(),
-      parentToolCallId: payload.parentToolCallId ?? previous?.parentToolCallId,
-      progress: previous?.progress
-        ? { ...previous.progress, status: terminalStatus }
-        : undefined,
+    this.realSessionIdValue = requested.sessionId;
+    this.hostKeyValue = attachOptions.hostKey ?? requested.sessionId;
+    this.sessionFileValue = requested.sessionFile;
+    this.cwdValue = requested.cwd;
+    this.terminate = attachOptions.terminate;
+    this.attachToHost = attachOptions.attach;
+    this.client = new RpcClient({ spawn: () => this.connection.process });
+    // Host exit (crash, idle reap, fork, shutdown) detaches the wrapper. The
+    // host survives plain web detaches; only a real host exit lands here.
+    void this.connection.process.exited.then(() => {
+      if (this._alive) this.destroy();
     });
   }
 
-  private getSubagentSnapshots(): SubagentSnapshot[] {
-    for (const live of this.subagents.getSubagents()) {
-      const snapshot = live as unknown as SubagentSnapshot;
-      this.rememberSubagentSnapshot(snapshot);
-    }
-    const snapshots = new Map(this.subagentHistory);
-    for (const live of this.subagents.getSubagents()) {
-      const snapshot = live as unknown as SubagentSnapshot;
-      snapshots.set(snapshot.id, snapshot);
-    }
-    return [...snapshots.values()].sort((left, right) => {
-      const leftActive = left.status === "pending" || left.status === "running";
-      const rightActive = right.status === "pending" || right.status === "running";
-      if (leftActive !== rightActive) return leftActive ? -1 : 1;
-      if (leftActive) return left.index - right.index || left.id.localeCompare(right.id);
-      return right.lastUpdate - left.lastUpdate || left.id.localeCompare(right.id);
-    });
+  /**
+   * Attach to the host and run the RpcClient lifecycle (ready + negotiate v2).
+   * The tap is wired via the connection's rawStdout hook before construction.
+   */
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = (async () => {
+      // Contract §3 attach handshake: the host answers hello + cached ready +
+      // gap replay + host_attach(seq). Written once start() is underway so the
+      // RpcClient reader is live before any host bytes arrive.
+      this.attachToHost();
+      await this.client.start();
+    })();
+    return this.startPromise;
+  }
+
+  async waitUntilReady(): Promise<void> {
+    if (this.startPromise) await this.startPromise;
   }
 
   get sessionId(): string {
-    return this.inner.sessionId;
+    return this.realSessionIdValue;
   }
 
   get sessionFile(): string {
-    return this.inner.sessionFile ?? "";
+    return this.sessionFileValue;
   }
 
   get cwd(): string {
-    return this.inner.sessionManager.getCwd();
+    return this.cwdValue;
+  }
+
+  /** Ring position for the next host_attach (authoritative after ack). */
+  get attachSeq(): number {
+    return this.lastSeenSeq;
   }
 
   isAlive(): boolean {
@@ -370,288 +195,16 @@ export class AgentSessionWrapper {
   isRunning(): boolean {
     return this._alive && (
       this.promptRunning
-      || this.inner.isStreaming
-      || this.inner.isCompacting
-      || this.inner.isBashRunning
-      || this.subagents.getSubagents().length > 0
+      || this.streaming
+      || this.compacting
+      || this.bashRunning
+      || this.getSubagentSnapshots().some((s) => s.status === "pending" || s.status === "running")
     );
   }
-  bindToolUiContext(setter: (uiContext: ExtensionUiContextLike, hasUI: boolean) => void): void {
-    setter(this.createExtensionUiContext(), true);
-  }
 
-
-  start(): void {
-    this.syncPlanModeFromSession();
-    this.unsubscribe = this.inner.subscribe((rawEvent: AgentSessionEvent) => {
-      const event = rawEvent as unknown as AgentEvent;
-      if (event.type === "agent_end") {
-        invalidateSessionListCache();
-      }
-      if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
-      this.emit(event);
-      if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
-    });
-    this.resetIdleTimer();
-    notifyRunningChange();
-  }
-
-  setForceEmptySystemPrompt(force: boolean): void {
-    this.forceEmptySystemPrompt = force;
-    this.applyForcedEmptySystemPrompt();
-  }
-
-  beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
-    void this.ensureExtensionsBound(options).catch((err) => {
-      console.error("[omp-web] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
-    });
-  }
-
-  async waitUntilReady(): Promise<void> {
-    await this.waitForExtensionsBound();
-  }
-
-  private ensureExtensionsBound(options: ExtensionBindingOptions = {}): Promise<void> {
-    if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
-    if (this.extensionsBound) {
-      this.applyForcedEmptySystemPrompt();
-      return Promise.resolve();
-    }
-    if (this.extensionBindingPromise) return this.extensionBindingPromise;
-
-    this.extensionBindingError = null;
-    this.extensionBindingPromise = (async () => {
-      if (!this._alive) return;
-      // omp wires extensions the same way for every non-interactive host; reuse
-      // its shared initializer so omp-web sessions expose exactly the action set
-      // `omp --mode rpc` does, then layer our browser-backed UI context on top.
-      await initializeExtensions(this.inner as never, {
-        uiContext: this.createExtensionUiContext() as never,
-        reportSendError: (action, error) => this.emit({
-          type: "extension_error",
-          extensionPath: action,
-          event: "send",
-          error: error.message,
-        }),
-        reportRuntimeError: (error) => this.emit({
-          type: "extension_error",
-          extensionPath: error.extensionPath,
-          event: error.event,
-          error: error.error,
-        }),
-        onShutdown: () => this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "notify",
-          notifyType: "warning",
-          message: "Extension requested shutdown, but shutdown is not supported in omp-web.",
-        } as ExtensionUiRequest as AgentEvent),
-      });
-      this.extensionsBound = true;
-      this.applyForcedEmptySystemPrompt();
-      console.log(`[omp-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
-    })().catch((err) => {
-      this.extensionBindingError = err;
-      throw err;
-    });
-
-    return this.extensionBindingPromise;
-  }
-
-  private async waitForExtensionsBound(): Promise<void> {
-    try {
-      if (this.extensionBindingPromise) await this.extensionBindingPromise;
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-    if (this.extensionBindingError) {
-      throw this.extensionBindingError instanceof Error
-        ? this.extensionBindingError
-        : new Error(String(this.extensionBindingError));
-    }
-  }
-
-  private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "execute_slash_command";
-  }
-
-  private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
-    try {
-      return await operation();
-    } finally {
-      this.resetIdleTimer();
-      notifyRunningChange();
-    }
-  }
-
-  private applyForcedEmptySystemPrompt(): void {
-    if (this.forceEmptySystemPrompt && this.inner.agent.state) {
-      this.inner.agent.state.systemPrompt = [];
-    }
-  }
-  private syncPlanModeFromSession(): void {
-    let state = this.inner.getPlanModeState?.();
-    if (!state) {
-      state = readPersistedPlanModeState(
-        this.inner.sessionManager.getEntries() as ModeChangeEntryLike[],
-      );
-      if (state) this.inner.setPlanModeState?.(state);
-    }
-
-    if (state?.enabled) {
-      this.inner.setPlanProposalHandler?.((title) => this.handlePlanProposal(title));
-    }
-  }
-
-  private async handlePlanProposal(title: string): Promise<{
-    content: Array<{ type: "text"; text: string }>;
-    details?: unknown;
-  }> {
-    const state = this.inner.getPlanModeState?.();
-    if (!state?.enabled || !this.inner.preparePlanForReview) {
-      throw new Error("Plan mode is not active.");
-    }
-
-    const review = await this.inner.preparePlanForReview(title);
-    const planFilePath = review.details?.planFilePath;
-    const resolvedTitle = review.details?.title;
-    if (!planFilePath || !resolvedTitle) {
-      throw new Error("The proposed plan could not be resolved.");
-    }
-
-    const planContent = await readPlanFile(planFilePath, {
-      cwd: this.cwd,
-      localProtocolOptions: {
-        getArtifactsDir: () => this.inner.sessionManager.getArtifactsDir(),
-        getSessionId: () => this.inner.sessionManager.getSessionId(),
-      },
-    });
-    if (!planContent?.trim()) {
-      throw new Error(`Plan file not found at ${planFilePath}`);
-    }
-
-    const responseValue = await this.requestExtensionUi(
-      { method: "plan_review", title: resolvedTitle, planFilePath, planContent },
-      JSON.stringify({ action: "refine" }),
-      (response) => "value" in response ? response.value : JSON.stringify({ action: "refine" }),
-    );
-    let choice: { action?: unknown; feedback?: unknown } = {};
-    try {
-      choice = JSON.parse(responseValue) as { action?: unknown; feedback?: unknown };
-    } catch {
-      // Treat malformed or stale browser responses as a request to keep planning.
-    }
-
-    const details = { planFilePath, title: resolvedTitle, planExists: true };
-    if (choice.action === "approve") {
-      this.inner.setPlanReferencePath?.(planFilePath);
-      this.inner.setPlanProposalHandler?.(null);
-      this.inner.setPlanModeState?.(undefined);
-      this.inner.sessionManager.appendModeChange("none");
-      this.emit({ type: "mode_change", mode: "none" });
-      return {
-        content: [{
-          type: "text",
-          text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
-        }],
-        details,
-      };
-    }
-
-    if (state.planFilePath !== planFilePath) {
-      this.inner.setPlanModeState?.({ ...state, planFilePath });
-      this.inner.sessionManager.appendModeChange("plan", { planFilePath });
-    }
-    const feedback = typeof choice.feedback === "string" ? choice.feedback.trim() : "";
-    return {
-      content: [{
-        type: "text",
-        text: [
-          "Plan refinement requested.",
-          feedback ? `User feedback:\n${feedback}` : "",
-          `Update the plan file, then write ${resolvedTitle} to xd://propose again when ready.`,
-        ].filter(Boolean).join("\n\n"),
-      }],
-      details,
-    };
-  }
-
-
-  private emit(event: AgentEvent): void {
-    for (const l of this.listeners) l(event);
-  }
-
-  /**
-   * Auto-title a browser session after its first real user prompt completes
-   * (issue #20). Mirrors the SDK's `maybeStartTitleGeneration` gate and the
-   * manual "Generate title" route's own generation path (session-title.ts),
-   * but never force-overwrites: `shouldAutoGenerateTitle` only proceeds on
-   * an unnamed session, and the name is re-checked after generation so a
-   * concurrent manual click always wins. Runs entirely server-side — this is
-   * the remote's own in-process AgentSession, so a fleet-proxied session's
-   * title lands in the remote's own session file with no extra plumbing.
-   */
-  private async maybeAutoGenerateTitle(message: string): Promise<void> {
-    try {
-      const sessionManager = this.inner.sessionManager;
-      const commandNames = new Set(
-        (this.inner.extensionRunner?.getRegisteredCommands() ?? []).map((command) => command.name),
-      );
-      const eligible = shouldAutoGenerateTitle({
-        message,
-        hasSessionName: Boolean(sessionManager.getSessionName()),
-        piNoTitle: process.env.PI_NO_TITLE,
-        extensionCommandNames: commandNames,
-      });
-      if (!eligible) return;
-
-      const result = await generateSessionTitle(this.inner, message);
-      if (!result || !this.isAlive()) return;
-      // Re-check after generation: a concurrent manual "Generate title"
-      // click may have already named the session while this was in flight.
-      if (sessionManager.getSessionName()) return;
-      const applied = await sessionManager.setSessionName(result.title, "auto");
-      if (!applied) return;
-
-      invalidateSessionListCache();
-      this.emit({ type: "session_renamed", title: result.title, sessionId: this.inner.sessionId });
-      notifyRunningChange();
-    } catch (error) {
-      console.error("[pi-web] auto title generation failed:", error instanceof Error ? error.message : error);
-    }
-  }
-
-  private resetIdleTimer(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
-        this.resetIdleTimer();
-        return;
-      }
-      void this.shutdown().catch((error) => {
-        console.error("[pi-web] failed to shut down idle session:", error instanceof Error ? error.message : error);
-      });
-    }, 10 * 60 * 1000);
-  }
-
-  private persistBashOnlySession(): void {
-    const manager = this.inner.sessionManager;
-    const sessionFile = manager.getSessionFile();
-    if (!sessionFile || existsSync(sessionFile)) return;
-
-    const header = manager.getHeader();
-    if (!header) return;
-
-    const content = [header, ...manager.getEntries()]
-      .map((entry) => JSON.stringify(entry))
-      .join("\n") + "\n";
-    writeFileSync(sessionFile, content, { encoding: "utf8", flag: "wx" });
-
-    // omp normally delays the first flush until an assistant message exists.
-    // A leading shell command has no assistant message, so mark this SDK
-    // manager as flushed after writing its own generated entries.
-    (manager as unknown as { flushed: boolean }).flushed = true;
-    cacheSessionPath(this.inner.sessionId, sessionFile);
+  /** Host-pushed session_info mirror backing the synchronous session list. */
+  get sessionInfo(): HostSessionInfoFrame | undefined {
+    return this.sessionInfoMirror;
   }
 
   onEvent(listener: EventListener): () => void {
@@ -667,402 +220,475 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
-  async send(command: Record<string, unknown>): Promise<unknown> {
-    this.resetIdleTimer();
-    const type = command.type as string;
-    if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
-    if (type === "prompt" || type === "steer" || type === "follow_up") {
-      this.syncPlanModeFromSession();
-    }
+  private emit(event: AgentEvent): void {
+    for (const l of this.listeners) l(event);
+  }
 
+  // --------------------------------------------------------------------------
+  // Raw stdout tap (contract §3): line-split, decode, intercept, re-forward.
+  // --------------------------------------------------------------------------
+
+  handleRawStdout(chunk: Uint8Array): void {
+    this.lineBuffer = this.lineBuffer.length === 0
+      ? Buffer.from(chunk)
+      : Buffer.concat([this.lineBuffer, chunk]);
+    for (;;) {
+      const newline = this.lineBuffer.indexOf(0x0a);
+      if (newline === -1) break;
+      const lineBytes = this.lineBuffer.subarray(0, newline);
+      this.lineBuffer = this.lineBuffer.subarray(newline + 1);
+      // Ring position = cumulative byte offset AFTER this line (host seq).
+      this.lastSeenSeq += lineBytes.length + 1;
+      const frameEnd = this.lastSeenSeq;
+      const line = lineBytes.toString("utf8").trim();
+      if (!line) continue;
+      this.handleLine(line, frameEnd);
+    }
+  }
+
+  private handleLine(line: string, frameEnd: number): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return; // malformed host line: nothing to forward
+    }
+    if (isHostHelloFrame(parsed)) {
+      this.realSessionIdValue = parsed.sessionId;
+      this.sessionFileValue = parsed.sessionFile;
+      this.cwdValue = parsed.cwd;
+      return;
+    }
+    if (isHostSessionInfoFrame(parsed)) {
+      this.sessionInfoMirror = parsed;
+      invalidateSessionListCache();
+      if (parsed.modelDefaultChanged) invalidateModelsCache();
+      return;
+    }
+    if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "host_prompt_identity") {
+      // Host-only draft identity (#88 / defect 2): never forwarded to the
+      // browser; consumed when the SDK prompt_result settles the command.
+      const commandId = "id" in parsed && typeof parsed.id === "string" ? parsed.id : undefined;
+      const promptId = "promptId" in parsed && typeof parsed.promptId === "string" ? parsed.promptId : undefined;
+      if (commandId && promptId) {
+        this.promptIdentities.set(commandId, {
+          promptId,
+          ...("streamingBehavior" in parsed && typeof parsed.streamingBehavior === "string"
+            ? { streamingBehavior: parsed.streamingBehavior }
+            : {}),
+        });
+      }
+      return;
+    }
+    if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "host_attach") {
+      // host_attach.seq is the authoritative ring position — never byte-sum
+      // client-side (duplicate ready + live/replay copies make that unreliable).
+      if ("seq" in parsed && typeof parsed.seq === "number") this.lastSeenSeq = parsed.seq;
+      this.attached = true;
+      this.seenFrameEnds.clear();
+      return;
+    }
+    // Contract §3(d): FORWARD RE-SERIALIZED DECODED frames — selective raw-line
+    // forwarding corrupts the client decoder (chunked frames must reassemble
+    // first). Host-only frames above never reach the client stream.
+    let decoded: object | undefined;
+    try {
+      decoded = this.decoder.push(parsed);
+    } catch (error) {
+      console.error("[omp-web] host frame decode failed:", error instanceof Error ? error.message : error);
+      return;
+    }
+    if (!decoded) return; // rpc_chunk mid-reassembly: nothing to forward yet
+    if (!this.attached) {
+      // Pre-ack frames: the same logical frame can arrive twice (connect-time
+      // live copy, then gap-replay copy). Dedupe by ring end offset.
+      if (this.seenFrameEnds.has(frameEnd)) return;
+      this.seenFrameEnds.add(frameEnd);
+    }
+    const frame = decoded as AgentEvent;
+    if (frame.type === "response" && typeof frame.id === "string" && this.pendingCommands.has(frame.id)) {
+      // Wrapper-owned command response: resolve here, never forward (§3a).
+      this.handleResponseFrame(frame);
+      return;
+    }
+    if (frame.type === "extension_ui_request") {
+      // Browser machinery owns these; the client has no UI handling (§3b).
+      this.handleExtensionUiRequest(frame);
+      return;
+    }
+    if (frame.type === "ready") {
+      // Replay may re-deliver ready after the client already consumed one;
+      // forward only the first so negotiation sees exactly one ready line.
+      if (this.sawReady) return;
+      this.sawReady = true;
+    }
+    this.connection.feedStdout(Buffer.from(`${JSON.stringify(frame)}\n`, "utf8"));
+    this.handleFrame(frame);
+  }
+
+  private handleFrame(frame: AgentEvent): void {
+    const type = frame.type;
+    if (type === "response") {
+      this.handleResponseFrame(frame);
+      return;
+    }
+    if (type === "extension_ui_request") {
+      this.handleExtensionUiRequest(frame);
+      return;
+    }
+    if (type === "prompt_result") {
+      this.handlePromptResult(frame);
+      // fall through: also emit to listeners
+    }
+    if (type === "agent_start") this.streaming = true;
+    if (type === "agent_end") {
+      this.streaming = false;
+      invalidateSessionListCache();
+    }
+    if (type === "agent_settled" || type === "session_settled") this.streaming = false;
+    if (type === "compaction_start" || type === "auto_compaction_start") this.compacting = true;
+    if (type === "compaction_end" || type === "auto_compaction_end") this.compacting = false;
+    // bash has no lifecycle events on the wire; send() flips the mirror at
+    // admission and the response handler clears it (host guards admission).
+    if (type === "session_renamed" || type === "session_info_update") invalidateSessionListCache();
+    if (type === "subagent_lifecycle" || type === "subagent_progress") this.rememberSubagentFrame(frame);
+    this.emit(frame);
+    if (RUNNING_STATE_EVENT_TYPES[type] || type === "subagent_lifecycle" || type === "prompt_result") {
+      notifyRunningChange();
+    }
+  }
+
+  private handleResponseFrame(frame: AgentEvent): void {
+    const id = typeof frame.id === "string" ? frame.id : undefined;
+    const pending = id ? this.pendingCommands.get(id) : undefined;
+    if (!pending || !id) return; // negotiation / client-owned responses pass through
+    this.pendingCommands.delete(id);
+    const command = pending.command;
+    if (command === "set_model" || command === "set_role_model" || command === "reload") {
+      invalidateModelsCache();
+    }
+    if (
+      command === "set_model" || command === "set_role_model" || command === "set_thinking_level"
+      || command === "set_session_name" || command === "compact" || command === "bash"
+      || command === "fork" || command === "reload" || command === "auto_name"
+    ) {
+      invalidateSessionListCache();
+    }
+    if (frame.success === true) {
+      if (command === "get_state") this.refreshStateMirrors(frame.data);
+      if (command === "bash" || command === "abort_bash") this.bashRunning = false;
+      let data = "data" in frame ? frame.data : undefined;
+      if (command === "get_state") data = this.overlayState(data);
+      if (pending.command === "prompt") {
+        // Ack with agentInvoked === false: the prompt was never started. The
+        // tracker stays in promptTrackers keyed by request id so a later
+        // prompt_result (or this ack) settles it exactly once.
+        const ack = data;
+        if (typeof ack === "object" && ack !== null && "agentInvoked" in ack && ack.agentInvoked === false) {
+          this.settlePromptById(id, undefined);
+        }
+      }
+      pending.resolve(data);
+    } else {
+      const message = typeof frame.error === "string" ? frame.error : `Command failed: ${command}`;
+      if (command === "bash" || command === "abort_bash") this.bashRunning = false;
+      if (command === "prompt") this.settlePromptById(id, message);
+      pending.reject(new Error(message));
+    }
+    notifyRunningChange();
+  }
+
+  /**
+   * The host owns get_state; the wrapper overlays the bits it alone knows:
+   * whether THIS proxy still considers a prompt in flight, and the subagent
+   * history it has accumulated from forwarded frames.
+   */
+  private overlayState(data: unknown): unknown {
+    if (typeof data !== "object" || data === null) return data;
+    return {
+      ...data,
+      isPromptRunning: this.promptRunning,
+      subagents: this.getSubagentSnapshots(),
+    };
+  }
+
+  private refreshStateMirrors(data: unknown): void {
+    if (typeof data !== "object" || data === null) return;
+    const state = data as Record<string, unknown>;
+    if (typeof state.isStreaming === "boolean") this.streaming = state.isStreaming;
+    if (typeof state.isCompacting === "boolean") this.compacting = state.isCompacting;
+    if (typeof state.isBashRunning === "boolean") this.bashRunning = state.isBashRunning;
+  }
+
+  private handlePromptResult(frame: AgentEvent): void {
+    const id = typeof frame.id === "string" ? frame.id : undefined;
+    if (!id) return;
+    const status = frame.status;
+    if (status === "error") {
+      const error = frame.error;
+      const message = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+        ? error.message
+        : "Prompt failed";
+      this.settlePromptById(id, message);
+    } else {
+      this.settlePromptById(id, undefined);
+    }
+  }
+
+  private settlePromptById(id: string, errorMessage: string | undefined): void {
+    const tracker = this.promptTrackers.get(id);
+    if (tracker) {
+      this.promptTrackers.delete(id);
+      this.promptIdentities.delete(id);
+      this.settlePrompt(tracker, errorMessage);
+      return;
+    }
+    // Tracker miss: a prompt admitted by a PREVIOUS web process settles here
+    // after reattach (ring replay). The host's host_prompt_identity frame
+    // carries the original draft identity; replay the same settlement events
+    // so the restarted web confirms the submitter's draft. Without an identity
+    // the draft is not ours — never touch it.
+    const identity = this.promptIdentities.get(id);
+    if (!identity) return;
+    this.promptIdentities.delete(id);
+    const streamingBehavior = identity.streamingBehavior === "steer" || identity.streamingBehavior === "followUp"
+      ? identity.streamingBehavior
+      : undefined;
+    this.settlePrompt({ promptEvent: { promptId: identity.promptId, ...(streamingBehavior ? { streamingBehavior } : {}) }, streamingBehavior, settled: false }, errorMessage);
+  }
+
+  private settlePrompt(tracker: PromptTracker, errorMessage: string | undefined): void {
+    if (tracker.settled) return;
+    tracker.settled = true;
+    this.promptRunning = false;
+    if (errorMessage !== undefined) {
+      invalidateSessionListCache();
+      this.emit({ type: "prompt_error", errorMessage, ...tracker.promptEvent });
+      if (!tracker.streamingBehavior) this.emit({ type: "prompt_done", ...tracker.promptEvent });
+    } else {
+      this.emit({ type: "prompt_done", ...tracker.promptEvent });
+    }
+    notifyRunningChange();
+  }
+
+  // --------------------------------------------------------------------------
+  // Extension UI: the host owns the promises; the wrapper owns browser frames.
+  // --------------------------------------------------------------------------
+
+  private handleExtensionUiRequest(frame: AgentEvent): void {
+    const method = frame.method;
+    if (method === "cancel") {
+      // Host-side timeout/abort: settle the original request's default on the
+      // host; the browser union has no cancel member, so drop the pending frame.
+      const targetId = typeof frame.targetId === "string" ? frame.targetId : undefined;
+      if (targetId) this.pendingUiRequests.delete(targetId);
+      return;
+    }
+    const id = typeof frame.id === "string" ? frame.id : undefined;
+    if (!id) return;
+    const normalized = this.normalizeUiRequest(frame);
+    this.pendingUiRequests.set(id, normalized);
+    this.emit(normalized);
+  }
+
+  private normalizeUiRequest(frame: AgentEvent): AgentEvent {
+    const out: AgentEvent = { ...frame };
+    const timeout = frame.timeout;
+    if (typeof timeout === "number" && timeout > 0 && out.expiresAt === undefined) {
+      out.expiresAt = Date.now() + timeout;
+    }
+    if (frame.method === "select" && Array.isArray(frame.options)) {
+      const details = Array.isArray(frame.optionDetails) ? frame.optionDetails : [];
+      out.options = frame.options.map((label, index) => {
+        if (typeof label === "object" && label !== null) return label;
+        const detail = details[index];
+        const description = typeof detail === "object" && detail !== null && "description" in detail
+          && typeof detail.description === "string" ? detail.description : undefined;
+        return { label: String(label), ...(description ? { description } : {}) };
+      });
+      delete out.optionDetails;
+    }
+    return out;
+  }
+
+  // --------------------------------------------------------------------------
+  // Subagent history (wrapper-side, fed by forwarded lifecycle/progress frames)
+  // --------------------------------------------------------------------------
+
+  private rememberSubagentSnapshot(snapshot: SubagentSnapshot): void {
+    this.subagentHistory.set(snapshot.id, snapshot);
+    if (this.subagentHistory.size <= MAX_SUBAGENT_HISTORY) return;
+    const removable = [...this.subagentHistory.values()]
+      .filter((entry) => entry.status !== "pending" && entry.status !== "running")
+      .sort((left, right) => left.lastUpdate - right.lastUpdate);
+    while (this.subagentHistory.size > MAX_SUBAGENT_HISTORY && removable.length > 0) {
+      const oldest = removable.shift();
+      if (oldest) this.subagentHistory.delete(oldest.id);
+    }
+  }
+
+  private rememberSubagentFrame(event: AgentEvent): void {
+    const payload = event.payload;
+    if (typeof payload !== "object" || payload === null) return;
+    if (event.type === "subagent_progress") {
+      const p = payload as Record<string, unknown>;
+      const progress = p.progress;
+      if (typeof progress !== "object" || progress === null) return;
+      const id = (progress as Record<string, unknown>).id;
+      if (typeof id !== "string") return;
+      const previous = this.subagentHistory.get(id);
+      // Ignore progress for ids never started (same rule as the SDK registry).
+      if (!previous) return;
+      this.rememberSubagentSnapshot({
+        ...previous,
+        index: typeof p.index === "number" ? p.index : previous.index,
+        agent: typeof p.agent === "string" ? p.agent : previous.agent,
+        task: typeof p.task === "string" ? p.task : previous.task,
+        assignment: typeof p.assignment === "string" ? p.assignment : previous.assignment,
+        sessionFile: typeof p.sessionFile === "string" ? p.sessionFile : previous.sessionFile,
+        parentToolCallId: typeof p.parentToolCallId === "string" ? p.parentToolCallId : previous.parentToolCallId,
+        lastUpdate: Date.now(),
+        progress: progress as SubagentSnapshot["progress"],
+      });
+      return;
+    }
+    if (event.type !== "subagent_lifecycle") return;
+    const p = payload as Record<string, unknown>;
+    const id = p.id;
+    const status = p.status;
+    if (typeof id !== "string" || typeof status !== "string") return;
+    const previous = this.subagentHistory.get(id);
+    if (!previous && status !== "started") return;
+    const snapshotStatus: SubagentSnapshot["status"] = status === "started"
+      ? "running"
+      : status === "failed" ? "failed" : status === "aborted" ? "aborted" : "completed";
+    this.rememberSubagentSnapshot({
+      id,
+      index: typeof p.index === "number" ? p.index : previous?.index ?? 0,
+      agent: typeof p.agent === "string" ? p.agent : previous?.agent ?? id,
+      agentSource: p.agentSource === "user" || p.agentSource === "project" ? p.agentSource : previous?.agentSource ?? "bundled",
+      description: typeof p.description === "string" ? p.description : previous?.description,
+      status: snapshotStatus,
+      task: previous?.task,
+      assignment: previous?.assignment,
+      sessionFile: typeof p.sessionFile === "string" ? p.sessionFile : previous?.sessionFile,
+      lastUpdate: Date.now(),
+      parentToolCallId: typeof p.parentToolCallId === "string" ? p.parentToolCallId : previous?.parentToolCallId,
+      progress: previous?.progress ? { ...previous.progress, status: snapshotStatus } : undefined,
+    });
+  }
+
+  private getSubagentSnapshots(): SubagentSnapshot[] {
+    return [...this.subagentHistory.values()].sort((left, right) => {
+      const leftActive = left.status === "pending" || left.status === "running";
+      const rightActive = right.status === "pending" || right.status === "running";
+      if (leftActive !== rightActive) return leftActive ? -1 : 1;
+      if (leftActive) return left.index - right.index || left.id.localeCompare(right.id);
+      return right.lastUpdate - left.lastUpdate || left.id.localeCompare(right.id);
+    });
+  }
+
+  /**
+   * Forward a browser command to the host over the UDS wire. The wrapper owns
+   * `web-<n>` request ids (collision-free vs RpcClient's negotiate `req_N`);
+   * responses are resolved from pendingCommands in the tap. The host owns ALL
+   * command semantics — idle timers, extension binding, plan mode, auto-title.
+   */
+  async send(command: Record<string, unknown>): Promise<unknown> {
+    if (!this._alive) throw new Error("Session closed");
+    const type = command.type as string;
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
       if (imageError) throw new Error(imageError);
     }
 
-    switch (type) {
-      case "prompt": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot send a prompt while a shell command is running");
-        }
-        // Fire and forget — events come via subscribe
-        const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-        // The browser's id for this prompt, echoed in its outcome events so a
-        // client settles or restores only its own submission (#88). A queued
-        // prompt (streamingBehavior) reports its own outcome the same way.
-        const promptId = typeof command.promptId === "string" && command.promptId ? command.promptId : undefined;
-        const promptEvent = {
-          ...(promptId ? { promptId } : {}),
-          ...(streamingBehavior ? { streamingBehavior } : {}),
-        };
-        this.promptRunning = true;
-        notifyRunningChange();
-        this.inner.prompt(command.message as string, {
-          ...(promptImages?.length ? { images: promptImages } : {}),
-          ...(streamingBehavior ? { streamingBehavior } : {}),
-          userInitiated: true,
-        }).then(() => {
-          this.promptRunning = false;
-          this.resetIdleTimer();
-          this.emit({ type: "prompt_done", ...promptEvent });
-          if (!streamingBehavior) void this.maybeAutoGenerateTitle(command.message as string);
-          notifyRunningChange();
-        }).catch((error) => {
-          this.promptRunning = false;
-          this.resetIdleTimer();
-          invalidateSessionListCache();
-          this.emit({
-            type: "prompt_error",
-            errorMessage: error instanceof Error ? error.message : String(error),
-            ...promptEvent,
-          });
-          if (!streamingBehavior) this.emit({ type: "prompt_done", ...promptEvent });
-          notifyRunningChange();
-        });
-        return null;
-      }
-
-      case "abort":
-        await this.withFinalRunningNotification(() => this.inner.abort());
-        return null;
-
-      case "get_state": {
-        // Plan mode may live only in the session journal (fresh wrapper for a
-        // TUI-planned session); surface it before reading observable state.
-        this.syncPlanModeFromSession();
-        const model = this.inner.model;
-        const contextUsage = this.inner.getContextUsage();
-        return {
-          sessionId: this.inner.sessionId,
-          sessionFile: this.inner.sessionFile ?? "",
-          isStreaming: this.inner.isStreaming,
-          isPromptRunning: this.promptRunning,
-          isBashRunning: this.inner.isBashRunning,
-          isCompacting: this.inner.isCompacting,
-          autoCompactionEnabled: this.inner.autoCompactionEnabled,
-          autoRetryEnabled: this.inner.autoRetryEnabled,
-          model: model ? { id: model.id, provider: model.provider } : undefined,
-          messageCount: 0,
-          pendingMessageCount: this.inner.queuedMessageCount,
-          queuedMessages: {
-            steering: [...this.inner.getQueuedMessages().steering],
-            followUp: [...this.inner.getQueuedMessages().followUp],
-          },
-          contextUsage: contextUsage
-            ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
-            : null,
-          systemPrompt: [this.inner.agent.state?.systemPrompt ?? ""].flat().join("\n"),
-          thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
-          extensionStatuses: this.getExtensionStatuses(),
-          extensionWidgets: this.getExtensionWidgets(),
-          subagents: this.getSubagentSnapshots(),
-          planMode: webPlanModeInfo(this.inner, getOmpSetting<boolean>(this.inner.settings, "plan.enabled")),
-        };
-      }
-      case "get_subagents":
-        return { subagents: this.getSubagentSnapshots() };
-
-      case "get_subagent_messages": {
-        const selector = command as {
-          subagentId?: string;
-          sessionFile?: string;
-          fromByte?: number;
-        };
-        const transcriptFile = this.subagents.resolveSessionFile(selector);
-        return readRpcSubagentTranscript(transcriptFile, selector.fromByte);
-      }
-
-
-      case "set_model": {
-        const { provider, modelId, role } = command as { provider: string; modelId: string; role?: string };
-        const selector = `${provider}/${modelId}`;
-        let model = this.inner.modelRegistry.find(provider, modelId);
-        if (!model) {
-          await this.inner.modelRegistry.refresh("offline");
-          model = this.inner.modelRegistry.find(provider, modelId);
-        }
-        if (!model) throw new Error(`Model not found: ${selector}`);
-        // omp records the role a model change came from, so the transcript and
-        // the `/model` carousel agree on which role is currently driving.
-        await this.inner.setModel(model, role);
-        invalidateModelsCache();
-        invalidateSessionListCache();
-        return { id: model.id, provider: model.provider, ...(role ? { role } : {}) };
-      }
-
-      case "set_role_model": {
-        const role = command.role as string;
-        const model = this.inner.resolveRoleModel(role);
-        if (!model) throw new Error(`No model configured for role "${role}"`);
-        await this.inner.setModel(model, role);
-        invalidateModelsCache();
-        invalidateSessionListCache();
-        return { id: model.id, provider: model.provider, role };
-      }
-
-      case "fork": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot fork while a shell command is running");
-        }
-        const entryId = command.entryId as string;
-        const sessionManager = this.inner.sessionManager;
-        const currentSessionFile = this.inner.sessionFile;
-
-        if (!currentSessionFile) return { cancelled: true };
-
-        const entry = sessionManager.getEntry(entryId);
-        if (!entry) throw new Error("Invalid entry ID for forking");
-
-        const sessionDir = sessionManager.getSessionDir();
-        let newSessionFile: string;
-
-        if (!entry.parentId) {
-          // Fork before the first message: create an empty session linked to this one
-          const newManager = SessionManager.create(sessionManager.getCwd(), sessionDir);
-          await newManager.newSession({ parentSession: currentSessionFile });
-          await newManager.ensureOnDisk();
-          newSessionFile = newManager.getSessionFile() as string;
-        } else {
-          // Fork after some history: copy path up to (but not including) the fork point
-          const sourceManager = await SessionManager.open(currentSessionFile, sessionDir);
-          const forkedPath = sourceManager.createBranchedSession(entry.parentId);
-          if (!forkedPath) throw new Error("Failed to create forked session");
-          newSessionFile = forkedPath;
-        }
-
-        const newSessionId = (await SessionManager.open(newSessionFile, sessionDir)).getSessionId();
-        cacheSessionPath(newSessionId, newSessionFile);
-        invalidateSessionListCache();
-        await this.shutdown();
-        return { cancelled: false, newSessionId };
-      }
-
-      case "navigate_tree": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot navigate while a shell command is running");
-        }
-        const result = await this.inner.navigateTree(command.targetId as string, {});
-        return { cancelled: result.cancelled };
-      }
-
-      case "set_thinking_level": {
-        const level = command.level as string;
-        this.inner.setThinkingLevel(level);
-        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
-        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
-        // force the state back so the compat layer can use it correctly.
-        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-          this.inner.agent.state.thinkingLevel = "xhigh";
-        }
-        invalidateSessionListCache();
-        return null;
-      }
-
-      case "set_plan_mode": {
-        // Rehydrate first: on a restarted wrapper the live SDK state is empty
-        // even when the journal still says plan mode, and the toggle must
-        // land on the persisted mode rather than a stale default.
-        this.syncPlanModeFromSession();
-        const planMode = applyWebPlanModeTransition(
-          this.inner,
-          command.enabled === true,
-          (title) => this.handlePlanProposal(title),
-          getOmpSetting<boolean>(this.inner.settings, "plan.enabled"),
-        );
-        this.emit({
-          type: "mode_change",
-          mode: planMode.enabled ? "plan" : "none",
-          ...(planMode.planFilePath ? { planFilePath: planMode.planFilePath } : {}),
-        });
-        return { planMode };
-      }
-
-
-      case "compact": {
-        try {
-          return await this.withFinalRunningNotification(() =>
-            this.inner.compact(command.customInstructions as string | undefined)
-          );
-        } finally {
-          invalidateSessionListCache();
-        }
-      }
-
-      case "set_session_name": {
-        const name = (command.name as string | undefined)?.trim();
-        if (!name) throw new Error("Session name cannot be empty");
-        await this.inner.sessionManager.setSessionName(name, "user");
-        invalidateSessionListCache();
-        return null;
-      }
-
-      case "get_session_stats": {
-        return {
-          ...this.inner.getSessionStats(),
-          sessionName: this.inner.sessionManager.getSessionName(),
-        };
-      }
-
-      case "get_last_assistant_text": {
-        return { text: this.inner.getLastAssistantText() ?? "" };
-      }
-
-      case "set_auto_compaction": {
-        this.inner.setAutoCompactionEnabled(command.enabled as boolean);
-        return null;
-      }
-
-      case "clear_queue": {
-        // Full clear only: omp has no single-item dequeue, and clear+requeue
-        // races against the agent loop pulling messages mid-flight.
-        const cleared = this.inner.clearQueue();
-        const toText = (message: unknown): string =>
-          typeof message === "string" ? message : String((message as { text?: string })?.text ?? "");
-        return {
-          steering: cleared.steering.map(toText),
-          followUp: cleared.followUp.map(toText),
-        };
-      }
-
-      case "steer": {
-        const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
-        return null;
-      }
-
-      case "follow_up": {
-        const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
-        return null;
-      }
-
-      case "get_tools": {
-        const active = new Set<string>(this.inner.getActiveToolNames());
-        return listTools(this.inner).map((t) => ({
-          name: t.name,
-          description: t.description,
-          active: active.has(t.name),
-        }));
-      }
-
-      case "get_commands": {
-        return { commands: await getAvailableSlashCommands(this.inner) };
-      }
-      case "execute_slash_command": {
-        const output: string[] = [];
-        const result: AcpBuiltinSlashCommandResult = await executeAcpBuiltinSlashCommand(command.message as string, {
-          session: this.inner as never,
-          sessionManager: this.inner.sessionManager,
-          settings: this.inner.settings,
-          cwd: this.cwd,
-          output: (text) => {
-            output.push(text);
-          },
-          refreshCommands: () => {},
-          reloadPlugins: async () => {
-            await this.waitForExtensionsBound();
-            this.extensionStatuses.clear();
-            this.extensionWidgets.clear();
-            await this.inner.reload();
-            await this.inner.refreshSkills?.();
-            this.applyForcedEmptySystemPrompt();
-            invalidateModelsCache();
-          },
-        });
-        if (result === false) return { handled: false, output };
-        return {
-          handled: true,
-          output,
-          ...("prompt" in result ? { prompt: result.prompt } : {}),
-        };
-      }
-
-
-      case "set_tools": {
-        const toolNames = command.toolNames as string[];
-        this.setForceEmptySystemPrompt(toolNames.length === 0);
-        await this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
-        this.applyForcedEmptySystemPrompt();
-        return null;
-      }
-
-      case "reload": {
-        await this.waitForExtensionsBound();
-        this.extensionStatuses.clear();
-        this.extensionWidgets.clear();
-        await this.inner.reload();
-        await this.inner.refreshSkills?.();
-        this.applyForcedEmptySystemPrompt();
-        invalidateModelsCache();
-        return { success: true };
-      }
-
-      case "abort_compaction": {
-        this.inner.abortCompaction();
-        return null;
-      }
-
-      case "extension_ui_response": {
-        this.resolveExtensionUiResponse(command as ExtensionUiResponse);
-        return null;
-      }
-
-      case "extension_ui_input": {
-        this.handleExtensionUiInput(command.id as string, command.data as string);
-        return null;
-      }
-
-      case "set_auto_retry": {
-        this.inner.setAutoRetryEnabled(command.enabled as boolean);
-        return null;
-      }
-
-      case "bash": {
-        if (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
-          throw new Error("Cannot run a shell command while the session is busy");
-        }
-        const execution = this.inner.executeBash(
-          command.command as string,
-          undefined,
-          { excludeFromContext: command.excludeFromContext as boolean | undefined },
-        );
-        notifyRunningChange();
-        try {
-          const result = await execution;
-          this.persistBashOnlySession();
-          return result;
-        } finally {
-          this.resetIdleTimer();
-          invalidateSessionListCache();
-          notifyRunningChange();
-        }
-      }
-
-      case "abort_bash": {
-        this.inner.abortBash();
-        return null;
-      }
-
-      default:
-        throw new Error(`Unsupported command: ${type}`);
+    // Extension-UI side channel: no web-id, host resolves its own pending UI.
+    if (type === "extension_ui_response") {
+      const id = command.id as string;
+      const frame: Record<string, unknown> = { type, id };
+      if ("value" in command) frame.value = command.value;
+      if ("confirmed" in command) frame.confirmed = command.confirmed;
+      if ("cancelled" in command) frame.cancelled = command.cancelled;
+      this.writeFrame(frame);
+      this.pendingUiRequests.delete(id);
+      return null;
     }
+    if (type === "extension_ui_input") {
+      this.writeFrame({ type, id: command.id as string, data: command.data });
+      return null;
+    }
+
+    const id = `web-${++this.requestId}`;
+
+    if (type === "prompt") {
+      // Fire and forget at admission — outcomes arrive as prompt_result (#88).
+      const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+      const promptId = typeof command.promptId === "string" && command.promptId ? command.promptId : undefined;
+      const promptEvent = {
+        ...(promptId ? { promptId } : {}),
+        ...(streamingBehavior ? { streamingBehavior } : {}),
+      };
+      this.promptTrackers.set(id, { promptEvent, streamingBehavior, settled: false });
+      this.promptRunning = true;
+      notifyRunningChange();
+      const images = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+      const frame: Record<string, unknown> = { id, type: "prompt", message: command.message };
+      if (images?.length) frame.images = images;
+      if (streamingBehavior) frame.streamingBehavior = streamingBehavior;
+      // Draft identity rides the wire so a reattached wrapper can settle the
+      // prompt after a web restart (the SDK ignores unknown command fields).
+      if (promptId) frame.promptId = promptId;
+      this.writeFrame(frame);
+      // Fire-and-forget ack: failures are surfaced through settlePromptById
+      // (prompt_error); swallowing here keeps the rejection from escaping.
+      this.registerPending(id, type).catch(() => {});
+      return null;
+    }
+
+    if (type === "steer" || type === "follow_up") {
+      const images = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+      const frame: Record<string, unknown> = { id, type, message: command.message };
+      if (images?.length) frame.images = images;
+      this.writeFrame(frame);
+      await this.registerPending(id, type);
+      return null;
+    }
+
+    if (type === "bash") {
+      // No bash lifecycle events on the wire: flip the mirror at admission and
+      // clear it when the response lands (host enforces the busy guard).
+      this.bashRunning = true;
+      notifyRunningChange();
+    }
+
+    this.writeFrame({ id, ...command });
+    return this.registerPending(id, type);
   }
 
+  private writeFrame(frame: Record<string, unknown>): void {
+    this.connection.process.stdin.write(`${JSON.stringify(frame)}\n`);
+  }
+
+  private registerPending(id: string, command: string): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      this.pendingCommands.set(id, { command, resolve, reject });
+    });
+  }
+
+  /** Detach-only: the host survives web disconnects (contract §3). */
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    if (this.inner.isBashRunning) this.inner.abortBash();
-    this.unsubscribe?.();
-    this.subagents.dispose();
-    this.subagentHistory.clear();
-    for (const pending of this.pendingUiResponses.values()) pending.cancel();
-    for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
-    this.pendingUiResponses.clear();
+    for (const pending of this.pendingCommands.values()) {
+      pending.reject(new Error("Session closed"));
+    }
+    this.pendingCommands.clear();
+    this.promptTrackers.clear();
+    this.promptIdentities.clear();
     this.pendingUiRequests.clear();
+    this.subagentHistory.clear();
     try {
-      void this.inner.dispose?.();
+      this.connection.detach();
     } finally {
       try {
         this.onDestroyCallback?.();
@@ -1072,352 +698,42 @@ export class AgentSessionWrapper {
     }
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Explicit user-driven shutdown (DELETE-session / trust reset / fork tail):
+   * unlock termination, ask the host to tear down, then detach. Memoized.
+   */
+  shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    if (!this._alive) return;
-
+    if (!this._alive) return Promise.resolve();
     this.shutdownPromise = (async () => {
+      this.terminate.allowed = true;
       try {
-        try {
-          await this.waitForExtensionsBound();
-        } catch (error) {
-          console.error(
-            "[pi-web] extension binding failed before session shutdown:",
-            error instanceof Error ? error.message : error,
-          );
+        // Ask the host to tear down and wait for it to close the socket: an
+        // immediate detach would drop the queued shutdown frame and leave the
+        // host (and its write lease) alive.
+        this.writeFrame({ type: "shutdown" });
+        const exited = this.connection.process.exited.then(() => true, () => true);
+        const closed = await Promise.race([exited, Bun.sleep(HOST_SHUTDOWN_GRACE_MS).then(() => false)]);
+        if (!closed) {
+          // The host never answered (wedged or pre-protocol): stop its
+          // transient unit — termination was explicitly requested.
+          await stopHostUnit(this.hostKeyValue);
         }
-        await this.inner.extensionRunner?.emit?.({ type: "session_shutdown", reason: "quit" });
       } finally {
         this.destroy();
       }
     })();
     return this.shutdownPromise;
   }
-
-  private resolveExtensionUiResponse(response: ExtensionUiResponse): void {
-    const pending = this.pendingUiResponses.get(response.id);
-    if (!pending) return;
-    pending.resolve(response);
-  }
-
-  private getExtensionStatuses(): Array<{ key: string; text: string }> {
-    return Array.from(this.extensionStatuses, ([key, text]) => ({ key, text }));
-  }
-
-  private getExtensionWidgets(): ExtensionWidgetItem[] {
-    return Array.from(this.extensionWidgets.values());
-  }
-
-  private getCustomUiWidth(options: unknown): number {
-    if (!options || typeof options !== "object") return DEFAULT_CUSTOM_UI_COLUMNS;
-    const overlayOptions = (options as { overlayOptions?: unknown }).overlayOptions;
-    const resolved = typeof overlayOptions === "function" ? overlayOptions() : overlayOptions;
-    if (!resolved || typeof resolved !== "object") return DEFAULT_CUSTOM_UI_COLUMNS;
-    const width = (resolved as { width?: unknown }).width;
-    return typeof width === "number" && Number.isFinite(width)
-      ? Math.max(40, Math.min(140, Math.round(width)))
-      : 92;
-  }
-
-  private emitCustomUiRender(id: string, custom: ActiveCustomUi): void {
-    let lines: string[];
-    try {
-      lines = custom.component.render(custom.width);
-    } catch (error) {
-      lines = [`Extension custom UI render failed: ${error instanceof Error ? error.message : String(error)}`];
-    }
-    const event = {
-      type: "extension_ui_request",
-      id,
-      method: "custom",
-      lines,
-    } as ExtensionUiRequest as AgentEvent;
-    this.pendingUiRequests.set(id, event);
-    this.emit(event);
-  }
-
-  private closeCustomUi(id: string, value: unknown): void {
-    const custom = this.activeCustomUis.get(id);
-    if (!custom || custom.settled) return;
-    custom.settled = true;
-    this.activeCustomUis.delete(id);
-    this.pendingUiRequests.delete(id);
-    try {
-      custom.component.dispose?.();
-    } catch {
-      // Ignore dispose errors from extension UI components.
-    }
-    this.emit({
-      type: "extension_ui_request",
-      id,
-      method: "custom",
-      lines: [],
-      closed: true,
-    } as ExtensionUiRequest as AgentEvent);
-    custom.resolve(value);
-  }
-
-  private handleExtensionUiInput(id: string, data: string): void {
-    const custom = this.activeCustomUis.get(id);
-    if (!custom || typeof data !== "string") return;
-    try {
-      custom.component.handleInput?.(data);
-      if (this.activeCustomUis.has(id)) this.emitCustomUiRender(id, custom);
-    } catch (error) {
-      this.closeCustomUi(id, undefined);
-      this.emit({
-        type: "extension_error",
-        extensionPath: `custom-ui:${id}`,
-        event: "custom_ui_input",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  private requestExtensionCustomUi<T>(
-    factory: unknown,
-    options?: unknown,
-  ): Promise<T> {
-    if (typeof factory !== "function") return Promise.resolve(undefined as T);
-
-    const id = randomUUID();
-    const width = this.getCustomUiWidth(options);
-
-    return new Promise<T>((resolve) => {
-      let completed = false;
-      const tui = createHeadlessCustomUiTui(
-        () => {
-          const custom = this.activeCustomUis.get(id);
-          if (custom) this.emitCustomUiRender(id, custom);
-        },
-        width,
-      );
-      const finish = (value: T) => {
-        if (completed) return;
-        completed = true;
-        resolve(value);
-      };
-      const done = (value: T) => {
-        if (this.activeCustomUis.has(id)) {
-          this.closeCustomUi(id, value);
-        } else {
-          finish(value);
-        }
-      };
-
-      Promise.resolve()
-        .then(() => factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
-        .then((component) => {
-          if (completed) {
-            try {
-              (component as CustomUiComponent | undefined)?.dispose?.();
-            } catch {
-              // Ignore dispose errors from a component completed before mounting.
-            }
-            return;
-          }
-          if (!component || typeof component !== "object" || typeof (component as CustomUiComponent).render !== "function") {
-            finish(undefined as T);
-            return;
-          }
-          const custom: ActiveCustomUi = {
-            component: component as CustomUiComponent,
-            width,
-            resolve: (value) => finish(value as T),
-            settled: false,
-          };
-          this.activeCustomUis.set(id, custom);
-          this.emitCustomUiRender(id, custom);
-        })
-        .catch((error) => {
-          if (completed) return;
-          this.emit({
-            type: "extension_error",
-            extensionPath: `custom-ui:${id}`,
-            event: "custom_ui",
-            error: error instanceof Error ? error.message : String(error),
-          });
-          finish(undefined as T);
-        });
-    });
-  }
-
-  private requestExtensionUi<T>(
-    request: ExtensionUiRequestBody,
-    defaultValue: T,
-    parseResponse: (response: ExtensionUiResponse) => T,
-    timeout?: number,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    if (signal?.aborted) return Promise.resolve(defaultValue);
-
-    const id = randomUUID();
-    const fullRequest = {
-      type: "extension_ui_request",
-      id,
-      ...request,
-      ...(timeout ? { timeout, expiresAt: Date.now() + timeout } : {}),
-    };
-
-    return new Promise((resolve) => {
-      let timeoutId: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => {
-        if (timeoutId) clearTimeout(timeoutId);
-        signal?.removeEventListener("abort", onAbort);
-        this.pendingUiRequests.delete(id);
-        this.pendingUiResponses.delete(id);
-      };
-      const settle = (value: T) => {
-        cleanup();
-        resolve(value);
-      };
-      const onAbort = () => settle(defaultValue);
-
-      if (timeout) timeoutId = setTimeout(() => settle(defaultValue), timeout);
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      this.pendingUiRequests.set(id, fullRequest as AgentEvent);
-      this.pendingUiResponses.set(id, {
-        resolve: (response) => settle(parseResponse(response)),
-        cancel: () => settle(defaultValue),
-      });
-      this.emit(fullRequest as AgentEvent);
-    });
-  }
-
-  private createExtensionUiContext(): ExtensionUiContextLike {
-    return {
-      timeoutStartsOnPresentation: false,
-      askDialog: (questions, opts) => this.requestExtensionUi(
-        { method: "ask", questions, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
-        undefined,
-        (response) => {
-          if (!("value" in response)) return undefined;
-          try {
-            return JSON.parse(response.value) as ExtensionAskDialogResult;
-          } catch {
-            return undefined;
-          }
-        },
-        opts?.timeout,
-        opts?.signal,
-      ),
-      select: (title, options, opts) => this.requestExtensionUi(
-        { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
-        undefined,
-        (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
-      ),
-      confirm: (title, message, opts) => this.requestExtensionUi(
-        { method: "confirm", title, message, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
-        false,
-        (response) => "confirmed" in response ? response.confirmed : false,
-        opts?.timeout,
-        opts?.signal,
-      ),
-      input: (title, placeholder, opts) => this.requestExtensionUi(
-        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
-        undefined,
-        (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
-      ),
-      editor: (title, prefill, opts) => this.requestExtensionUi(
-        { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
-        undefined,
-        (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
-      ),
-      notify: (message, type) => {
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "notify",
-          message,
-          notifyType: type,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      onTerminalInput: () => () => {},
-      setStatus: (key, text) => {
-        if (text === undefined) this.extensionStatuses.delete(key);
-        else this.extensionStatuses.set(key, text);
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "setStatus",
-          statusKey: key,
-          statusText: text,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      setWorkingMessage: () => {},
-      setWorkingVisible: () => {},
-      setWorkingIndicator: () => {},
-      setHiddenThinkingLabel: () => {},
-      setWidget: (key, content, options) => {
-        if (content !== undefined && !Array.isArray(content)) return;
-        if (content === undefined) {
-          this.extensionWidgets.delete(key);
-        } else {
-          this.extensionWidgets.set(key, {
-            key,
-            lines: content,
-            placement: options?.placement ?? "aboveEditor",
-          });
-        }
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "setWidget",
-          widgetKey: key,
-          widgetLines: content,
-          widgetPlacement: options?.placement,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      setFooter: () => {},
-      setHeader: () => {},
-      setTitle: (title) => {
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "setTitle",
-          title,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      custom: <T = unknown>(factory: unknown, options?: unknown) => this.requestExtensionCustomUi<T>(factory, options),
-      pasteToEditor: (text) => {
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "set_editor_text",
-          text,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      setEditorText: (text) => {
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "set_editor_text",
-          text,
-        } as ExtensionUiRequest as AgentEvent);
-      },
-      getEditorText: () => "",
-      addAutocompleteProvider: () => {},
-      setEditorComponent: () => {},
-      getEditorComponent: () => undefined,
-      get theme() { return PLAIN_TEXT_THEME; },
-      getAllThemes: () => [],
-      getTheme: () => undefined,
-      setTheme: () => ({ success: false, error: "Theme switching is not supported in omp-web extension UI yet" }),
-      getToolsExpanded: () => false,
-      setToolsExpanded: () => {},
-    };
-  }
 }
 
 // ============================================================================
-// Session registry
+// Registry, locks, and per-cwd starting counters (contract §5).
+//
+// All state lives on globalThis so it survives Next.js hot reload. Registry
+// exit handlers are DETACH-ONLY (contract §3): hosts live outside this
+// process's cgroup and MUST survive web restarts/upgrades — killing them here
+// would defeat the entire process split.
 // ============================================================================
 
 declare global {
@@ -1425,43 +741,6 @@ declare global {
   var __ompStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __ompStartingSessionCwds: Map<string, number> | undefined;
   var __ompRunningListeners: Set<(ids: string[]) => void> | undefined;
-}
-
-/**
- * omp-web owns the process-wide `AsyncJobManager`, and no AgentSession does.
- *
- * omp's own wiring gives the manager to the *first* top-level session in a
- * process and hands every later one `undefined`, because delivery sinks are
- * keyed by agent id and every session that does not name itself is
- * `MAIN_AGENT_ID` (issue #1923 upstream). A Next.js server runs one top-level
- * session per browser conversation, so under that rule conversation #2 onwards
- * silently lost async execution: `TaskTool` falls back to `#executeSyncFanout`
- * and blocks the turn until every subagent finishes, and async `bash` plus
- * `hub jobs`/`wait`/`cancel` stop working. We give each conversation a distinct
- * `agentId` (see `startRpcSession`) so routing is unambiguous, and a patch to
- * the SDK lets a session with its own `agentId` share this singleton.
- *
- * Installing it here rather than letting a session construct it is what makes
- * sharing safe: `ownedAsyncJobManager` stays undefined for every session, so no
- * session's teardown disposes it. Otherwise the first conversation's 10-minute
- * idle timeout would cancel every other conversation's running jobs.
- */
-function ensureAsyncJobManager(maxRunningJobs: number): void {
-  if (AsyncJobManager.instance()) return;
-  const manager = new AsyncJobManager({ maxRunningJobs });
-  AsyncJobManager.setInstance(manager);
-  const cleanup = () => {
-    if (AsyncJobManager.instance() === manager) AsyncJobManager.setInstance(undefined);
-    void manager.dispose({ timeoutMs: 3_000 });
-  };
-  process.once("exit", cleanup);
-  process.once("SIGINT", cleanup);
-  process.once("SIGTERM", cleanup);
-}
-
-/** Stable, collision-free agent id for one browser conversation. */
-function webAgentId(sessionId: string): string {
-  return `web-${sessionId}`;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
@@ -1509,112 +788,86 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
-function runtimeMessageText(entry: SessionMessageEntry): string {
-  if (entry.message.role === "bashExecution" || entry.message.role === "fileMention") return "";
-  const content = entry.message.content;
-  if (typeof content === "string") return content;
-  return content
-    .map((block) => block.type === "text" ? block.text : "")
-    .filter(Boolean)
-    .join(" ");
-}
-
-function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefined {
-  if (entry.message.role !== "user" && entry.message.role !== "assistant") return undefined;
-  if (typeof entry.message.timestamp === "number") return entry.message.timestamp;
-  const timestamp = new Date(entry.timestamp).getTime();
-  return Number.isNaN(timestamp) ? undefined : timestamp;
-}
-
-function statOrUndefined(filePath: string): number | undefined {
+/**
+ * Read-only reattach for routes that only inspect a session (defect 2).
+ * Returns the registry wrapper when alive; otherwise rediscovers surviving
+ * hosts via sidecars/socket probes and attaches WITHOUT the foreign-lease
+ * refusal (a live answering socket proves our own host). NEVER spawns — a
+ * session with no live host stays file-only.
+ */
+export async function attachLiveHostIfExists(sessionId: string): Promise<AgentSessionWrapper | undefined> {
+  const existing = getRegistry().get(sessionId);
+  if (existing?.isAlive()) return existing;
+  const inflight = getLocks().get(sessionId);
+  if (inflight) {
+    try { return (await inflight).session; } catch { return undefined; }
+  }
+  await refreshHostDiscovery();
+  if (!hasDiscoveredLiveHost(sessionId) && !(await findHostSocketKeyForSession(sessionId))) return undefined;
+  // Resolve the journal path so startRpcSession's cwd guard passes and the
+  // journal-header candidate resolves; the hello frame fills file/cwd anyway.
+  const sessionFile = (await resolveSessionPath(sessionId)) ?? "";
   try {
-    return statSync(filePath).size;
+    const { session } = await startRpcSession(sessionId, sessionFile, undefined, { attachOnly: true });
+    return session.isAlive() ? session : undefined;
   } catch {
     return undefined;
   }
 }
 
 /**
- * Coarse {@link SessionStatus} for a live in-memory session, mirroring the
- * SDK's file-tail classification (session-listing.ts) without any extra
- * disk I/O — the messages are already in memory. A running session is
- * always "pending" (it has accepted work with no reply persisted yet, by
- * definition of being mid-turn); otherwise the status is derived from the
- * last message's role/stopReason exactly as the SDK derives it from a
- * session file's tail window.
- */
-function runtimeSessionStatus(messages: SessionMessageEntry[], isRunning: boolean): SessionStatus {
-  if (isRunning) return "pending";
-  const last = messages[messages.length - 1]?.message;
-  if (!last) return "unknown";
-  switch (last.role) {
-    case "assistant":
-      if (last.stopReason === "error") return "error";
-      if (last.stopReason === "aborted") return "aborted";
-      if (last.stopReason === "length") return "interrupted";
-      // A turn that ends without unanswered tool calls means the agent
-      // yielded control back to the user; trailing tool calls with no
-      // result after them mean the loop was cut off before running them.
-      return last.content.some((block) => block.type === "toolCall") ? "interrupted" : "complete";
-    case "toolResult":
-      // Tools ran but the agent never produced the following assistant turn.
-      return "interrupted";
-    case "user":
-      // User message with no assistant reply persisted after it.
-      return "pending";
-    default:
-      return "unknown";
-  }
-}
-
-/**
- * Return live sessions that should be visible in the session list. Pi delays
- * the first JSONL flush until an assistant message exists, so an accepted new
- * prompt must temporarily be described from its in-memory SessionManager.
+ * Live sessions visible in the session list, computed SYNC from the
+ * host-pushed session_info mirrors (contract §4). The web tier NEVER reads a
+ * live session's journal: the host emits a mirror on prompt admission,
+ * agent_end, prompt_result, session_renamed, session_settled, and attach, and
+ * already suppresses idle empty ensure_session runtimes.
  */
 export function getRpcSessionInfos(): SessionInfo[] {
   const sessions: SessionInfo[] = [];
   for (const session of getRegistry().values()) {
     if (!session.isAlive()) continue;
-
-    const manager = session.inner.sessionManager;
-    const header = manager.getHeader();
-    const entries = manager.getEntries() as unknown as Array<
-      { type: string; timestamp: string } | SessionMessageEntry
-    >;
-    const messages = entries.filter((entry): entry is SessionMessageEntry => entry.type === "message");
-    const firstUserMessage = messages.find((entry) => entry.message.role === "user");
-    const sessionFile = manager.getSessionFile() ?? session.sessionFile;
-    const persisted = Boolean(sessionFile && existsSync(sessionFile));
-
-    // An ensure_session call creates an idle, empty runtime while the composer
-    // loads commands. Do not leak it into history before a prompt is accepted.
-    if (!persisted && (!session.isRunning() || !firstUserMessage)) continue;
-
-    const created = header?.timestamp
-      ?? entries[0]?.timestamp
-      ?? new Date().toISOString();
-    const headerTimestamp = new Date(created).getTime();
-    let lastActivityMs = Number.isNaN(headerTimestamp) ? Date.now() : headerTimestamp;
-    for (const message of messages) {
-      const activityMs = runtimeMessageActivityMs(message);
-      if (activityMs !== undefined) lastActivityMs = Math.max(lastActivityMs, activityMs);
-    }
-
+    const mirror = session.sessionInfo;
+    if (!mirror) continue;
+    const running = session.isRunning();
+    const sessionFile = mirror.sessionFile || session.sessionFile;
     sessions.push({
-      path: sessionFile ?? "",
-      id: header?.id ?? session.sessionId,
-      cwd: header?.cwd ?? session.cwd,
-      name: manager.getSessionName(),
-      created,
-      modified: new Date(lastActivityMs).toISOString(),
-      messageCount: messages.length,
-      firstMessage: firstUserMessage ? runtimeMessageText(firstUserMessage) || "(no messages)" : "(no messages)",
-      transient: !persisted,
-      status: runtimeSessionStatus(messages, session.isRunning()),
-      // `existsSync` above already paid for one stat-class syscall on this
-      // file; one more `statSync` for its size is the same order of cost.
-      size: persisted && sessionFile ? statOrUndefined(sessionFile) : undefined,
+      path: sessionFile,
+      id: mirror.sessionId || session.sessionId,
+      cwd: mirror.cwd || session.cwd,
+      ...(mirror.name ? { name: mirror.name } : {}),
+      created: mirror.created,
+      modified: mirror.modified,
+      messageCount: mirror.messageCount,
+      firstMessage: mirror.firstMessage,
+      transient: !mirror.persisted,
+      status: running ? "pending" : mirror.status,
+      size: mirror.persisted && sessionFile
+        ? (() => { try { return statSync(sessionFile).size; } catch { return undefined; } })()
+        : undefined,
+    });
+  }
+  // Merge surviving hosts the restarted web has not attached yet (defect 2).
+  // Registry wins per id; discovery entries map the sidecar mirror exactly
+  // like the registry branch. Sync — routes await refreshHostDiscovery first.
+  const seen = new Set(sessions.map((info) => info.id));
+  for (const [realId, entry] of getDiscoveredHosts()) {
+    if (seen.has(realId) || !hasDiscoveredLiveHost(realId)) continue;
+    const mirror = entry.info;
+    const sessionFile = mirror.sessionFile;
+    sessions.push({
+      path: sessionFile,
+      id: realId,
+      cwd: mirror.cwd,
+      ...(mirror.name ? { name: mirror.name } : {}),
+      created: mirror.created,
+      modified: mirror.modified,
+      messageCount: mirror.messageCount,
+      firstMessage: mirror.firstMessage,
+      transient: !mirror.persisted,
+      status: mirror.isRunning ? "pending" : mirror.status,
+      size: mirror.persisted && sessionFile
+        ? (() => { try { return statSync(sessionFile).size; } catch { return undefined; } })()
+        : undefined,
     });
   }
   return sessions;
@@ -1623,9 +876,14 @@ export function getRpcSessionInfos(): SessionInfo[] {
 export function hasBusyRpcSessionForCwd(cwd: string): boolean {
   const targetCwd = normalizeRpcCwd(cwd);
   if (getStartingSessionCwds().has(targetCwd)) return true;
-  return Array.from(getRegistry().values()).some(
+  if (Array.from(getRegistry().values()).some(
     (session) => normalizeRpcCwd(session.cwd) === targetCwd && session.isRunning(),
-  );
+  )) return true;
+  // Discovered surviving hosts count as busy too (defect 2).
+  for (const [realId, entry] of getDiscoveredHosts()) {
+    if (hasDiscoveredLiveHost(realId) && entry.info.isRunning && normalizeRpcCwd(entry.info.cwd) === targetCwd) return true;
+  }
+  return false;
 }
 
 export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
@@ -1634,13 +892,29 @@ export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
     (session) => normalizeRpcCwd(session.cwd) === targetCwd,
   );
   await Promise.all(sessions.map((session) => session.shutdown()));
-  return sessions.length;
+  // Discovered surviving hosts for this cwd must die too (defect 2): attach
+  // each through the normal path, then shut it down.
+  await refreshHostDiscovery();
+  const attachedIds = new Set(sessions.map((session) => session.sessionId));
+  let destroyed = sessions.length;
+  for (const [realId, entry] of getDiscoveredHosts()) {
+    if (attachedIds.has(realId) || !hasDiscoveredLiveHost(realId)) continue;
+    if (normalizeRpcCwd(entry.info.cwd) !== targetCwd) continue;
+    const session = await attachLiveHostIfExists(realId);
+    if (!session) continue;
+    await session.shutdown();
+    destroyed += 1;
+  }
+  return destroyed;
 }
 
 export function getRunningRpcSessionIds(): string[] {
   const ids = new Set<string>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
+  }
+  for (const [realId, entry] of getDiscoveredHosts()) {
+    if (entry.info.isRunning && hasDiscoveredLiveHost(realId)) ids.add(realId);
   }
   return [...ids];
 }
@@ -1654,14 +928,10 @@ export function getRunningRpcSessionIds(): string[] {
 // survive Next.js hot-reload.
 // ----------------------------------------------------------------------------
 
-function getRunningListeners(): Set<(ids: string[]) => void> {
-  if (!globalThis.__ompRunningListeners) globalThis.__ompRunningListeners = new Set();
-  return globalThis.__ompRunningListeners;
-}
 
-/** Subscribe to running-session-id changes. Returns an unsubscribe function. */
 export function subscribeRunningSessions(listener: (ids: string[]) => void): () => void {
-  const listeners = getRunningListeners();
+  if (!globalThis.__ompRunningListeners) globalThis.__ompRunningListeners = new Set();
+  const listeners = globalThis.__ompRunningListeners;
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
@@ -1673,8 +943,8 @@ let lastRunningSnapshot = "";
  * notification, broadcast it to subscribers.
  */
 export function notifyRunningChange(): void {
-  const listeners = getRunningListeners();
-  if (listeners.size === 0) {
+  const listeners = globalThis.__ompRunningListeners;
+  if (!listeners || listeners.size === 0) {
     // A future subscriber receives its own initial snapshot. Clear this one so
     // its first state transition cannot match stale state from an old listener.
     lastRunningSnapshot = "";
@@ -1689,12 +959,96 @@ export function notifyRunningChange(): void {
   }
 }
 
+// ============================================================================
+// Host lifecycle: lease probe → connect-or-spawn → attach.
+// ============================================================================
+
+// Repo root: this module lives at <root>/lib/rpc-manager.ts in every layout
+// (source checkout, deb sync_app overlay, worktree). import.meta.dir is
+// Bun-only — webpack compiles it to `undefined` in built server chunks — so
+// the prod-build branch uses the launch cwd, which bin/omp-web.js and the
+// systemd units pin to the repo root. Do NOT fall back inside resolve():
+// cwd is ALREADY the root, while import.meta.dir is <root>/lib.
+const HOST_REPO_ROOT = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd();
+
 /**
- * Get or create an AgentSession for the given session.
- * For new sessions (sessionFile === ""), omp generates its own id.
- * New sessions resolve enabledModels before construction so the initial model,
- * thinking pin, and SDK scopedModels share one settings snapshot.
- * Pass options.toolNames to pre-configure active tools (empty = all disabled).
+ * argv for a fresh host, pinned with the host slice: flag encoding matching
+ * ops/session-host/main.ts parseArgs (NOT a single JSON argument).
+ */
+function hostSpawnArgs(start: HostStartOptions): string[] {
+  const args = [
+    join(HOST_REPO_ROOT, "ops", "session-host", "main.ts"),
+    "--session-id", start.sessionId,
+    "--session-file", start.sessionFile,
+  ];
+  if (start.cwd) args.push("--cwd", start.cwd);
+  // Omitted when unset (host keeps all tools active); [] means "all off".
+  if (start.toolNames !== undefined) args.push("--tools", JSON.stringify(start.toolNames));
+  if (start.initialModel) args.push("--model", `${start.initialModel.provider}/${start.initialModel.modelId}`);
+  if (start.thinkingLevel) args.push("--thinking-level", start.thinkingLevel);
+  return args;
+}
+
+/**
+ * Launch one host OUTSIDE this service's cgroup (contract §1): a transient
+ * user unit survives omp-web restarts. systemd-run returns before the host
+ * binds its socket; connectToHostWithRetry covers that race.
+ */
+async function spawnSessionHost(start: HostStartOptions): Promise<void> {
+  const argv = [
+    "systemd-run", "--user", "--collect", `--unit=${hostUnitName(start.sessionId)}`,
+  ];
+  // systemd-run does NOT inherit the caller's environment: the transient unit
+  // runs under the user manager's env block. Forward the isolation seams the
+  // host must agree with this process on — the socket run dir (web computes
+  // hostSocketPath from ITS env; a host binding the default dir would never be
+  // found) and the idle-reap override. Unset vars stay unset (host defaults).
+  for (const key of ["OMP_WEB_HOST_RUN_DIR", "OMP_WEB_HOST_IDLE_MS"]) {
+    const value = process.env[key];
+    if (value !== undefined) argv.push(`--setenv=${key}=${value}`);
+  }
+  argv.push(process.execPath, ...hostSpawnArgs(start));
+  const proc = Bun.spawn(argv, { cwd: HOST_REPO_ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  if (exitCode !== 0) {
+    throw new Error(`Failed to start session host ${start.sessionId}: ${stderr.trim() || `systemd-run exited with code ${exitCode}`}`);
+  }
+}
+
+/** Explicit termination fallback: stop the host's transient unit. */
+async function stopHostUnit(sessionId: string): Promise<void> {
+  try {
+    const proc = Bun.spawn(["systemctl", "--user", "stop", `${hostUnitName(sessionId)}.service`], {
+      stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    await proc.exited;
+  } catch {
+    // Best effort: the unit may already be gone (--collect).
+  }
+}
+
+/**
+ * Foreign-lease probe (contract §5): web NEVER holds write leases. A live
+ * foreign holder (TUI/CLI, or another web instance after a hot reload) means
+ * the journal stays readable but cannot be modified here — refuse clearly
+ * instead of letting the SDK silently fork to a sibling journal.
+ */
+export function refuseForeignSessionLease(sessionFile: string): void {
+  const header = readSessionHeader(sessionFile);
+  if (!header?.id) return;
+  const lease = tryAcquireSessionLease(header.id);
+  if (!lease) throw new Error(FOREIGN_LEASE_ERROR);
+  lease.release();
+}
+
+/**
+ * Get or attach the session host for a conversation.
+ *
+ * A live host answers its socket immediately (host_hello + cached ready +
+ * session_info on attach) and keeps the identity it was created with — start
+ * options only apply to a FRESH host, which replicates the old creation
+ * preamble (rotation, model scope, trust gating, tool allow-list) itself.
+ * After an idle reap or crash the next message transparently re-spawns it.
  */
 export async function startRpcSession(
   sessionId: string,
@@ -1702,7 +1056,6 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { toolNames, initialModel, thinkingLevel } = options;
   const registry = getRegistry();
   const locks = getLocks();
 
@@ -1713,152 +1066,134 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
-    // Some extensions access the SDK's global theme even outside the terminal UI.
-    await initTheme(false);
-    const agentDir = getAgentDir();
-    const sessionManager = sessionFile
-      ? await SessionManager.open(sessionFile, undefined)
-      : (() => {
-        if (!cwd) throw new Error("cwd is required for a new session");
-        return SessionManager.create(cwd, undefined);
-      })();
-    const sessionCwd = sessionManager.getCwd();
-    const finishStartingSession = trackStartingSession(sessionCwd);
+    if (!sessionFile && !cwd) throw new Error("cwd is required for a new session");
+    const finishStartingSession = trackStartingSession(cwd ?? process.cwd());
 
-    try {
-      const runtime = await getOmpRuntime();
-      const sessionSettings = await getSettingsForCwd(sessionCwd);
-
-      // Determine which tools to pass based on requested toolNames.
-      let toolsOption: string[] | undefined;
-      if (toolNames !== undefined) {
-        // toolNames === [] -> "all off" (an empty allow-list disables every tool).
-        // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
-        // set allowedToolNames to coding builtins only, which filtered every
-        // extension/package-provided tool (e.g. subagents, web access) out of the
-        // tool registry — so they were unavailable in omp-web sessions even though the
-        // `omp` CLI keeps them. Leaving the allow-list unset lets the SDK register all
-        // tools (and activate extension tools); we narrow the ACTIVE set below.
-        toolsOption = toolNames.length === 0 ? [] : undefined;
+    // Defect 2: resolve the host socket key BEFORE any lease probe. A host
+    // spawned via /api/agent/new lives under a __new__ temp key while routes
+    // ask by real id; after a web restart the registry is empty and only the
+    // socket/sidecar can bridge the two. A live answering socket proves our
+    // OWN host, so the attach branch skips refuseForeignSessionLease entirely
+    // (the host legitimately holds the SDK journal lease).
+    const candidates: string[] = [sessionId];
+    if (sessionFile) {
+      const headerId = readSessionHeader(sessionFile)?.id;
+      if (headerId && !candidates.includes(headerId)) candidates.push(headerId);
+    }
+    let hostKey: string | undefined;
+    let hostHelloSessionFile: string | undefined;
+    let hostHelloCwd: string | undefined;
+    for (const key of candidates) {
+      const hello = await probeHostSocket(hostSocketPath(key));
+      if (hello && (!sessionFile || hello.sessionFile === sessionFile)) {
+        hostKey = key;
+        hostHelloSessionFile = hello.sessionFile;
+        hostHelloCwd = hello.cwd;
+        break;
       }
+    }
+    if (!hostKey) {
+      const discoveredKey = sessionFile ? await findHostSocketKeyForSession(readSessionHeader(sessionFile)?.id ?? sessionId) : undefined;
+      if (discoveredKey) {
+        const hello = await probeHostSocket(hostSocketPath(discoveredKey));
+        if (hello && (!sessionFile || hello.sessionFile === sessionFile)) {
+          hostKey = discoveredKey;
+          hostHelloSessionFile = hello.sessionFile;
+          hostHelloCwd = hello.cwd;
+        }
+      }
+    }
+    if (!hostKey && options.attachOnly) throw new Error("No live host for this session");
+    if (!hostKey && sessionFile) refuseForeignSessionLease(sessionFile);
 
-      // Gate untrusted project code so opening a repository in a browser tab does
-      // not run its `.omp/extensions`, `.omp/tools`, or `.mcp.json` servers (see
-      // lib/project-trust.ts). Discovery still runs — only project-local entries
-      // are dropped, so user-level extensions keep working.
-      const [extensionPaths, customToolPaths] = await Promise.all([
-        discoverSessionExtensionPaths({}, sessionCwd, sessionSettings),
-        discoverCustomToolPaths([], sessionCwd),
-      ]);
-      const untrusted = untrustedProjectSessionOptions(sessionCwd, agentDir, { extensionPaths, customToolPaths });
+    const terminate = { allowed: false };
+    const earlyChunks: Buffer[] = [];
+    let wrapper: AgentSessionWrapper | undefined;
+    // requestTerminate must use the ANSWERED key once known: a reattach keyed
+    // by real id still targets a unit named after the original __new__ key.
+    let terminateKey = sessionId;
+    const connectionOptions = {
+      socketPath: hostSocketPath(hostKey ?? sessionId),
+      allowTerminate: () => terminate.allowed,
+      requestTerminate: () => { void stopHostUnit(terminateKey); },
+      // The host greets on connect AND on attach, before the wrapper exists:
+      // buffer those bytes and replay them into the tap once it is wired.
+      rawStdout: (chunk: Uint8Array) => {
+        if (wrapper) wrapper.handleRawStdout(chunk);
+        else earlyChunks.push(Buffer.from(chunk));
+      },
+      onError: () => wrapper?.destroy(),
+    };
 
-      const { modelRegistry } = runtime;
-
-      // Rotate this conversation's roles, then never again for its lifetime.
-      //
-      // Only on creation: a conversation reloaded after an idle teardown must
-      // come back on the model it was already using, or a 10-minute gap would
-      // silently switch models mid-conversation and throw away the provider's
-      // prompt cache — the exact cost rotation exists to avoid. `default` is
-      // skipped when the browser named a model, because an explicit pick must
-      // win and must not burn a rotation slot.
-      //
-      // `getSettingsForCwd` hands back the SHARED process-wide Settings when the
-      // cwd already matches, so the override has to go on a clone or it leaks
-      // into every other conversation and into the TUI-facing config.
-      let settings = sessionSettings;
-      const hasExistingMessages = sessionManager.buildSessionContext().messages.length > 0;
-      if (!hasExistingMessages) {
-        const own = await sessionSettings.cloneForCwd(sessionCwd);
-        const rotated = applyConversationRotation(own, agentDir, {
-          skipRoles: initialModel ? ["default"] : [],
-        });
-        if (rotated.length > 0) {
-          settings = own;
-          console.log(`[omp-web] rotated models for new session: ${
-            rotated.map((r) => `${r.role}=${r.primary} (${r.index + 1}/${r.poolSize})`).join(", ")
-          }`);
+    let connection: HostConnection | undefined;
+    try {
+      if (hostKey) {
+        // Live host answered: attach. Lease refusal was skipped above.
+        terminateKey = hostKey;
+        connection = await connectToHost(connectionOptions);
+      } else {
+        try {
+          connection = await connectToHost(connectionOptions);
+        } catch {
+          // No live host: lease already probed above, so the host may safely
+          // unlink a stale socket and create/open the journal itself.
+          await spawnSessionHost({
+            sessionId,
+            sessionFile,
+            ...(cwd ? { cwd } : {}),
+            ...(options.toolNames !== undefined ? { toolNames: options.toolNames } : {}),
+            ...(options.initialModel ? { initialModel: options.initialModel } : {}),
+            ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+          });
+          connection = await connectToHostWithRetry(connectionOptions);
         }
       }
 
-      const scope = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
-      const defaultRole = readDefaultModelRole(settings);
-      const initial = hasExistingMessages
-        ? { scopedModels: [...scope.scopedModels], model: undefined, thinkingLevel: undefined }
-        : selectInitialModelScope(scope, {
-          ...(initialModel ? { requestedModel: initialModel } : {}),
-          ...(defaultRole ? { defaultModel: defaultRole } : {}),
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        });
-      // Every browser conversation names itself. Two purposes: async job
-      // deliveries are routed by agent id (an unnamed session would be
-      // `MAIN_AGENT_ID` and would steal another conversation's results), and the
-      // patched SDK only shares the process AsyncJobManager with a session that
-      // supplies a distinct id. Derived from the session id, so a conversation
-      // reloaded after an idle teardown keeps the same identity and any pending
-      // delivery still reaches it.
-      ensureAsyncJobManager(Math.min(100, Math.max(1, getOmpSetting<number | undefined>(settings, "async.maxJobs") ?? 100)));
-      const { session: inner, eventBus, setToolUIContext } = await createAgentSession({
-        cwd: sessionCwd,
-        agentDir,
-        settings,
-        sessionManager,
-        modelRegistry,
-        hasUI: true,
-        agentId: webAgentId(sessionManager.getSessionId()),
-        ...(initial.model ? { model: initial.model } : {}),
-        ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
-        ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
-        ...(toolsOption !== undefined ? { toolNames: toolsOption, restrictToolNames: true } : {}),
-        ...(untrusted ?? {}),
-      });
-
-      const persistedPreferences = await persistExplicitStartupPreferences(
-        runtime.settings,
+      const attached = connection;
+      wrapper = new AgentSessionWrapper(
+        attached,
         {
-          ...(initialModel ? { model: initialModel } : {}),
-          ...(thinkingLevel ? { thinkingLevel } : {}),
+          sessionId,
+          sessionFile: sessionFile || hostHelloSessionFile || "",
+          cwd: cwd || hostHelloCwd || "",
         },
         {
-          ...(inner.model
-            ? { model: { provider: inner.model.provider, modelId: inner.model.id } }
-            : {}),
-          thinkingLevel: inner.thinkingLevel ?? "off",
-          supportsThinking: Boolean(inner.model?.reasoning),
+          attach: () => {
+            attached.process.stdin.write(`${JSON.stringify({ type: "host_attach", lastSeenSeq: active.attachSeq })}\n`);
+          },
+          terminate,
+          hostKey: hostKey ?? sessionId,
         },
       );
-      if (persistedPreferences.modelDefaultChanged) invalidateModelsCache();
+      const active = wrapper;
+      for (const chunk of earlyChunks) active.handleRawStdout(chunk);
+      earlyChunks.length = 0;
 
-      const session = inner as unknown as AgentSessionLike;
+      await active.start();
+      // Parity with the old ctor: stream subagent lifecycle/progress frames.
+      await active.send({ type: "set_subagent_subscription", level: "progress" });
 
-      // If specific tool names were requested (non-empty), set the active tools to the
-      // requested builtin coding tools PLUS all extension/package tools, so installed
-      // extensions stay usable in omp-web just like in the `omp` CLI.
-      if (toolNames && toolNames.length > 0) {
-        await session.setActiveToolsByName(withExtensionTools(session, toolNames));
+      const realSessionId = active.sessionId;
+      if (active.sessionFile) cacheSessionPath(realSessionId, active.sessionFile);
+      active.onDestroy(() => registry.delete(realSessionId));
+      registry.set(realSessionId, active);
+      notifyRunningChange();
+      return { session: active, realSessionId };
+    } catch (error) {
+      wrapper?.destroy();
+      connection?.detach();
+      // The host exits before binding when a foreign process claimed the
+      // lease between our probe and its own claim; the connect timeout would
+      // otherwise mask the real cause. Re-probe so callers get the clear
+      // refusal (routes map FOREIGN_LEASE_ERROR to 409).
+      if (!hostKey && sessionFile) {
+        try {
+          refuseForeignSessionLease(sessionFile);
+        } catch (refusal) {
+          throw refusal;
+        }
       }
-
-      const wrapper = new AgentSessionWrapper(session, eventBus);
-      wrapper.bindToolUiContext(
-        setToolUIContext as unknown as (uiContext: ExtensionUiContextLike, hasUI: boolean) => void,
-      );
-      // When all tools are disabled, clear the system prompt entirely.
-      // omp's buildSystemPrompt always produces a non-empty prompt even with no
-      // tools; keep this forced after extension discovery and reloads as well.
-      if (toolNames?.length === 0) {
-        wrapper.setForceEmptySystemPrompt(true);
-      }
-      wrapper.start();
-
-      const realSessionId = inner.sessionId as string;
-      const realSessionFile = inner.sessionFile as string | undefined;
-      if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-
-      wrapper.onDestroy(() => registry.delete(realSessionId));
-      registry.set(realSessionId, wrapper);
-      wrapper.beginExtensionBinding({ forceEmptySystemPrompt: toolNames?.length === 0 });
-
-      return { session: wrapper, realSessionId };
+      throw error;
     } finally {
       finishStartingSession();
     }

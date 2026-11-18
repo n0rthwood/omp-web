@@ -16,6 +16,13 @@
 # live in-process AgentSession is accepted — Design decision 12), and
 # creates/refreshes a PATH drop-in only if the existing unit's PATH does
 # not already cover the resolved omp directory (Design decision 11).
+#
+# issue #94: both paths also install/enable omp-terminal-host.service (the
+# terminal PTY daemon, its own user unit OUTSIDE omp-web.service's cgroup)
+# and create ~/.omp/run/omp-web-hosts/ for the host UDS sockets. The daemon
+# is only started when it is not already running — an active daemon is NEVER
+# restarted by an upgrade (even when the unit file changed), so live terminal
+# PTYs always survive. No tokens are ever rotated.
 set -e
 
 ROOT_PREFIX="${OMP_WEB_TEST_ROOT:-}"
@@ -24,6 +31,7 @@ RUNTIME_DIR="${ROOT_PREFIX}/opt/omp-web/runtime"
 CONFIG_DIR="${ROOT_PREFIX}/opt/omp-web/config"
 SECRETS_DIR="${ROOT_PREFIX}/opt/omp-web/secrets"
 SYSTEMD_SEED="${ROOT_PREFIX}/opt/omp-web/systemd/omp-web.service"
+TERMINAL_SYSTEMD_SEED="${ROOT_PREFIX}/opt/omp-web/systemd/omp-terminal-host.service"
 
 resolve_target_user() {
   if [ -n "${OMP_WEB_TARGET_USER:-}" ]; then
@@ -66,6 +74,8 @@ case "$1" in
     DEST="$TARGET_HOME/omp/ompweb"
     DROPIN_DIR="$TARGET_HOME/.config/systemd/user/omp-web.service.d"
     DROPIN="$DROPIN_DIR/10-omp-path.conf"
+    TH_UNIT_PATH="$TARGET_HOME/.config/systemd/user/omp-terminal-host.service"
+    HOST_RUN_DIR="$TARGET_HOME/.omp/run/omp-web-hosts"
 
     sync_bun() {
       BUN_BIN="$TARGET_HOME/.bun/bin/bun"
@@ -235,6 +245,54 @@ case "$1" in
       fi
     }
 
+    # issue #94: session hosts (transient `systemd-run --user` units) and the
+    # terminal daemon share ~/.omp/run/omp-web-hosts/ for their UDS sockets.
+    # Create it owned by the target user; never touch sockets here — a live
+    # daemon/host owns them and stale sockets are reaped by the owner on
+    # start (contract §1).
+    ensure_host_run_dir() {
+      mkdir -p "$HOST_RUN_DIR"
+      chown "$TARGET_USER:$TARGET_USER" \
+        "$TARGET_HOME/.omp" "$TARGET_HOME/.omp/run" "$HOST_RUN_DIR"
+    }
+
+    # issue #94: install/enable the terminal PTY daemon unit following the
+    # ops/restart-service precedent (in-repo payload shipped by the tar
+    # overlay, idempotent unit install, no secrets involved). The unit is
+    # rendered from the shipped seed with __HOME__/PATH substituted exactly
+    # like write_fresh_unit does for omp-web.service (atomic mktemp+mv).
+    # Restart policy (leave-running): the daemon lives OUTSIDE omp-web.service's
+    # KillMode=control-group cgroup, so the web stop/restart in sync_app never
+    # touches it, and this function NEVER restarts an active daemon — not on
+    # payload changes and not on unit-file changes. Killing it would kill every
+    # live terminal PTY, which an omp-web upgrade must never do. An inactive
+    # daemon is started; unit changes are installed + daemon-reloaded and take
+    # effect on the next natural start (crash/reboot or an explicit
+    # `systemctl --user restart omp-terminal-host.service`).
+    ensure_terminal_host() {
+      local omp_dir="$1"
+      local unit_dir="$TARGET_HOME/.config/systemd/user"
+      mkdir -p "$unit_dir"
+      # mkdir -p runs as root; systemctl --user enable needs write access
+      # (default.target.wants/) — same chown as write_fresh_unit.
+      chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config"
+
+      local tmp_unit
+      tmp_unit="$(mktemp "$unit_dir/.omp-terminal-host.service.XXXXXX")"
+      sed \
+        -e "s|__HOME__|$TARGET_HOME|g" \
+        -e "s|^Environment=PATH=.*|Environment=PATH=$TARGET_HOME/.bun/bin:$omp_dir:/usr/local/bin:/usr/bin:/bin|" \
+        "$TERMINAL_SYSTEMD_SEED" > "$tmp_unit"
+      chmod 0644 "$tmp_unit"
+      mv "$tmp_unit" "$TH_UNIT_PATH"
+      chown "$TARGET_USER:$TARGET_USER" "$TH_UNIT_PATH"
+
+      run_as_target 'systemctl --user daemon-reload && systemctl --user enable omp-terminal-host.service'
+      if ! run_as_target 'systemctl --user is-active --quiet omp-terminal-host.service' 2>/dev/null; then
+        run_as_target 'systemctl --user start omp-terminal-host.service'
+      fi
+    }
+
     seed_env_file() {
       local env_dir="$TARGET_HOME/omp/ops/env"
       mkdir -p "$env_dir"
@@ -322,6 +380,8 @@ case "$1" in
       fi
       sync_app
       run_as_target 'systemctl --user daemon-reload && systemctl --user enable --now omp-web.service'
+      ensure_host_run_dir
+      ensure_terminal_host "$OMP_DIR"
       write_marker
     else
       echo "omp-web: completion marker present — upgrade path (unit/env/agent dir untouched)" >&2
@@ -329,6 +389,8 @@ case "$1" in
       OMP_DIR="$(resolve_or_install_omp)"
       sync_app
       ensure_unit_path_covers_omp "$OMP_DIR"
+      ensure_host_run_dir
+      ensure_terminal_host "$OMP_DIR"
     fi
 
     sleep 1
