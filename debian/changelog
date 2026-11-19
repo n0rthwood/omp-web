@@ -1,3 +1,19 @@
+omp-web (0.5.27) jammy; urgency=medium
+
+  * Adopt a mature follow controller (pinned use-stick-to-bottom): streaming
+    follow immediately yields to upward wheel/touch/keyboard reading intent,
+    with a visible follow toggle, normal bottom/manual resume and reduced
+    motion support (#104).
+  * Add a transcript outline with unique user/assistant targets, including
+    tool-only and empty assistants, in a responsive rail/drawer with focus
+    and keyboard behavior (#104).
+  * Add bounded target-inclusive history windows and outline data on the
+    existing authorized context route; detached historical browsing stays
+    isolated from live state, caches and drafts, with latest-click-wins
+    navigation and explicit twenty-message paging (#104).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 15:10:47 +0000
+
 omp-web (0.5.26) jammy; urgency=medium
 
   * Fix empty chat rendering when a session journal ends with a model_usage
