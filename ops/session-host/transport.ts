@@ -6,9 +6,11 @@
  *   only after a live-owner probe proves nobody is answering),
  * - multi-client attach with a byte ring buffer + last-seen-seq gap replay,
  * - partial-write outbound queueing (Bun UDS `socket.write` is PARTIAL and
- *   DROPS unaccepted bytes — contract §3), mapped onto the SDK
- *   `RpcOutputWriter` sink contract via an EventEmitter adapter installed as
- *   `process.stdout` before `runRpcMode` (contract §2),
+ *   DROPS unaccepted bytes — contract §3), behind an EventEmitter adapter
+ *   installed as `process.stdout` before `runRpcMode` (contract §2). The
+ *   adapter ALWAYS accepts (#98): the host owns bounded buffering (droppable
+ *   transient-progress lane + must-deliver queue) so the SDK writer never
+ *   spools command responses behind a progress flood,
  * - an activity-whitelist tap used only for idle-reap bookkeeping,
  * - feeding accepted client frames into the shell-owned input ReadableStream.
  *
@@ -21,7 +23,7 @@ import { mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "bun";
-import { OMP_WEB_HOST_RUN_SUBDIR, type HostHelloFrame } from "../../lib/session-host-protocol";
+import { OMP_WEB_HOST_RUN_SUBDIR, type HostHelloFrame, type HostHistoryBoundary } from "../../lib/session-host-protocol";
 
 /** Directory shared with the web wrapper and the terminal daemon (contract §0). */
 export function hostsRunDir(): string {
@@ -71,6 +73,22 @@ const OUTBOUND_FULL_FRAME_TYPES: Record<string, true> = {
 const RING_BUFFER_BYTES = 32 * 1024 * 1024;
 /** Per-connection outbound queue ceiling; a slower client is detached past it. */
 const CLIENT_QUEUE_BYTES = 64 * 1024 * 1024;
+/**
+ * Droppable transient progress lane (#98): ONLY these unchunked frame types
+ * may be shed per client when its bulk backlog exceeds BULK_QUEUE_BYTES.
+ * Everything else — responses, lifecycle, message frames, and EVERY rpc_chunk
+ * line — is must-deliver: dropping a chunk would tear a logical sequence the
+ * decoder cannot recover. tool_stream_update is volatile tool progress; its
+ * terminal outcome arrives via tool_execution_end (must-deliver), and the
+ * SDK's streaming-edit abort guard runs host-side before this transport.
+ */
+const BULK_FRAME_TYPES: Record<string, true> = {
+  subagent_progress: true,
+  tool_execution_update: true,
+  tool_stream_update: true,
+};
+/** Per-client ceiling for queued droppable progress bytes (#98). */
+const BULK_QUEUE_BYTES = 512 * 1024;
 /** host_hello probe: how long to wait for a live owner to answer. */
 const LIVE_PROBE_TIMEOUT_MS = 500;
 /** Activity frames are small; never decode a whole multi-MiB write to tap them. */
@@ -83,21 +101,66 @@ interface QueueEntry {
   bytes: Uint8Array;
   /** Offset of the first byte not yet handed to the socket. */
   offset: number;
-  /** RpcOutputWriter per-write callback, invoked when fully accepted. */
-  cb?: (error?: Error | null) => void;
-  /** True for bytes originating from an adapter write (vs. host mirror frames). */
-  fromAdapter: boolean;
+  /** Droppable transient progress (#98); counted against BULK_QUEUE_BYTES. */
+  bulk: boolean;
 }
 
 interface ClientState {
   socket: Socket<{ client: ClientState | null }>;
   queue: QueueEntry[];
   queuedBytes: number;
+  /** Queued bytes belonging to the droppable bulk lane (#98). */
+  bulkQueuedBytes: number;
+  /** Bulk frames shed for this client so far (diagnostics on detach). */
+  droppedBulkFrames: number;
+  /** Authoritative ring position after transient frames skipped for this client. */
+  skippedSeq: number | null;
   /** Bytes still unaccepted from the socket's most recent partial write. */
   inFlight: number;
   closed: boolean;
   /** Inbound line accumulator (frames are one JSON object per line). */
   pending: string;
+}
+
+/**
+ * One-pass classification of an outbound write (#98), shared by the ring's
+ * sequence alignment and the droppable lane. One adapter write is one logical
+ * frame: an unchunked frame or a single rpc_chunk line.
+ */
+interface OutboundFrameInfo {
+  type?: string;
+  /** False only for a non-leading rpc_chunk line of a chunk sequence. */
+  seqStart: boolean;
+  chunkId?: string;
+  /** Unchunked transient progress: droppable per client under backlog. */
+  bulk: boolean;
+}
+
+/**
+ * Shared one-line classifier (#98 contract): type / sequence-start / chunkId /
+ * droppable-bulk, extracted from a line or its bounded head prefix (all three
+ * fields lead the JSON object; never decode a whole multi-MiB write). Reused
+ * by the tap, ring alignment, the droppable lane — and #99's transient
+ * snapshot map. One classification, one convention.
+ */
+export function classifyOutboundLine(line: string): OutboundFrameInfo {
+  const type = /^\{(?:"id":(?:"[^"]*"|null),)?"type":"([a-z_]+)"/.exec(line)?.[1];
+  if (type === "rpc_chunk") {
+    // Chunk line: index 0 opens a logical sequence; later lines belong to the
+    // chunkId's sequence. Field order varies, so match independently.
+    return {
+      type,
+      seqStart: /"index":0(?![0-9])/.test(line),
+      chunkId: /"chunkId":"([^"]*)"/.exec(line)?.[1],
+      bulk: false,
+    };
+  }
+  return {
+    type,
+    seqStart: true,
+    chunkId: undefined,
+    bulk: type !== undefined && Object.hasOwn(BULK_FRAME_TYPES, type),
+  };
 }
 
 export interface SessionTransportOptions {
@@ -113,6 +176,12 @@ export interface SessionTransportOptions {
   onInboundActivity?: () => void;
   /** A client finished its attach handshake — emit the session_info mirror. */
   onAttach?: () => void;
+  /**
+   * Fresh journal-mode attach (#99): capture the atomic journal/live boundary
+   * SYNCHRONOUSLY inside the attach handshake (durable flush + seq snapshot in
+   * one callback). No historical replay follows; the ack carries the boundary.
+   */
+  onJournalAttach?: () => HostHistoryBoundary;
   /** Activity-whitelist tap hit (agent/prompt/subagent lifecycle). */
   onActivity?: (frameType: string) => void;
   /** Tap a parsed SDK outbound frame AFTER it was queued (response overlays). */
@@ -151,6 +220,8 @@ export interface SessionTransport {
   readonly socketPath: string;
   /** Requested key naming socket/unit (may be a temp `__new__` id, NOT the real id). */
   readonly socketKey: string;
+  /** Current ring end seq (#99): the wire position a host snapshot splices at. */
+  currentSeq(): number;
   /** Stop listening, detach every client, resolve on server close. */
   close(): Promise<void>;
 }
@@ -215,17 +286,27 @@ export async function createSessionTransport(options: SessionTransportOptions): 
   // Byte ring of every outbound frame (adapter writes + host mirror frames),
   // tagged with a monotonic seq = cumulative byte offset AFTER the frame.
   // Attach carries the client's last-seen seq; replay covers (lastSeen, end].
-  const ring: Array<{ end: number; bytes: Uint8Array }> = [];
+  // #98: the front is always a logical-frame start (never a mid-chunk line),
+  // so a full replay can never begin inside an rpc_chunk sequence.
+  const ring: Array<{ end: number; bytes: Uint8Array; seqStart: boolean; chunkId?: string }> = [];
   let ringBytes = 0;
   let seq = 0;
   /** Verbatim SDK startup `ready` line, kept past ring eviction for re-attach. */
   let readyBytes: Uint8Array | undefined;
 
-  function ringAppend(bytes: Uint8Array): number {
+  function ringAppend(bytes: Uint8Array, info: OutboundFrameInfo): number {
     seq += bytes.length;
-    ring.push({ end: seq, bytes });
+    ring.push({ end: seq, bytes, seqStart: info.seqStart, chunkId: info.chunkId });
     ringBytes += bytes.length;
     while (ringBytes > RING_BUFFER_BYTES && ring.length > 1) {
+      const dropped = ring.shift();
+      if (dropped) ringBytes -= dropped.bytes.length;
+    }
+    // #98: byte eviction can land mid-sequence; drop leading non-start entries
+    // so the front always begins a logical frame. While a single >cap chunk
+    // sequence is in flight nothing complete is replayable, so the ring may
+    // empty until the next sequence start arrives.
+    while (ring.length > 0 && !ring[0].seqStart) {
       const dropped = ring.shift();
       if (dropped) ringBytes -= dropped.bytes.length;
     }
@@ -239,43 +320,65 @@ export async function createSessionTransport(options: SessionTransportOptions): 
     // replay everything retained; the client reconciles via get_entries.
     const from = lastSeen < oldestStart ? 0 : lastSeen;
     const out: Uint8Array[] = [];
-    for (const entry of ring) {
-      if (entry.end <= from) continue;
-      const skip = Math.max(0, from - (entry.end - entry.bytes.length));
-      out.push(skip > 0 ? entry.bytes.subarray(skip) : entry.bytes);
+    let i = 0;
+    if (from > 0) {
+      while (i < ring.length && ring[i].end <= from) i++;
+      if (i < ring.length) {
+        const first = ring[i];
+        const start = first.end - first.bytes.length;
+        if (from > start) {
+          if (first.chunkId !== undefined) {
+            // Torn chunk line: its JSON is unrecoverable and the rest of the
+            // sequence would be orphaned — skip the whole sequence (#98).
+            while (i < ring.length && ring[i].chunkId === first.chunkId) i++;
+          } else {
+            // Partial non-chunk frame: keep exact byte/seq accounting (#94).
+            out.push(first.bytes.subarray(from - start));
+            i++;
+          }
+        } else if (!first.seqStart) {
+          // Reconnect landed exactly on a mid-sequence line: a fresh decoder
+          // cannot start mid-sequence — skip the orphan chunk tail (#98).
+          const chunkId = first.chunkId;
+          while (i < ring.length && !ring[i].seqStart && ring[i].chunkId === chunkId) i++;
+        }
+      }
     }
+    for (; i < ring.length; i++) out.push(ring[i].bytes);
     return out;
   }
 
   // -------------------------------------------------------------- output ----
   // EventEmitter adapter satisfying the RpcOutputWriter sink contract
-  // (rpc-output.ts): write(data, cb) calls cb(null|err) when accepted, returns
-  // false while backpressured, emits "drain" on recovery, never "close"/"error"
-  // while active. Detached clients are normal — never surface them as errors.
-  let adapterUnaccepted = 0;
-  let adapterBlocked = false;
-
-  function adapterAccepted(length: number): void {
-    adapterUnaccepted = Math.max(0, adapterUnaccepted - length);
-    if (adapterBlocked && adapterUnaccepted === 0) {
-      adapterBlocked = false;
-      stdoutAdapter.emit("drain");
-    }
-  }
-
+  // (rpc-output.ts), deliberately ALWAYS-ACCEPT (#98): write(data, cb)
+  // buffers host-side, invokes cb(null) exactly once per write, and always
+  // returns true — never "drain"/"close"/"error" while active. Signalling
+  // backpressure would latch the SDK writer's sticky disk-spool mode,
+  // FIFO-starving command responses behind megabytes of progress frames
+  // (incident 01a1efa0, #98). The host owns buffering instead: the seq ring
+  // (32 MiB, sequence-aligned eviction) plus per-client queues — transient
+  // progress is droppable past BULK_QUEUE_BYTES, everything else detaches the
+  // client past CLIENT_QUEUE_BYTES and reconnects replay from the ring.
+  // Detached clients are normal — never surface them as errors.
   const openPrompts = new Set<string>();
 
-  function tapOutbound(bytes: Uint8Array): void {
-    if (!options.onActivity && !options.onOutboundFrame) return;
+  function tapOutbound(bytes: Uint8Array): OutboundFrameInfo {
     // One adapter write carries one logical frame (possibly rpc_chunk lines).
     // Activity/response-admission frames are small and lead with "type" (or
     // "id" then "type" for SDK responses); a bounded prefix keeps multi-MiB
-    // message frames out of the decode path.
+    // message frames out of the decode path. Classification runs ONCE per
+    // write even without tap callbacks: ring alignment and the droppable
+    // lane consume the same result (#98).
     const prefix = TEXT_DECODER.decode(bytes.subarray(0, Math.min(bytes.length, TAP_PREFIX_BYTES)));
+    const info: OutboundFrameInfo = { seqStart: true, bulk: false };
     for (const line of prefix.split("\n")) {
-      const typeMatch = /^\{(?:"id":(?:"[^"]*"|null),)?"type":"([a-z_]+)"/.exec(line);
-      if (!typeMatch) continue;
-      const type = typeMatch[1];
+      const cls = classifyOutboundLine(line);
+      const type = cls.type;
+      if (!type) continue;
+      info.type = type;
+      info.seqStart = cls.seqStart;
+      info.chunkId = cls.chunkId;
+      info.bulk = cls.bulk;
       // Cache the verbatim startup `ready` frame so EVERY attach re-delivers
       // host_hello → ready even after ring eviction (slice B pin #1: a late
       // RpcClient.start() consumes the first ready line or times out).
@@ -312,6 +415,7 @@ export async function createSessionTransport(options: SessionTransportOptions): 
         }
       }
     }
+    return info;
   }
 
   const stdoutAdapter: StdoutAdapter = Object.assign(new EventEmitter(), {
@@ -321,39 +425,50 @@ export async function createSessionTransport(options: SessionTransportOptions): 
         return true;
       }
       const bytes = typeof data === "string" ? TEXT_ENCODER.encode(data) : data;
-      tapOutbound(bytes);
-      ringAppend(bytes);
+      const info = tapOutbound(bytes);
+      const endSeq = ringAppend(bytes, info);
       if (clients.size === 0) {
         // No attached client: bytes are ring-buffered for the next attach.
         cb?.(null);
         return true;
       }
-      adapterUnaccepted += bytes.length;
-      for (const client of clients) enqueue(client, bytes, cb, true);
-      adapterBlocked = adapterUnaccepted > 0;
-      return !adapterBlocked;
+      for (const client of clients) enqueue(client, bytes, info, endSeq);
+      // Always-accept (#98): exactly one callback per write, never a false
+      // return — the SDK writer must never enter its FIFO disk-spool mode.
+      cb?.(null);
+      return true;
     },
     // Sink contract: the host never closes stdout while active; shutdown goes
     // through closeInput() → SDK EOF teardown instead.
     end(): void { /* intentional no-op */ },
   });
 
-  function enqueue(
-    client: ClientState,
-    bytes: Uint8Array,
-    cb: ((error?: Error | null) => void) | undefined,
-    fromAdapter: boolean,
-  ): void {
-    if (client.closed) {
-      if (fromAdapter) adapterAccepted(bytes.length);
-      cb?.(null);
+  function enqueue(client: ClientState, bytes: Uint8Array, info: OutboundFrameInfo, endSeq?: number): void {
+    if (client.closed) return;
+    if (info.bulk && client.bulkQueuedBytes + bytes.length > BULK_QUEUE_BYTES) {
+      // #98 droppable lane: transient progress beyond the per-client budget
+      // is shed so command responses never queue behind a bulk backlog. The
+      // adapter already accepted the write; the ring keeps the bytes for
+      // replay. Must-deliver frames (incl. every rpc_chunk) never land here.
+      client.droppedBulkFrames++;
+      if (endSeq !== undefined) client.skippedSeq = endSeq;
       return;
     }
-    client.queue.push({ bytes, offset: 0, cb, fromAdapter });
+    if (client.skippedSeq !== null) {
+      const checkpoint = client.skippedSeq;
+      client.skippedSeq = null;
+      // Skipped bytes still advance the host's ring. Coalesce their position
+      // into one control frame before the next delivered logical frame.
+      enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({ type: "host_seq", seq: checkpoint })}\n`), { seqStart: true, bulk: false });
+      if (client.closed) return;
+    }
+    client.queue.push({ bytes, offset: 0, bulk: info.bulk });
     client.queuedBytes += bytes.length;
+    if (info.bulk) client.bulkQueuedBytes += bytes.length;
     if (client.queuedBytes > CLIENT_QUEUE_BYTES) {
-      // A client that far behind cannot catch up on a live stream; detach it
-      // (its reconnect replays from the ring). Never kill the host for it.
+      // A client that far behind on MUST-DELIVER traffic cannot catch up on a
+      // live stream; detach it (its reconnect replays from the ring). Never
+      // kill the host for it.
       detach(client);
       return;
     }
@@ -380,8 +495,7 @@ export async function createSessionTransport(options: SessionTransportOptions): 
         return;
       }
       client.queue.shift();
-      if (entry.fromAdapter) adapterAccepted(entry.bytes.length);
-      entry.cb?.(null);
+      if (entry.bulk) client.bulkQueuedBytes -= entry.bytes.length;
     }
   }
 
@@ -400,18 +514,17 @@ export async function createSessionTransport(options: SessionTransportOptions): 
     if (client.closed) return;
     client.closed = true;
     clients.delete(client);
-    // Account every unaccepted adapter byte as accepted so the writer's
-    // pending-write count settles; the ring still holds the bytes for replay.
-    // The head entry's remainder equals inFlight, so the queue walk covers it.
-    let accepted = 0;
-    for (const entry of client.queue) {
-      if (entry.fromAdapter) accepted += entry.bytes.length - entry.offset;
-      entry.cb?.(null);
+    if (client.droppedBulkFrames > 0) {
+      process.stderr.write(
+        `[omp-web-host] slow client detached after dropping ${client.droppedBulkFrames} bulk frames\n`,
+      );
     }
+    // Always-accept (#98): write callbacks already settled at the adapter;
+    // queued frames die with the client (the ring holds them for replay).
     client.queue.length = 0;
     client.queuedBytes = 0;
+    client.bulkQueuedBytes = 0;
     client.inFlight = 0;
-    if (accepted > 0) adapterAccepted(accepted);
     try { client.socket.end(); } catch { /* already gone */ }
   }
 
@@ -437,9 +550,12 @@ export async function createSessionTransport(options: SessionTransportOptions): 
 
   function emitHostFrame(frame: object): void {
     if (closed) return;
-    const bytes = TEXT_ENCODER.encode(`${JSON.stringify(frame)}\n`);
-    ringAppend(bytes);
-    for (const client of clients) enqueue(client, bytes, undefined, false);
+    const line = JSON.stringify(frame);
+    const bytes = TEXT_ENCODER.encode(`${line}\n`);
+    // Host mirror frames are single-line and never rpc_chunk; same classifier.
+    const info = classifyOutboundLine(line);
+    const endSeq = ringAppend(bytes, info);
+    for (const client of clients) enqueue(client, bytes, info, endSeq);
   }
 
   // host_hello is fixed for the host's lifetime; serialize once. Shape is the
@@ -454,15 +570,44 @@ export async function createSessionTransport(options: SessionTransportOptions): 
   const helloBytes = TEXT_ENCODER.encode(`${JSON.stringify(hello)}\n`);
 
   function handleAttach(client: ClientState, frame: Record<string, unknown>): void {
-    // Handshake: host_hello first (raw, unsequenced), then gap replay from the
-    // client's last-seen seq, then host_attach(seq) so the client can track its
-    // position, then live frames. Replay is enqueued synchronously inside the
-    // socket data callback, so no live frame can interleave ahead of it.
-    enqueue(client, helloBytes, undefined, false);
-    if (readyBytes) enqueue(client, readyBytes, undefined, false);
-    const lastSeen = typeof frame.lastSeenSeq === "number" ? frame.lastSeenSeq : 0;
-    for (const chunk of replayFrom(lastSeen)) enqueue(client, chunk, undefined, false);
-    enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({ type: "host_attach", seq })}\n`), undefined, false);
+    // Handshake: host_hello first (raw, unsequenced), then the attach ack.
+    // Legacy attach replays the client's gap from its last-seen seq BEFORE the
+    // ack; journal-mode attach (#99) NEVER replays history — the boundary is
+    // captured synchronously here (durable flush + seq in one callback) so the
+    // journal view and the live stream splice with no gap and no duplication.
+    // Everything is enqueued synchronously inside the socket data callback,
+    // so no live frame can interleave ahead of the handshake.
+    const hostInfo: OutboundFrameInfo = { seqStart: true, bulk: false };
+    enqueue(client, helloBytes, hostInfo);
+    if (readyBytes) enqueue(client, readyBytes, hostInfo);
+    const journalMode = frame.historyMode === "journal";
+    let boundary: HostHistoryBoundary | undefined;
+    let boundaryError: string | undefined;
+    if (journalMode) {
+      // Capture can throw (latched disk failure, mid-rewrite atomic batch).
+      // An exception escaping the socket data callback would kill the host
+      // and strand the live session — surface it on the ack instead.
+      try {
+        boundary = options.onJournalAttach?.();
+      } catch (error) {
+        boundaryError = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[omp-web-host] journal attach boundary capture failed: ${boundaryError}\n`);
+      }
+    }
+    if (!journalMode) {
+      const lastSeen = typeof frame.lastSeenSeq === "number" && frame.lastSeenSeq >= 0 ? frame.lastSeenSeq : 0;
+      // Legacy gap replay is must-deliver; the bulk drop policy applies to
+      // the live flood only. Journal-mode NEVER replays — even when capture
+      // fails: the ack carries boundaryError and the client's next
+      // get_history_anchor rejects retryably (#100 preserves the view).
+      for (const chunk of replayFrom(lastSeen)) enqueue(client, chunk, hostInfo);
+    }
+    enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({
+      type: "host_attach",
+      seq,
+      ...(boundary ? { boundary } : {}),
+      ...(boundaryError ? { boundaryError } : {}),
+    })}\n`), hostInfo);
     options.onAttach?.();
   }
 
@@ -476,16 +621,22 @@ export async function createSessionTransport(options: SessionTransportOptions): 
           socket,
           queue: [],
           queuedBytes: 0,
+          bulkQueuedBytes: 0,
+          droppedBulkFrames: 0,
+          skippedSeq: null,
           inFlight: 0,
           closed: false,
           pending: "",
         };
-        socket.data.client = client;
+        // Bun.listen's seed data object is shared; each socket needs its own
+        // identity or one client's drain resumes another client's queue.
+        socket.data = { client };
         clients.add(client);
         // Greet immediately so liveness probes see a live owner. The wrapper
         // treats host_hello as a mirror; RpcClient ignores unknown frames.
-        enqueue(client, helloBytes, undefined, false);
-        if (readyBytes) enqueue(client, readyBytes, undefined, false);
+        const hostInfo: OutboundFrameInfo = { seqStart: true, bulk: false };
+        enqueue(client, helloBytes, hostInfo);
+        if (readyBytes) enqueue(client, readyBytes, hostInfo);
       },
       data(socket, data) {
         const client = socket.data.client;
@@ -562,6 +713,7 @@ export async function createSessionTransport(options: SessionTransportOptions): 
     releasePrompt: (id) => { openPrompts.delete(id); },
     socketPath,
     socketKey: options.sessionId,
+    currentSeq: () => seq,
     close,
   };
 }

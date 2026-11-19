@@ -584,6 +584,8 @@ ops/
   session-host/        per-conversation host process: main (lifecycle), transport (UDS + ring replay),
                        web-compat (web commands over runRpcMode), ui-decoration, idle reap, restore
   terminal-host/       persistent PTY daemon: main, terminals (Bun.Terminal), protocol
+  session-refresh-regression.mjs  #100 browser regression: real build + hermetic HOME, synthetic
+                       SSE/prompt frames, injected loadSession failures (run instructions in header)
 
 release/systemd/
   omp-terminal-host.service  unit seed rendered by debian/postinst

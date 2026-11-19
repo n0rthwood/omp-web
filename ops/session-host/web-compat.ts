@@ -28,7 +28,7 @@ import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-
 import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { getOmpSetting } from "../../lib/omp-setting-access";
 import {
@@ -50,7 +50,7 @@ import type {
   SessionStatus,
   SubagentSnapshot,
 } from "../../lib/types";
-import type { HostSessionInfoFrame } from "../../lib/session-host-protocol";
+import { boundActivePartial, type HostHistoryBoundary, type HostJournalAnchor, type HostSessionInfoFrame } from "../../lib/session-host-protocol";
 import type { SessionTransport } from "./transport";
 import type { WebUiDecoration } from "./ui-decoration";
 
@@ -348,9 +348,54 @@ export interface WebCompat {
   handleOutboundFrame(frame: unknown): void;
   emitSessionInfo(): void;
   hasLiveSubagents(): boolean;
+  /** Atomic durable journal/live boundary (#99), captured synchronously. */
+  captureHistoryBoundary(): HostHistoryBoundary;
+  /**
+   * Admitted prompts still awaiting prompt_result that carry a client draft
+   * identity (#88). Journal-mode attach (#99) skips ring replay, so the host
+   * re-emits their host_prompt_identity frames at attach — a reattached web
+   * wrapper can still settle the original submitter's draft.
+   */
+  pendingPromptIdentities(): Array<{ id: string; promptId: string; streamingBehavior?: string }>;
   /** Resolves when runRpcMode has bound extensions (available_commands_update). */
   readonly extensionsReady: Promise<void>;
   dispose(): void;
+}
+
+/**
+ * Durable journal anchor + atomic wire splice (#99), captured synchronously in
+ * ONE callback (journal-mode attach handshake / get_history_anchor control):
+ *   1. flushSync makes every appended entry durable (append-only fast path;
+ *      pending rewrites are materialized synchronously by the SDK);
+ *   2. stat + cheap SDK accessors snapshot the durable position — no entry
+ *      body parsing, no full-entry copying;
+ *   3. the CURRENT ring seq completes the boundary: journal ≤ anchor was all
+ *      emitted at seq ≤ boundary.seq; live frames after it are post-boundary.
+ * A transient (unpersisted) session yields the empty anchor; nothing durable
+ * exists, so the whole conversation is live-stream territory.
+ */
+export function captureJournalBoundary(sessionManager: SessionManager, currentSeq: () => number): HostHistoryBoundary {
+  const anchor: HostJournalAnchor = {
+    lastEntryId: null,
+    leafId: null,
+    entryCount: 0,
+    sizeBytes: 0,
+    mtimeMs: 0,
+  };
+  const sessionFile = sessionManager.getSessionFile();
+  if (sessionFile && sessionManager.isSessionOnDisk()) {
+    sessionManager.flushSync();
+    const stat = statSync(sessionFile);
+    anchor.sizeBytes = stat.size;
+    anchor.mtimeMs = stat.mtimeMs;
+    // lastEntryId = PHYSICAL durable tail (bounds reads); leafId = the active
+    // branch leaf, which after navigate_tree/fork points mid-file.
+    const entries = sessionManager.getEntries();
+    anchor.entryCount = entries.length;
+    anchor.lastEntryId = entries[entries.length - 1]?.id ?? null;
+    anchor.leafId = sessionManager.getLeafId();
+  }
+  return { seq: currentSeq(), journal: anchor };
 }
 
 export function createWebCompat(options: WebCompatOptions): WebCompat {
@@ -371,6 +416,8 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
   const promptMeta = new Map<string, PromptMeta>();
   let forceEmptySystemPrompt = false;
   let disposed = false;
+  /** Latest in-flight assistant partial (#99), fed by the outbound tap. */
+  let activePartial: { message: unknown; messageId?: string } | undefined;
 
   const { promise: extensionsReady, resolve: markExtensionsBound } = Promise.withResolvers<void>();
   let extensionsBound = false;
@@ -797,6 +844,10 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       slowModeScope: session.getSlowModeScope(),
       usageLimit: session.getUsageLimitState(),
       goal: session.getGoalModeState() ?? null,
+      // Bounded mid-turn snapshot (#99): a browser subscribing mid-stream must
+      // see the partial message's already-emitted text without any historical
+      // replay. Latest snapshot only; the wrapper overlays its fresher copy.
+      activePartial: activePartial ? boundActivePartial(activePartial.message, activePartial.messageId) : null,
     };
   }
 
@@ -1065,6 +1116,12 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
             transport.forwardToSdk(frame);
             return;
 
+          case "get_history_anchor":
+            // #99: fresh atomic boundary for EACH browser subscription.
+            // Host-owned control: durable flush + seq snapshot synchronously,
+            // never forwarded to the SDK, never a historical dump.
+            respondSuccess(id, type, captureJournalBoundary(sessionManager, () => transport.currentSeq()));
+            return;
           case "get_state":
             respondSuccess(id, type, buildWebState());
             return;
@@ -1287,6 +1344,24 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       return;
     }
 
+    // #99 active-partial tracking (small lifecycle frames only; the giant
+    // accumulated message_update snapshots never reach this tap past the
+    // bounded prefix). message_end settles the partial into the journal.
+    if (type === "message_start" || type === "message_update") {
+      const message = "message" in frame ? frame.message : undefined;
+      if (typeof message === "object" && message !== null && "role" in message && message.role === "assistant") {
+        activePartial = {
+          message,
+          ...("messageId" in frame && typeof frame.messageId === "string" ? { messageId: frame.messageId } : {}),
+        };
+      }
+      return;
+    }
+    if (type === "message_end") {
+      activePartial = undefined;
+      return;
+    }
+
     if (type === "subagent_lifecycle" || type === "subagent_progress") {
       rememberSubagentFrame(frame as { type: string; payload?: unknown });
       return;
@@ -1319,6 +1394,7 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
 
     if (type === "agent_end" || type === "session_settled" || type === "session_renamed"
       || type === "auto_compaction_start" || type === "auto_compaction_end") {
+      if (type === "agent_end" || type === "session_settled") activePartial = undefined;
       emitSessionInfo();
       return;
     }
@@ -1361,6 +1437,14 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     handleOutboundFrame,
     emitSessionInfo,
     hasLiveSubagents: () => subagents.getSubagents().length > 0,
+    captureHistoryBoundary: () => captureJournalBoundary(sessionManager, () => transport.currentSeq()),
+    pendingPromptIdentities: () => [...promptMeta.entries()]
+      .filter((entry): entry is [string, PromptMeta & { promptId: string }] => typeof entry[1].promptId === "string" && entry[1].promptId.length > 0)
+      .map(([id, meta]) => ({
+        id,
+        promptId: meta.promptId,
+        ...(meta.streamingBehavior ? { streamingBehavior: meta.streamingBehavior } : {}),
+      })),
     extensionsReady,
     dispose,
   };

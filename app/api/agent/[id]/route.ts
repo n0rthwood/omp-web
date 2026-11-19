@@ -75,8 +75,9 @@ export async function GET(
       return NextResponse.json({ running: false });
     }
 
-    const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    // #99: snapshot END seq orders activePartial against the SSE boundary.
+    const { state, hostSeq } = await session.getStateSnapshot();
+    return NextResponse.json({ running: true, state, hostSeq });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

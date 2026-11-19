@@ -48,6 +48,103 @@ export interface HostSessionInfoFrame {
 }
 
 /**
+ * Durable journal position at one instant (#99). Produced host-side ONLY (the
+ * `get_history_anchor` control and the fresh journal-mode attach boundary):
+ * file paths are resolved server-side, never accepted from a client. An anchor
+ * bounds journal reads to entries durably present at capture — later appends
+ * are live-stream territory (`hostSeq > boundary.seq`), never history.
+ */
+export interface HostJournalAnchor {
+	lastEntryId: string | null;
+	leafId: string | null;
+	entryCount: number;
+	sizeBytes: number;
+	mtimeMs: number;
+}
+
+/**
+ * Atomic journal/live splice point (#99): captured in ONE synchronous host
+ * callback after a durable flush, so every journal entry ≤ journal was
+ * already emitted at wire seq ≤ seq, and every frame with END seq > seq is
+ * post-boundary live traffic. No gap and no duplication across the splice.
+ */
+export interface HostHistoryBoundary {
+	seq: number;
+	journal: HostJournalAnchor;
+}
+
+/**
+ * Fresh journal-mode attach (#99): `{type:"host_attach", lastSeenSeq:-1,
+ * historyMode:"journal"}` NEVER replays historical frames. The ack is
+ * host_attach carrying the boundary captured synchronously at attach time.
+ */
+export interface HostAttachAckFrame {
+	type: "host_attach";
+	seq: number;
+	/** Present only for a journal-mode attach ack. */
+	boundary?: HostHistoryBoundary;
+}
+
+export function isHostJournalAnchor(value: unknown): value is HostJournalAnchor {
+	if (typeof value !== "object" || value === null) return false;
+	const anchor = value as Record<string, unknown>;
+	return (anchor.lastEntryId === null || typeof anchor.lastEntryId === "string")
+		&& (anchor.leafId === null || typeof anchor.leafId === "string")
+		&& typeof anchor.entryCount === "number" && Number.isFinite(anchor.entryCount)
+		&& typeof anchor.sizeBytes === "number" && Number.isFinite(anchor.sizeBytes)
+		&& typeof anchor.mtimeMs === "number" && Number.isFinite(anchor.mtimeMs);
+}
+
+export function isHostHistoryBoundary(value: unknown): value is HostHistoryBoundary {
+	if (typeof value !== "object" || value === null) return false;
+	const boundary = value as Record<string, unknown>;
+	return typeof boundary.seq === "number" && Number.isFinite(boundary.seq)
+		&& isHostJournalAnchor(boundary.journal);
+}
+
+/** Bound for the active-partial text snapshot (#99): tail only, never history. */
+export const ACTIVE_PARTIAL_TEXT_TAIL_CHARS = 64 * 1024;
+/** Bound for non-text partial content blocks kept in the snapshot. */
+export const ACTIVE_PARTIAL_CONTENT_BLOCKS = 64;
+
+/**
+ * Bounded snapshot of the in-flight assistant message (#99), shared by the
+ * host get_state fallback and the wrapper overlay so BOTH paths emit the same
+ * shape: `{message, messageId?, truncated?}`. Long text is tailed and flagged;
+ * non-text blocks are capped. Never a historical dump.
+ */
+export function boundActivePartial(message: unknown, messageId?: string): Record<string, unknown> {
+	const source = (typeof message === "object" && message !== null ? message : {}) as Record<string, unknown>;
+	const out: Record<string, unknown> = { ...source };
+	let truncated = false;
+	if (typeof out.content === "string") {
+		if (out.content.length > ACTIVE_PARTIAL_TEXT_TAIL_CHARS) {
+			out.content = out.content.slice(-ACTIVE_PARTIAL_TEXT_TAIL_CHARS);
+			truncated = true;
+		}
+	} else if (Array.isArray(out.content)) {
+		if (out.content.length > ACTIVE_PARTIAL_CONTENT_BLOCKS) {
+			out.content = out.content.slice(-ACTIVE_PARTIAL_CONTENT_BLOCKS);
+			truncated = true;
+		}
+		out.content = (out.content as unknown[]).map((block) => {
+			if (typeof block !== "object" || block === null) return block;
+			const b = block as Record<string, unknown>;
+			if (typeof b.text === "string" && b.text.length > ACTIVE_PARTIAL_TEXT_TAIL_CHARS) {
+				truncated = true;
+				return { ...b, text: b.text.slice(-ACTIVE_PARTIAL_TEXT_TAIL_CHARS) };
+			}
+			return block;
+		});
+	}
+	return {
+		message: out,
+		...(messageId ? { messageId } : {}),
+		...(truncated ? { truncated: true } : {}),
+	};
+}
+
+/**
  * Creation options a freshly spawned host applies while replicating the old
  * startRpcSession preamble (rotation, initial model scope, tool allow-list).
  * Passed on the host command line; an ATTACH to an already-live host ignores

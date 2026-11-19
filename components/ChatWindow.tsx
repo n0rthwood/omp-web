@@ -28,13 +28,6 @@ import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import type { SessionStatsInfo } from "@/lib/omp-types";
-import {
-  captureScrollDistance,
-  getNextVisibleCount,
-  getVisibleRenderWindow,
-  restoreScrollTop,
-  VISIBLE_PAGE_SIZE,
-} from "@/lib/chat-lazy-load";
 
 interface Props {
   session: SessionInfo | null;
@@ -216,7 +209,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   }, [chatInputRef]);
 
   const {
-    loading, error, messages, entryIds, streamState,
+    loading, error, refreshError, data, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
@@ -225,6 +218,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     isAutoModelSelection,
     agentPhase,
     isNew,
+    historyHasEarlier, historyLoading, handleLoadEarlier,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
@@ -248,42 +242,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     registerAbortHandler(sessionBusy ? handleAbort : null);
   }, [sessionBusy, handleAbort]);
 
-  // --- Lazy-load historical messages ---
-  // Only render the last N messages initially. When the user scrolls to the
-  // top, load another page while keeping the scroll position stable.
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  const prevScrollDistanceRef = useRef<number | null>(null);
-
-  // IntersectionObserver on the sentinel div at the top of the message list.
-  // When it becomes visible, load the next page of older messages.
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const container = scrollContainerRef.current;
-    if (!sentinel || !container) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          // Save distance from top before prepending to restore scroll later
-          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          setVisibleCount((prev) => getNextVisibleCount(prev));
-        }
-      },
-      { root: container, threshold: 0 }
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
-
-  // After visibleCount increases (more messages prepended), restore the
-  // scroll position so the viewport doesn't jump.
-  useEffect(() => {
-    if (prevScrollDistanceRef.current == null) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
-    prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -438,7 +396,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     );
   }
 
-  if (error) {
+  // #100: the full-screen error is reserved for an initial load with nothing
+  // rendered. Once the session view exists (loaded data — even an empty
+  // session — messages, or streaming), a failed background refresh only
+  // raises the non-blocking indicator below — never replaces the chat.
+  if (error && data === null && messages.length === 0 && !streamState.isStreaming && !agentRunning && !bashRunning) {
     return (
       <div className="flex h-full items-center justify-center text-red-400">
         {error}
@@ -574,6 +536,41 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             <NoticeShelf notices={notices} floating align="right" />
           </div>
         </div>
+        {refreshError && (
+          <div
+            data-testid="session-refresh-error"
+            role="status"
+            style={{
+              position: "absolute",
+              bottom: 8,
+              left: 0,
+              right: 0,
+              zIndex: 40,
+              padding: `0 ${CHAT_COLUMN_PADDING}px`,
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              title={refreshError.message}
+              style={{
+                width: "fit-content",
+                maxWidth: "100%",
+                margin: "0 auto",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                borderRadius: 12,
+                border: "1px solid color-mix(in srgb, #ef4444 35%, var(--border))",
+                background: "color-mix(in srgb, #ef4444 12%, var(--bg-panel))",
+                color: "#ef4444",
+                fontSize: 12,
+                padding: "4px 12px",
+              }}
+            >
+              {t("chat.refreshFailed", { count: refreshError.count, error: refreshError.message })}
+            </div>
+          </div>
+        )}
         <div ref={scrollContainerRef} className="chat-session-scroll min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]">
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: 820, margin: "0 auto" }}>
@@ -768,15 +765,26 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 }
                 idx = endIdx;
               }
-              const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              // #99: the journal window IS the render list — no client-side
+              // render slicing. Earlier history pages in only through the
+              // explicit button (never scroll-triggered).
               return (
                 <>
-                  {hasMore && (
-                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {t("chat.loadEarlier", { count: startIndex })}
+                  {historyHasEarlier && (
+                    <div className="py-3 text-center">
+                      <button
+                        type="button"
+                        data-testid="load-earlier"
+                        aria-label={t("chat.loadEarlier")}
+                        disabled={historyLoading}
+                        onClick={() => void handleLoadEarlier()}
+                        className="rounded-full border border-border bg-bg-panel px-4 py-1.5 text-xs text-text-muted transition-colors hover:text-text disabled:opacity-50"
+                      >
+                        {historyLoading ? t("chat.loadingEarlier") : t("chat.loadEarlier")}
+                      </button>
                     </div>
                   )}
-                  {rendered.slice(startIndex)}
+                  {rendered}
                 </>
               );
             })()}
