@@ -1,3 +1,13 @@
+omp-web (0.5.26) jammy; urgency=medium
+
+  * Fix empty chat rendering when a session journal ends with a model_usage
+    marker that omits activeLeafId: the journal reader now distinguishes an
+    absent field (marker self-selects, SDK parity) from an explicit null
+    (branch cleared), restoring history display for sessions ended by an
+    unexpected-stop retry (#105).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 12:25:40 +0000
+
 omp-web (0.5.25) jammy; urgency=medium
 
   * Display nested project cwds as expandable, recency-sorted folder rows
