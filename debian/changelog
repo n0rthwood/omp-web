@@ -1,3 +1,24 @@
+omp-web (0.5.22) jammy; urgency=medium
+
+  * Fix host→web stream corruption and permanent RPC decoder hang that
+    stalled session routes (closes #96). The session-host transport's
+    onDrain credited dropped bytes as delivered: Bun UDS socket.write
+    drops the unaccepted tail, so a large frame meeting a full socket
+    buffer lost its remainder and corrupted the stream. Drain now
+    rewrites from the queue entry's offset; multi-MiB frames deliver
+    byte-exact under backpressure.
+  * The web RPC decoder self-heals: the SDK RpcFrameDecoder never clears
+    its pending chunk sequence on throw, so one interrupted sequence
+    poisoned every later frame and get_state/get_entries/get_tree
+    responses were dropped forever. The wrapper now resets the decoder
+    and retries once (recovering the interrupting response intact), and
+    throttles the decode-error log to 1/s.
+  * Read-only host queries (get_*) are bounded at 30 s: a lost response
+    fails retryable instead of hanging the route indefinitely; the
+    client's reconcile poll retries.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 02:39:35 +0000
+
 omp-web (0.5.21) jammy; urgency=medium
 
   * Split session execution and terminal PTYs out of the web server into
