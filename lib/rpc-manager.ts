@@ -87,6 +87,34 @@ const HOST_SHUTDOWN_GRACE_MS = 5_000;
 /** Read-only host queries must never hang a route; a lost response fails retryable. */
 const READ_ONLY_COMMAND_TIMEOUT_MS = 30_000;
 
+/**
+ * Bound for non-fire-and-forget mutations (steer, follow_up, set_*, compact, ...):
+ * a lost ack must fail retryable, never hang the route until Cloudflare's ~100s
+ * cap (#97). 30s mirrors the SDK RpcClient #send default; steer/follow_up ack
+ * at ENQUEUE (not dequeue), so a healthy mid-turn steer settles in milliseconds
+ * regardless of turn length. Override: OMP_WEB_MUTATION_TIMEOUT_MS (positive
+ * milliseconds, default 30000) — tests use a short bound.
+ */
+const MUTATION_COMMAND_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.OMP_WEB_MUTATION_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
+
+/**
+ * Pending-response bound per command (#96 read-only, #97 mutations). Returns
+ * undefined for commands that must NOT time out:
+ *   - prompt: fire-and-forget at admission; outcomes arrive as prompt_result (#88)
+ *   - bash: interactive shell that can run for minutes; the UI owns abort_bash
+ * get_* keeps the read-only bound; every other registered command (steer,
+ * follow_up, set_*, compact, fork, navigate_tree, reload, auto_name, clear_queue,
+ * abort*, execute_slash_command, delete_session, ...) is a bounded mutation.
+ */
+function pendingTimeoutMs(command: string): number | undefined {
+  if (command === "prompt" || command === "bash") return undefined;
+  if (command.startsWith("get_")) return READ_ONLY_COMMAND_TIMEOUT_MS;
+  return MUTATION_COMMAND_TIMEOUT_MS;
+}
+
 export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
@@ -615,7 +643,16 @@ export class AgentSessionWrapper {
    * command semantics — idle timers, extension binding, plan mode, auto-title.
    */
   async send(command: Record<string, unknown>): Promise<unknown> {
-    if (!this._alive) throw new Error("Session closed");
+    // Fail fast on a dead connection (#97): writeBytes silently drops bytes
+    // once closed, so a steer written here would 200-ack while never reaching
+    // the host. Degrade (evict + destroy, detach-only) so the NEXT request
+    // reattaches fresh instead of hitting this zombie via the registry fast
+    // path. _alive alone is not enough: it only flips in the exited.then
+    // microtask, leaving a window where the socket is already closed.
+    if (!this._alive || this.connection.isClosed) {
+      this.destroy();
+      throw new Error("Session closed");
+    }
     const type = command.type as string;
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
@@ -692,12 +729,20 @@ export class AgentSessionWrapper {
   private registerPending(id: string, command: string): Promise<unknown> {
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
     const entry: PendingCommand = { command, resolve, reject };
-    if (command.startsWith("get_")) {
+    const timeoutMs = pendingTimeoutMs(command);
+    if (timeoutMs !== undefined) {
       entry.timer = setTimeout(() => {
         if (this.pendingCommands.get(id) !== entry) return; // already settled
         this.pendingCommands.delete(id);
-        reject(new Error(`Timed out waiting for host response: ${command}`));
-      }, READ_ONLY_COMMAND_TIMEOUT_MS);
+        reject(new Error(`Timed out waiting for host response: ${command} (connection degraded; retry reattaches)`));
+        // A command that never round-trips means this wrapper's connection is
+        // degraded (#97): evict + destroy (detach-only, the host survives) so the
+        // NEXT request reattaches fresh instead of reusing this zombie via the
+        // registry alive fast path. destroy rejects the remaining pending and
+        // clears their timers; the identity guard above keeps this a no-op if
+        // the entry already settled.
+        this.destroy();
+      }, timeoutMs);
     }
     this.pendingCommands.set(id, entry);
     return promise;
@@ -708,6 +753,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     for (const pending of this.pendingCommands.values()) {
+      clearTimeout(pending.timer);
       pending.reject(new Error("Session closed"));
     }
     this.pendingCommands.clear();
