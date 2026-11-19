@@ -1,3 +1,15 @@
+omp-web (0.5.24) jammy; urgency=medium
+
+  * Preserve rendered chat, composer drafts and scroll after failed background
+    refreshes; show a non-blocking error count that clears on recovery (#100).
+  * Prevent command-response starvation during progress floods, bound transient
+    queues, isolate per-socket drain state and align chunk replay (#98).
+  * Splice incremental live events onto anchored journal history, initially show
+    five messages, cache history windows and load twenty earlier messages only
+    on an explicit click; exclude SSE from proxy compression (#99).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 06:38:24 +0000
+
 omp-web (0.5.23) jammy; urgency=medium
 
   * Steer/follow-up messages no longer vanish on a degraded host connection
