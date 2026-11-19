@@ -259,7 +259,8 @@ export function NavigationProvider({ children }: { children: React.ReactNode }):
     getSession: async (machineId: string, sessionId: string): Promise<SessionInfo | null> => {
       let res: Response;
       try {
-        res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sessionId)}`, machineId), { cache: "no-store" });
+        // Navigation consumes only info; never pull full transcript bodies.
+        res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sessionId)}?tail=1&deferThinking=1&deferMedia=1`, machineId), { cache: "no-store" });
       } catch {
         throw new NavOfflineError(`Machine unreachable: ${machineId}`);
       }

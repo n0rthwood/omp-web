@@ -360,6 +360,18 @@ async function main(): Promise<void> {
       onFrame: (frame) => compat.handleInboundFrame(frame),
       onOutboundFrame: (frame) => compat.handleOutboundFrame(frame),
       onAttach: () => compat.emitSessionInfo(),
+      onJournalAttach: () => {
+        // #88 on the #99 journal-mode attach: ring replay no longer carries
+        // host_prompt_identity, so re-emit identities of prompts still in
+        // flight BEFORE capturing the boundary — they land inside the
+        // handshake (seq ≤ boundary.seq), and a reattached wrapper settles
+        // the original draft when the prompt_result lands. Legacy attach
+        // replays them from the ring, so it needs no re-emission.
+        for (const identity of compat.pendingPromptIdentities()) {
+          transport.emitHostFrame({ type: "host_prompt_identity", ...identity });
+        }
+        return compat.captureHistoryBoundary();
+      },
       onActivity: () => reaper.reset(),
       onInboundActivity: () => reaper.reset(),
     });

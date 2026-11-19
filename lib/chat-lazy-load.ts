@@ -1,17 +1,7 @@
-export const VISIBLE_PAGE_SIZE = 50;
-
-export function getVisibleRenderWindow(totalCount: number, visibleCount: number): {
-  startIndex: number;
-  hasMore: boolean;
-} {
-  const clampedVisibleCount = Math.min(Math.max(visibleCount, 0), Math.max(totalCount, 0));
-  const startIndex = Math.max(0, totalCount - clampedVisibleCount);
-  return { startIndex, hasMore: startIndex > 0 };
-}
-
-export function getNextVisibleCount(currentVisibleCount: number, pageSize = VISIBLE_PAGE_SIZE): number {
-  return currentVisibleCount + pageSize;
-}
+// Scroll-position preservation for prepended history pages (#99). The old
+// 50-message render window / IntersectionObserver auto-load is gone: history
+// pages in through an explicit button over the journal routes, and these two
+// helpers keep the viewport stable when a page lands above it.
 
 export function captureScrollDistance(scrollHeight: number, scrollTop: number): number {
   return scrollHeight - scrollTop;

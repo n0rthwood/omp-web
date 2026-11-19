@@ -15,8 +15,10 @@ export async function GET(
     // re-attached here; getRpcSession alone misses it (registry is per-process).
     const rpc = getRpcSession(id) ?? await attachLiveHostIfExists(id);
     if (rpc?.isAlive()) {
-      const state = await rpc.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      // #99: the snapshot's END seq lets the browser order activePartial
+      // against its SSE history boundary (partial.hostSeq ≤ this hostSeq).
+      const { state, hostSeq } = await rpc.getStateSnapshot();
+      return NextResponse.json({ running: true, state, hostSeq });
     }
 
     if (!await resolveSessionPath(id)) {

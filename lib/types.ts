@@ -1,3 +1,7 @@
+import type { ContextUsage } from "./omp-types";
+import type { WebPlanModeInfo } from "./plan-mode-web";
+import type { HistoryPage } from "./session-history";
+
 // Types mirrored from pi-mono coding-agent session-manager
 
 export interface SessionHeader {
@@ -7,6 +11,8 @@ export interface SessionHeader {
   timestamp: string;
   cwd: string;
   parentSession?: string;
+  /** Session title (SDK persists it in the header / fixed title slot). */
+  title?: string;
 }
 
 export interface SessionEntryBase {
@@ -387,6 +393,12 @@ export interface SessionInfoEntry extends SessionEntryBase {
   name?: string;
 }
 
+export interface ModeChangeEntry extends SessionEntryBase {
+  type: "mode_change";
+  mode: string;
+  data?: Record<string, unknown>;
+}
+
 export type SessionEntry =
   | SessionMessageEntry
   | ThinkingLevelChangeEntry
@@ -396,7 +408,8 @@ export type SessionEntry =
   | CustomEntry
   | CustomMessageEntry
   | LabelEntry
-  | SessionInfoEntry;
+  | SessionInfoEntry
+  | ModeChangeEntry;
 
 export type FileEntry = SessionHeader | SessionEntry;
 
@@ -448,4 +461,23 @@ export interface SessionContext {
   entryIds: string[]; // parallel to messages — the session entry id for each message
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
+}
+
+/**
+ * Session detail GET payload (#99). `historyPage` is present ONLY on the
+ * bounded tail/anchor path (`?tail=N[&anchor=...]`): the context then holds
+ * just that window of durable messages, and earlier history pages in through
+ * the context route's before/after paging. Legacy full-history responses
+ * (export, explicit full loads) omit it.
+ */
+export interface SessionDetailData {
+  sessionId: string;
+  filePath: string;
+  totalActiveMs: number;
+  tree: SessionTreeNode[];
+  leafId: string | null;
+  contextUsage?: ContextUsage;
+  planMode?: WebPlanModeInfo;
+  context: SessionContext;
+  historyPage?: HistoryPage;
 }

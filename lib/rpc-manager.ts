@@ -42,6 +42,7 @@ import {
   type HostSessionInfoFrame,
   type HostStartOptions,
 } from "./session-host-protocol";
+import { boundActivePartial, isHostHistoryBoundary, type HostHistoryBoundary } from "./session-host-protocol";
 import type { SessionInfo, SubagentSnapshot } from "./types";
 
 // ============================================================================
@@ -50,6 +51,8 @@ import type { SessionInfo, SubagentSnapshot } from "./types";
 
 export interface AgentEvent {
   type: string;
+  /** Logical frame END seq on the host ring (#99); journal/live splice key. */
+  hostSeq?: number;
   [key: string]: unknown;
 }
 
@@ -63,7 +66,8 @@ type PromptTracker = {
 
 type PendingCommand = {
   command: string;
-  resolve: (data: unknown) => void;
+  /** hostSeq = the response frame's END seq (#99); callers splice on it. */
+  resolve: (data: unknown, hostSeq: number) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
 };
@@ -137,6 +141,9 @@ export class AgentSessionWrapper {
   /** command id → client draft identity, from the host_prompt_identity frame. */
   private promptIdentities = new Map<string, { promptId: string; streamingBehavior?: string }>();
   private streaming = false;
+  /** Latest in-flight assistant partial (#99): freshest bounded snapshot for
+   *  mid-turn subscribers; cleared when the message settles. */
+  private activePartial: { message: unknown; messageId?: string; hostSeq: number } | undefined;
   private compacting = false;
   private bashRunning = false;
   private readonly subagentHistory = new Map<string, SubagentSnapshot>();
@@ -154,6 +161,8 @@ export class AgentSessionWrapper {
   // until the host_attach ack makes lastSeenSeq authoritative.
   private attached = false;
   private readonly seenFrameEnds = new Set<number>();
+  /** Boundary from a journal-mode attach ack (#99); undefined on legacy attach. */
+  private historyBoundaryValue: HostHistoryBoundary | undefined;
   private decoder = new RpcFrameDecoder();
   private decodeErrorLoggedAt = 0;
   private lineBuffer = Buffer.alloc(0);
@@ -221,6 +230,29 @@ export class AgentSessionWrapper {
     return this.lastSeenSeq;
   }
 
+  /**
+   * Boundary captured at a journal-mode attach (#99). Long-lived wrappers
+   * keep serving many browser opens: their ORIGINAL anchor goes stale, so
+   * each subscription must request a FRESH one via captureHistoryBoundary().
+   */
+  get historyBoundary(): HostHistoryBoundary | undefined {
+    return this.historyBoundaryValue;
+  }
+
+  /**
+   * Fresh atomic journal/live boundary for ONE browser subscription (#99).
+   * Host-owned control: durable flush + seq snapshot in one synchronous host
+   * callback; never a historical dump. Callers subscribe their event listener
+   * BEFORE awaiting this, then deliver only frames with hostSeq > boundary.seq.
+   */
+  async captureHistoryBoundary(): Promise<HostHistoryBoundary> {
+    const data = await this.send({ type: "get_history_anchor" });
+    if (!isHostHistoryBoundary(data)) {
+      throw new Error("Host returned an invalid history boundary");
+    }
+    return data;
+  }
+
   isAlive(): boolean {
     return this._alive;
   }
@@ -249,12 +281,26 @@ export class AgentSessionWrapper {
     };
   }
 
+  /**
+   * Current-state snapshot of outstanding blocking extension UI dialogs
+   * (#99). Explicit bounded STATE for a fresh subscriber — delivered after
+   * its history boundary, never as replayed historical events with a fake
+   * seq. The onEvent replay stays for legacy in-process consumers.
+   */
+  pendingExtensionUiRequests(): AgentEvent[] {
+    return [...this.pendingUiRequests.values()];
+  }
+
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
   }
 
-  private emit(event: AgentEvent): void {
-    for (const l of this.listeners) l(event);
+  private emit(event: AgentEvent, hostSeq?: number): void {
+    // Every emitted event carries a hostSeq (#99): the frame's END seq when
+    // known, else the wrapper's current ring position — synthesized events
+    // (prompt settlement, UI replays) are "now", never pre-boundary history.
+    const stamped = { ...event, hostSeq: hostSeq ?? this.lastSeenSeq };
+    for (const l of this.listeners) l(stamped);
   }
 
   // --------------------------------------------------------------------------
@@ -322,6 +368,11 @@ export class AgentSessionWrapper {
       // host_attach.seq is the authoritative ring position — never byte-sum
       // client-side (duplicate ready + live/replay copies make that unreliable).
       if ("seq" in parsed && typeof parsed.seq === "number") this.lastSeenSeq = parsed.seq;
+      // Journal-mode attach ack (#99): the boundary was captured atomically
+      // host-side; no historical replay preceded it.
+      if ("boundary" in parsed && isHostHistoryBoundary(parsed.boundary)) {
+        this.historyBoundaryValue = parsed.boundary;
+      }
       this.attached = true;
       this.seenFrameEnds.clear();
       return;
@@ -360,12 +411,12 @@ export class AgentSessionWrapper {
     const frame = decoded as AgentEvent;
     if (frame.type === "response" && typeof frame.id === "string" && this.pendingCommands.has(frame.id)) {
       // Wrapper-owned command response: resolve here, never forward (§3a).
-      this.handleResponseFrame(frame);
+      this.handleResponseFrame(frame, frameEnd);
       return;
     }
     if (frame.type === "extension_ui_request") {
       // Browser machinery owns these; the client has no UI handling (§3b).
-      this.handleExtensionUiRequest(frame);
+      this.handleExtensionUiRequest(frame, frameEnd);
       return;
     }
     if (frame.type === "ready") {
@@ -375,42 +426,60 @@ export class AgentSessionWrapper {
       this.sawReady = true;
     }
     this.connection.feedStdout(Buffer.from(`${JSON.stringify(frame)}\n`, "utf8"));
-    this.handleFrame(frame);
+    this.handleFrame(frame, frameEnd);
   }
 
-  private handleFrame(frame: AgentEvent): void {
+  private handleFrame(frame: AgentEvent, frameEnd: number): void {
     const type = frame.type;
     if (type === "response") {
-      this.handleResponseFrame(frame);
+      this.handleResponseFrame(frame, frameEnd);
       return;
     }
     if (type === "extension_ui_request") {
-      this.handleExtensionUiRequest(frame);
+      this.handleExtensionUiRequest(frame, frameEnd);
       return;
     }
     if (type === "prompt_result") {
-      this.handlePromptResult(frame);
+      this.handlePromptResult(frame, frameEnd);
       // fall through: also emit to listeners
+    }
+    // #99 active partial: keep the freshest assistant snapshot for mid-turn
+    // subscribers; the message settles into the journal at message_end.
+    if (type === "message_start" || type === "message_update" || type === "message_end") {
+      const message = frame.message;
+      if (type === "message_end") {
+        this.activePartial = undefined;
+      } else if (typeof message === "object" && message !== null && "role" in message && message.role === "assistant") {
+        this.activePartial = {
+          message,
+          ...(typeof frame.messageId === "string" ? { messageId: frame.messageId } : {}),
+          hostSeq: frameEnd,
+        };
+      }
     }
     if (type === "agent_start") this.streaming = true;
     if (type === "agent_end") {
       this.streaming = false;
+      this.activePartial = undefined;
       invalidateSessionListCache();
     }
-    if (type === "agent_settled" || type === "session_settled") this.streaming = false;
+    if (type === "agent_settled" || type === "session_settled") {
+      this.streaming = false;
+      this.activePartial = undefined;
+    }
     if (type === "compaction_start" || type === "auto_compaction_start") this.compacting = true;
     if (type === "compaction_end" || type === "auto_compaction_end") this.compacting = false;
     // bash has no lifecycle events on the wire; send() flips the mirror at
     // admission and the response handler clears it (host guards admission).
     if (type === "session_renamed" || type === "session_info_update") invalidateSessionListCache();
     if (type === "subagent_lifecycle" || type === "subagent_progress") this.rememberSubagentFrame(frame);
-    this.emit(frame);
+    this.emit(frame, frameEnd);
     if (RUNNING_STATE_EVENT_TYPES[type] || type === "subagent_lifecycle" || type === "prompt_result") {
       notifyRunningChange();
     }
   }
 
-  private handleResponseFrame(frame: AgentEvent): void {
+  private handleResponseFrame(frame: AgentEvent, frameEnd: number): void {
     const id = typeof frame.id === "string" ? frame.id : undefined;
     const pending = id ? this.pendingCommands.get(id) : undefined;
     if (!pending || !id) return; // negotiation / client-owned responses pass through
@@ -438,10 +507,10 @@ export class AgentSessionWrapper {
         // prompt_result (or this ack) settles it exactly once.
         const ack = data;
         if (typeof ack === "object" && ack !== null && "agentInvoked" in ack && ack.agentInvoked === false) {
-          this.settlePromptById(id, undefined);
+          this.settlePromptById(id, undefined, frameEnd);
         }
       }
-      pending.resolve(data);
+      pending.resolve(data, frameEnd);
     } else {
       const message = typeof frame.error === "string" ? frame.error : `Command failed: ${command}`;
       if (command === "bash" || command === "abort_bash") this.bashRunning = false;
@@ -458,11 +527,21 @@ export class AgentSessionWrapper {
    */
   private overlayState(data: unknown): unknown {
     if (typeof data !== "object" || data === null) return data;
-    return {
+    const overlay: Record<string, unknown> = {
       ...data,
       isPromptRunning: this.promptRunning,
       subagents: this.getSubagentSnapshots(),
     };
+    // #99: the wrapper decodes EVERY frame (the host tap skips large ones), so
+    // its partial snapshot is the freshest; fall back to the host's bounded
+    // message_start snapshot only when this wrapper has seen nothing yet.
+    if (this.activePartial) {
+      overlay.activePartial = {
+        ...boundActivePartial(this.activePartial.message, this.activePartial.messageId),
+        hostSeq: this.activePartial.hostSeq,
+      };
+    }
+    return overlay;
   }
 
   private refreshStateMirrors(data: unknown): void {
@@ -473,7 +552,7 @@ export class AgentSessionWrapper {
     if (typeof state.isBashRunning === "boolean") this.bashRunning = state.isBashRunning;
   }
 
-  private handlePromptResult(frame: AgentEvent): void {
+  private handlePromptResult(frame: AgentEvent, frameEnd: number): void {
     const id = typeof frame.id === "string" ? frame.id : undefined;
     if (!id) return;
     const status = frame.status;
@@ -482,18 +561,18 @@ export class AgentSessionWrapper {
       const message = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
         ? error.message
         : "Prompt failed";
-      this.settlePromptById(id, message);
+      this.settlePromptById(id, message, frameEnd);
     } else {
-      this.settlePromptById(id, undefined);
+      this.settlePromptById(id, undefined, frameEnd);
     }
   }
 
-  private settlePromptById(id: string, errorMessage: string | undefined): void {
+  private settlePromptById(id: string, errorMessage: string | undefined, hostSeq?: number): void {
     const tracker = this.promptTrackers.get(id);
     if (tracker) {
       this.promptTrackers.delete(id);
       this.promptIdentities.delete(id);
-      this.settlePrompt(tracker, errorMessage);
+      this.settlePrompt(tracker, errorMessage, hostSeq);
       return;
     }
     // Tracker miss: a prompt admitted by a PREVIOUS web process settles here
@@ -507,19 +586,19 @@ export class AgentSessionWrapper {
     const streamingBehavior = identity.streamingBehavior === "steer" || identity.streamingBehavior === "followUp"
       ? identity.streamingBehavior
       : undefined;
-    this.settlePrompt({ promptEvent: { promptId: identity.promptId, ...(streamingBehavior ? { streamingBehavior } : {}) }, streamingBehavior, settled: false }, errorMessage);
+    this.settlePrompt({ promptEvent: { promptId: identity.promptId, ...(streamingBehavior ? { streamingBehavior } : {}) }, streamingBehavior, settled: false }, errorMessage, hostSeq);
   }
 
-  private settlePrompt(tracker: PromptTracker, errorMessage: string | undefined): void {
+  private settlePrompt(tracker: PromptTracker, errorMessage: string | undefined, hostSeq?: number): void {
     if (tracker.settled) return;
     tracker.settled = true;
     this.promptRunning = false;
     if (errorMessage !== undefined) {
       invalidateSessionListCache();
-      this.emit({ type: "prompt_error", errorMessage, ...tracker.promptEvent });
-      if (!tracker.streamingBehavior) this.emit({ type: "prompt_done", ...tracker.promptEvent });
+      this.emit({ type: "prompt_error", errorMessage, ...tracker.promptEvent }, hostSeq);
+      if (!tracker.streamingBehavior) this.emit({ type: "prompt_done", ...tracker.promptEvent }, hostSeq);
     } else {
-      this.emit({ type: "prompt_done", ...tracker.promptEvent });
+      this.emit({ type: "prompt_done", ...tracker.promptEvent }, hostSeq);
     }
     notifyRunningChange();
   }
@@ -528,7 +607,7 @@ export class AgentSessionWrapper {
   // Extension UI: the host owns the promises; the wrapper owns browser frames.
   // --------------------------------------------------------------------------
 
-  private handleExtensionUiRequest(frame: AgentEvent): void {
+  private handleExtensionUiRequest(frame: AgentEvent, frameEnd: number): void {
     const method = frame.method;
     if (method === "cancel") {
       // Host-side timeout/abort: settle the original request's default on the
@@ -541,7 +620,7 @@ export class AgentSessionWrapper {
     if (!id) return;
     const normalized = this.normalizeUiRequest(frame);
     this.pendingUiRequests.set(id, normalized);
-    this.emit(normalized);
+    this.emit(normalized, frameEnd);
   }
 
   private normalizeUiRequest(frame: AgentEvent): AgentEvent {
@@ -731,9 +810,14 @@ export class AgentSessionWrapper {
     this.connection.process.stdin.write(`${JSON.stringify(frame)}\n`);
   }
 
-  private registerPending(id: string, command: string): Promise<unknown> {
-    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-    const entry: PendingCommand = { command, resolve, reject };
+  /** Send a command and resolve with its response frame's END seq (#99). */
+  private sendWithSeq(id: string, command: string): Promise<{ data: unknown; hostSeq: number }> {
+    const { promise, resolve, reject } = Promise.withResolvers<{ data: unknown; hostSeq: number }>();
+    const entry: PendingCommand = {
+      command,
+      resolve: (data, hostSeq) => resolve({ data, hostSeq }),
+      reject,
+    };
     const timeoutMs = pendingTimeoutMs(command);
     if (timeoutMs !== undefined) {
       entry.timer = setTimeout(() => {
@@ -753,6 +837,27 @@ export class AgentSessionWrapper {
     return promise;
   }
 
+  private registerPending(id: string, command: string): Promise<unknown> {
+    return this.sendWithSeq(id, command).then(({ data }) => data);
+  }
+
+  /**
+   * get_state whose snapshot is spliced at the response frame's END seq (#99):
+   * activePartial.hostSeq ≤ hostSeq, and the journal/live boundary for a
+   * mid-turn browser open must not precede the snapshot it is paired with.
+   */
+  async getStateSnapshot(): Promise<{ state: unknown; hostSeq: number }> {
+    // Same fail-fast as send() (#97): never write into a closed connection.
+    if (!this._alive || this.connection.isClosed) {
+      this.destroy();
+      throw new Error("Session closed");
+    }
+    const id = `web-${++this.requestId}`;
+    this.writeFrame({ id, type: "get_state" });
+    const { data, hostSeq } = await this.sendWithSeq(id, "get_state");
+    return { state: data, hostSeq };
+  }
+
   /** Detach-only: the host survives web disconnects (contract §3). */
   destroy(): void {
     if (!this._alive) return;
@@ -761,6 +866,7 @@ export class AgentSessionWrapper {
       clearTimeout(pending.timer);
       pending.reject(new Error("Session closed"));
     }
+    this.activePartial = undefined;
     this.pendingCommands.clear();
     this.promptTrackers.clear();
     this.promptIdentities.clear();
@@ -1238,7 +1344,10 @@ export async function startRpcSession(
         },
         {
           attach: () => {
-            attached.process.stdin.write(`${JSON.stringify({ type: "host_attach", lastSeenSeq: active.attachSeq })}\n`);
+            // Fresh wrapper = fresh browser-facing conversation view (#99):
+            // journal-mode attach, NEVER historical ring replay. The host
+            // answers with an atomic boundary; history comes from the journal.
+            attached.process.stdin.write(`${JSON.stringify({ type: "host_attach", lastSeenSeq: -1, historyMode: "journal" })}\n`);
           },
           terminate,
           hostKey: hostKey ?? sessionId,

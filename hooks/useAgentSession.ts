@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
   BlockingExtensionUiRequest,
@@ -22,6 +22,22 @@ import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { ContextUsage, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
 import { planModeTransitionErrorMessage, planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
+import { captureScrollDistance, restoreScrollTop } from "@/lib/chat-lazy-load";
+import { useWebUser } from "@/hooks/useWebUser";
+import type { HistoryBoundary, HistoryPage, JournalAnchor } from "@/lib/session-history";
+import {
+  EARLIER_PAGE_SIZE,
+  INITIAL_HISTORY_WINDOW,
+  clearHistoryCache,
+  decideWindowRefresh,
+  mergeDurableWindow,
+  readHistoryCache,
+  reconcileLiveSuffix,
+  sameAnchor,
+  upsertCompletedMessage,
+  writeHistoryCache,
+  type HistoryWindowSnapshot,
+} from "@/lib/history-window";
 
 export interface SessionData {
   sessionId: string;
@@ -37,6 +53,10 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
   };
+  /** Present on the bounded tail path (#99): position of the loaded window. */
+  historyPage?: HistoryPage;
+  /** Fresh atomic splice point when the tail route captured one for us. */
+  historyBoundary?: HistoryBoundary;
 }
 
 interface StreamingState {
@@ -91,6 +111,8 @@ type AgentStateResponse = {
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
   subagents?: SubagentSnapshot[];
   planMode?: WebPlanModeInfo | null;
+  /** Mid-turn accumulated snapshot of the in-flight assistant message (#99). */
+  activePartial?: { message: Partial<AgentMessage>; messageId?: string; hostSeq: number; truncated?: boolean } | null;
 };
 
 export interface QueuedMessages {
@@ -188,6 +210,10 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
 const CONTEXT_USAGE_REFRESH_MS = 1000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
+// Pre-boundary SSE frames buffer until the journal window installs. The
+// buffer is bounded; on overflow the connection is torn down and re-spliced
+// (the journal holds every durable entry — nothing is silently dropped).
+const MAX_LIVE_EVENT_BUFFER = 2000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
@@ -198,6 +224,8 @@ type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 type EventStreamConnectionResult = {
   status: EventStreamConnectionStatus;
   source: EventSource;
+  /** Atomic journal/live splice point carried by the connected frame (#99). */
+  historyBoundary: HistoryBoundary | null;
 };
 
 type EventStreamConnectionAttempt = {
@@ -386,15 +414,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
+  const { user: webUser } = useWebUser();
+
+  const initialHistoryRef = useRef<{ sessionId: string | null; user: string | null; snapshot: HistoryWindowSnapshot | null }>({ sessionId: null, user: null, snapshot: null });
+  // #99: a cached journal window renders synchronously on a warm refresh —
+  // the initial view is always the most recent INITIAL_HISTORY_WINDOW durable
+  // messages even when older pages are cached (those serve later clicks).
+  // Scope is machine/user/session; the anchor inside versions it. The lookup
+  // re-runs when the web user resolves (anonymous → named) so a named user's
+  // cache is never missed and another user's window never leaks across.
+  const webUsername = webUser?.username ?? null;
+  if (initialHistoryRef.current.sessionId !== (session?.id ?? null) || initialHistoryRef.current.user !== webUsername) {
+    initialHistoryRef.current = {
+      sessionId: session?.id ?? null,
+      user: webUsername,
+      snapshot: session
+        ? readHistoryCache(typeof localStorage === "undefined" ? null : localStorage, webUsername, session.id)
+        : null,
+    };
+  }
+  const cachedWindow = initialHistoryRef.current.snapshot;
+  const cachedTail = cachedWindow
+    ? {
+        messages: cachedWindow.messages.slice(-INITIAL_HISTORY_WINDOW),
+        entryIds: cachedWindow.entryIds.slice(-INITIAL_HISTORY_WINDOW),
+      }
+    : null;
+  // The button must appear whenever durable entries precede the shown tail —
+  // including a warm mount whose cache holds only the tail itself.
+  const cachedHasEarlier = cachedWindow
+    ? cachedWindow.hasEarlier || cachedWindow.anchor.entryCount > (cachedTail?.entryIds.length ?? 0)
+    : false;
 
   const [data, setData] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(!isNew);
+  const [loading, setLoading] = useState(!isNew && !cachedTail);
   const [error, setError] = useState<string | null>(null);
   // Non-blocking background-refresh failure indicator (#100).
   const [refreshError, setRefreshError] = useState<RefreshErrorState | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [entryIds, setEntryIds] = useState<string[]>([]);
+  const [messages, setMessages] = useState<AgentMessage[]>(cachedTail?.messages ?? []);
+  const [entryIds, setEntryIds] = useState<string[]>(cachedTail?.entryIds ?? []);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
@@ -432,6 +491,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const [subagents, setSubagents] = useState<SubagentSnapshot[]>([]);
   const [planMode, setPlanMode] = useState<WebPlanModeInfo | null>(null);
+  const [historyHasEarlier, setHistoryHasEarlier] = useState(cachedHasEarlier);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventSourceSessionIdRef = useRef<string | null>(null);
   const eventConnectionAttemptRef = useRef<EventStreamConnectionAttempt | null>(null);
@@ -439,6 +500,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventStreamGraceGenerationRef = useRef(0);
   const eventStreamGraceActiveRef = useRef(false);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  // Journal window bookkeeping (#99). windowRef is the durable slice on
+  // screen (cached pages included); everything past it is the live tail.
+  const windowRef = useRef<HistoryWindowSnapshot | null>(cachedTail && cachedWindow
+    ? {
+        ...cachedWindow,
+        messages: cachedTail.messages,
+        entryIds: cachedTail.entryIds,
+        hasEarlier: cachedHasEarlier,
+        // The shown tail's head, not the full cache's — "Load earlier" pages
+        // from exactly what is on screen.
+        headEntryId: cachedTail.entryIds[0] ?? cachedWindow.headEntryId,
+      }
+    : null);
+  // Tracks whether the on-screen window came from the bootstrap cache (and
+  // under which user) vs a network install — lets a late-resolving web user
+  // swap an anonymous cache hit for their own, never over server content.
+  const cacheBootedUserRef = useRef<string | null>(cachedTail ? webUsername : null);
+  const historyBoundaryRef = useRef<HistoryBoundary | null>(null);
+  const liveEventBufferRef = useRef<AgentEvent[] | null>(null);
+  const historyLoadGenRef = useRef(0);
+  const webUsernameRef = useRef<string | null>(null);
+  webUsernameRef.current = webUsername;
   const agentRunningRef = useRef(false);
   const sdkAgentActiveRef = useRef(false);
   const rpcPromptPendingRef = useRef(false);
@@ -478,6 +561,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const hasRenderedContentRef = useRef(false);
   const refreshErrorRef = useRef<RefreshErrorState | null>(null);
   hasRenderedContentRef.current = data !== null || messages.length > 0 || streamState.isStreaming || agentRunning || bashRunning;
+  // Synchronous mirror of the rendered list for the prepend handler (#99).
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -526,17 +612,81 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, data?.totalActiveMs, session?.id, session?.name]);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+  const persistWindowCache = useCallback((sid: string) => {
+    const windowState = windowRef.current;
+    if (!windowState) return;
+    writeHistoryCache(
+      typeof localStorage === "undefined" ? null : localStorage,
+      webUsernameRef.current,
+      sid,
+      windowState,
+    );
+  }, []);
+
+  const installDurableWindow = useCallback((sid: string, snapshot: HistoryWindowSnapshot) => {
+    windowRef.current = snapshot;
+    cacheBootedUserRef.current = null;
+    setMessages(snapshot.messages);
+    setEntryIds(snapshot.entryIds);
+    setHistoryHasEarlier(snapshot.hasEarlier);
+    persistWindowCache(sid);
+  }, [persistWindowCache]);
+
+  // The web user may resolve AFTER mount (anonymous first render). When the
+  // scope changes, adopt that user's cached window if nothing has loaded yet
+  // — never over server-fetched content, never across users mid-view.
+  const hydratedUserRef = useRef<string | null>(webUsername);
+  useEffect(() => {
+    if (hydratedUserRef.current === webUsername) return;
+    hydratedUserRef.current = webUsername;
+    const sid = sessionIdRef.current;
+    if (!sid || data !== null) return;
+    // A network window already landed, or the cache belongs to this same user:
+    // nothing to swap. Only a cache-derived window from a DIFFERENT (anonymous)
+    // scope may be replaced when the real user resolves.
+    if (windowRef.current !== null && cacheBootedUserRef.current === webUsername) return;
+    const snapshot = readHistoryCache(typeof localStorage === "undefined" ? null : localStorage, webUsername, sid);
+    if (!snapshot) return;
+    const tailMessages = snapshot.messages.slice(-INITIAL_HISTORY_WINDOW);
+    const tailIds = snapshot.entryIds.slice(-INITIAL_HISTORY_WINDOW);
+    const hasEarlier = snapshot.hasEarlier || snapshot.anchor.entryCount > tailIds.length;
+    windowRef.current = { ...snapshot, messages: tailMessages, entryIds: tailIds, hasEarlier, headEntryId: tailIds[0] ?? snapshot.headEntryId };
+    cacheBootedUserRef.current = webUsername;
+    setMessages(tailMessages);
+    setEntryIds(tailIds);
+    setHistoryHasEarlier(hasEarlier);
+    setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [webUsername]);
+
+  // Bounded journal refresh (#99): always `tail=5`, never a full-history GET.
+  // `boundaryAnchor` is the FRESH atomic splice anchor from the connected SSE
+  // frame — passed to bound the initial read. Background refreshes pass none:
+  // the server captures a fresh boundary (live) or derives the file anchor
+  // (dead), and reuse/delta/replace is decided against the window on screen.
+  const loadSession = useCallback(async (
+    sid: string,
+    showLoading = false,
+    includeState = false,
+    boundaryAnchor: JournalAnchor | null = null,
+    allowRetry = true,
+  ) => {
+    const generation = historyLoadGenRef.current;
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tail: String(INITIAL_HISTORY_WINDOW) });
+      if (boundaryAnchor) params.set("anchor", JSON.stringify(boundaryAnchor));
       const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}?${params}`));
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
           setActiveLeafId(null);
           setMessages([]);
+          setEntryIds([]);
+          setHistoryHasEarlier(false);
+          windowRef.current = null;
+          clearHistoryCache(typeof localStorage === "undefined" ? null : localStorage, webUsernameRef.current, sid);
           setError(null);
           refreshErrorRef.current = null;
           setRefreshError(null);
@@ -548,19 +698,109 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
+      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return null;
       setData(d);
       setContextUsage(d.contextUsage ?? null);
       setPlanMode(d.planMode ?? null);
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
-      setPlanMode(d.planMode ?? null);
+      setActiveLeafId(d.leafId ?? null);
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
       refreshErrorRef.current = null;
       setRefreshError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
         setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
+      }
+
+      const page = d.historyPage;
+      const base = windowRef.current;
+      const decision = decideWindowRefresh(base?.anchor ?? null, base?.entryIds.length ?? 0, page);
+      if (decision === "reuse" && base) {
+        setHistoryHasEarlier(base.hasEarlier);
+      } else if (decision === "delta" && base && page) {
+        // Warm refresh: fetch EVERY entry appended past the cached window in
+        // bounded pages (limit 100), walking the after-cursor — never advance
+        // the anchor past unfetched messages.
+        const deltaMessages: AgentMessage[] = [];
+        const deltaEntryIds: string[] = [];
+        let afterCursor = base.anchor.lastEntryId;
+        const deltaAnchor = page.anchor;
+        for (;;) {
+          const deltaParams = new URLSearchParams({ deferThinking: "1", deferMedia: "1", limit: "100" });
+          if (afterCursor) deltaParams.set("after", afterCursor);
+          deltaParams.set("anchor", JSON.stringify(deltaAnchor));
+          const deltaRes = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${deltaParams}`));
+          if (!deltaRes.ok) throw new Error(`HTTP ${deltaRes.status}`);
+          const delta = await deltaRes.json() as {
+            context: { messages: AgentMessage[]; entryIds: string[] };
+            historyPage: HistoryPage;
+          };
+          if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return null;
+          if (!delta.historyPage || !sameAnchor(delta.historyPage.anchor, deltaAnchor)) {
+            // The journal moved under the walk (rewrite/branch): start over
+            // with a fresh bounded tail — at most once, so a persistently
+            // rewriting journal cannot livelock into unbounded re-entry.
+            if (!allowRetry) throw new Error("Session journal changed during history refresh");
+            windowRef.current = null;
+            return loadSession(sid, showLoading, includeState, null, false);
+          }
+          const batchMessages = delta.context.messages;
+          const batchIds = delta.context.entryIds ?? [];
+          if (batchMessages.length !== batchIds.length) {
+            // Malformed delta (ids not parallel): replace rather than advance
+            // the anchor past unfetched/misaligned messages.
+            if (!allowRetry) throw new Error("Malformed history delta during refresh");
+            windowRef.current = null;
+            return loadSession(sid, showLoading, includeState, null, false);
+          }
+          deltaMessages.push(...batchMessages);
+          deltaEntryIds.push(...batchIds);
+          if (batchMessages.length < 100 || batchIds.length === 0) break;
+          afterCursor = batchIds[batchIds.length - 1];
+        }
+        const merged = mergeDurableWindow(base.messages, base.entryIds, deltaMessages, deltaEntryIds);
+        if (!merged) {
+          if (!allowRetry) throw new Error("Malformed history delta during refresh");
+          windowRef.current = null;
+          return loadSession(sid, showLoading, includeState, null, false);
+        }
+        // Messages that just became durable leave the live tail (no
+        // duplicates); identical older messages survive untouched.
+        setMessages((prev) => [
+          ...merged.messages,
+          ...reconcileLiveSuffix(prev.slice(base.messages.length), deltaMessages),
+        ]);
+        setEntryIds(merged.entryIds);
+        setHistoryHasEarlier(base.hasEarlier);
+        windowRef.current = {
+          messages: merged.messages,
+          entryIds: merged.entryIds,
+          anchor: deltaAnchor,
+          hasEarlier: base.hasEarlier,
+          headEntryId: base.headEntryId,
+          leafId: deltaAnchor.leafId,
+        };
+        persistWindowCache(sid);
+      } else if (page) {
+        // Replace (cold/rewrite/branch): keep the streamed-but-not-yet-durable
+        // live tail so a mid-turn refresh never drops in-flight messages.
+        const liveSuffix = base ? messagesRef.current.slice(base.messages.length) : [];
+        installDurableWindow(sid, {
+          messages: d.context.messages,
+          entryIds: d.context.entryIds ?? [],
+          anchor: page.anchor,
+          hasEarlier: page.hasEarlier,
+          headEntryId: page.headEntryId,
+          leafId: page.anchor.leafId,
+        });
+        if (liveSuffix.length > 0) {
+          const kept = reconcileLiveSuffix(liveSuffix, d.context.messages);
+          if (kept.length > 0) setMessages((prev) => [...prev, ...kept]);
+        }
+      } else {
+        // No historyPage: the remote predates journal pagination. Rendering
+        // its full context would violate the bounded window — keep the
+        // current view and surface an explicit error instead.
+        throw new Error("Session history pagination is not supported by this machine's omp-web version");
       }
 
       messagesLoaded = true;
@@ -611,11 +851,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, []);
+  }, [installDurableWindow, persistWindowCache]);
 
+  // Branch navigation: bounded tail of the selected leaf (never full history).
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
+    const generation = historyLoadGenRef.current;
     try {
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tail: String(INITIAL_HISTORY_WINDOW) });
       if (leafId) params.set("leafId", leafId);
       const url = apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`);
       const res = await fetch(url);
@@ -623,14 +865,96 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as {
         context: { messages: AgentMessage[]; entryIds: string[] };
         contextUsage?: ContextUsage;
+        historyPage?: HistoryPage;
       };
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
+      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return;
+      refreshErrorRef.current = null;
+      setRefreshError(null);
       setContextUsage(d.contextUsage ?? null);
+      if (d.historyPage) {
+        installDurableWindow(sid, {
+          messages: d.context.messages,
+          entryIds: d.context.entryIds ?? [],
+          anchor: d.historyPage.anchor,
+          hasEarlier: d.historyPage.hasEarlier,
+          headEntryId: d.historyPage.headEntryId,
+          leafId: leafId ?? d.historyPage.anchor.leafId,
+        });
+      } else {
+        setMessages(d.context.messages);
+        setEntryIds(d.context.entryIds ?? []);
+      }
     } catch (e) {
       console.error("Failed to load context:", e);
     }
-  }, []);
+  }, [installDurableWindow]);
+
+  // Explicit "Load earlier" click: one page of EARLIER_PAGE_SIZE messages
+  // prepended before the window head. No scroll-triggered loading (#99).
+  const loadEarlierHistory = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    const base = windowRef.current;
+    if (!sid || !base || !base.hasEarlier || !base.headEntryId || historyLoading) return;
+    const generation = historyLoadGenRef.current;
+    setHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({
+        deferThinking: "1",
+        deferMedia: "1",
+        before: base.headEntryId,
+        limit: String(EARLIER_PAGE_SIZE),
+        anchor: JSON.stringify(base.anchor),
+      });
+      const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as {
+        context: { messages: AgentMessage[]; entryIds: string[] };
+        historyPage: HistoryPage;
+      };
+      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return;
+      const current = windowRef.current;
+      if (!current) return;
+      // The journal may have been rewritten/branched since the click: the
+      // page anchor no longer matches the window — drop it and reload the tail.
+      if (!sameAnchor(d.historyPage.anchor, current.anchor)) {
+        void loadSession(sid);
+        return;
+      }
+      const pageMessages = d.context.messages;
+      const pageEntryIds = d.context.entryIds ?? [];
+      if (pageMessages.length === 0) {
+        windowRef.current = { ...current, hasEarlier: false };
+        setHistoryHasEarlier(false);
+        return;
+      }
+      const next: HistoryWindowSnapshot = {
+        messages: [...pageMessages, ...current.messages],
+        entryIds: [...pageEntryIds, ...current.entryIds],
+        anchor: current.anchor,
+        hasEarlier: d.historyPage.hasEarlier,
+        headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
+        leafId: current.leafId,
+      };
+      windowRef.current = next;
+      setMessages((prev) => [...pageMessages, ...prev]);
+      setEntryIds((prev) => [...pageEntryIds, ...prev]);
+      setHistoryHasEarlier(next.hasEarlier);
+      persistWindowCache(sid);
+      refreshErrorRef.current = null;
+      setRefreshError(null);
+    } catch (e) {
+      console.error("Failed to load earlier history:", e);
+      if (sessionIdRef.current === sid) {
+        const next = { count: (refreshErrorRef.current?.count ?? 0) + 1, message: String(e) };
+        refreshErrorRef.current = next;
+        setRefreshError(next);
+      }
+    } finally {
+      if (sessionIdRef.current === sid && historyLoadGenRef.current === generation) {
+        setHistoryLoading(false);
+      }
+    }
+  }, [historyLoading, loadSession, persistWindowCache]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -780,31 +1104,89 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventSourceRef.current = null;
     eventSourceSessionIdRef.current = null;
     eventConnectionAttemptRef.current = null;
+    liveEventBufferRef.current = null;
   }, []);
 
+  // Subscribe BEFORE the anchored history load (#99): the connected frame
+  // carries the atomic journal/live boundary; frames are buffered until the
+  // initial window is installed, then only post-boundary frames apply.
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
     closeEvents();
     const es = new EventSource(apiPath(`/api/agent/${encodeURIComponent(sid)}/events`));
     eventSourceRef.current = es;
     eventSourceSessionIdRef.current = sid;
+    liveEventBufferRef.current = [];
 
-    const promise = new Promise<EventStreamConnectionResult>((resolve) => {
-      let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (eventConnectionAttemptRef.current?.source === es) {
-          eventConnectionAttemptRef.current.pending = false;
-        }
-        resolve({ status, source: es });
-      };
-      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
+    const { promise, resolve } = Promise.withResolvers<EventStreamConnectionResult>();
+    let settled = false;
+    let boundary: HistoryBoundary | null = null;
+    // True once a caller awaits this promise (mount bootstrap). An overflow
+    // before any await must not self-reconnect — the awaiting caller handles
+    // the closed result; self-reconnecting would race a second anchored load.
+    let awaited = false;
+    promise.then(() => { awaited = true; });
+    const settle = (status: EventStreamConnectionStatus) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (eventConnectionAttemptRef.current?.source === es) {
+        eventConnectionAttemptRef.current.pending = false;
+      }
+      resolve({ status, source: es, historyBoundary: boundary });
+    };
+    const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
 
       es.onmessage = (e) => {
         try {
           const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
+          if (event.type === "connected") {
+            const candidate = event.historyBoundary;
+            boundary = candidate && typeof candidate === "object" ? candidate as HistoryBoundary : null;
+            if (boundary) historyBoundaryRef.current = boundary;
+            settle("connected");
+            return;
+          }
+          if (liveEventBufferRef.current) {
+            if (liveEventBufferRef.current.length >= MAX_LIVE_EVENT_BUFFER) {
+              // Overflow: never drop must-deliver frames silently. Close and
+              // let the reconnect path re-anchor from the journal.
+              liveEventBufferRef.current = null;
+              settle("closed");
+              es.close();
+              if (eventSourceRef.current === es) {
+                eventSourceRef.current = null;
+                eventSourceSessionIdRef.current = null;
+                eventConnectionAttemptRef.current = null;
+              }
+              if (!awaited) {
+                const overflowGeneration = eventStreamGraceGenerationRef.current;
+                setTimeout(() => {
+                  if (
+                    overflowGeneration === eventStreamGraceGenerationRef.current
+                    && !eventSourceRef.current
+                    && sessionIdRef.current === sid
+                  ) {
+                    void connectEvents(sid).then((result) => {
+                      if (result.status !== "connected" || sessionIdRef.current !== sid) return;
+                      void loadSession(sid, false, false, result.historyBoundary?.journal ?? null).finally(() => {
+                        if (eventSourceRef.current !== result.source || sessionIdRef.current !== sid) return;
+                        const buffered = liveEventBufferRef.current ?? [];
+                        liveEventBufferRef.current = null;
+                        for (const bufferedEvent of buffered) handleAgentEventRef.current?.(bufferedEvent);
+                      });
+                    });
+                  }
+                }, 1000);
+              }
+              return;
+            }
+            liveEventBufferRef.current.push(event);
+            return;
+          }
+          // Journal-mode stream: drop anything at/below the splice point
+          // (idempotent — the journal window already holds those entries).
+          const hostSeq = typeof event.hostSeq === "number" ? event.hostSeq : null;
+          if (hostSeq !== null && historyBoundaryRef.current && hostSeq <= historyBoundaryRef.current.seq) return;
           handleAgentEventRef.current?.(event);
         } catch {
           // ignore
@@ -827,7 +1209,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 && !eventSourceRef.current
                 && (agentRunningRef.current || eventStreamGraceActiveRef.current)
               ) {
-                void connectEvents(sid);
+                void connectEvents(sid).then((result) => {
+                  // A reconnect mid-view re-splices: refresh the journal
+                  // window up to the new boundary, then release the buffer.
+                  if (result.status !== "connected" || sessionIdRef.current !== sid) { liveEventBufferRef.current = null; return; }
+                  void loadSession(sid, false, false, result.historyBoundary?.journal ?? null).finally(() => {
+                    if (eventSourceRef.current !== result.source || sessionIdRef.current !== sid) return;
+                    const buffered = liveEventBufferRef.current ?? [];
+                    liveEventBufferRef.current = null;
+                    for (const event of buffered) handleAgentEventRef.current?.(event);
+                  });
+                });
               }
             }, 1000);
           }
@@ -836,10 +1228,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // The timeout above resolves only to let callers decide whether this
         // connection must be ready before they continue.
       };
-    });
     eventConnectionAttemptRef.current = { source: es, promise, pending: true };
     return promise;
-  }, [closeEvents]);
+  }, [closeEvents, loadSession]);
+
+  // Apply the frames buffered between subscribe and window install (#99),
+  // then let the stream flow directly. Pre-boundary frames are dropped —
+  // their entries are already inside the journal window.
+  const releaseLiveBuffer = useCallback(() => {
+    const buffered = liveEventBufferRef.current;
+    if (!buffered) return;
+    liveEventBufferRef.current = null;
+    const boundarySeq = historyBoundaryRef.current?.seq ?? null;
+    for (const event of buffered) {
+      const hostSeq = typeof event.hostSeq === "number" ? event.hostSeq : null;
+      if (hostSeq !== null && boundarySeq !== null && hostSeq <= boundarySeq) continue;
+      handleAgentEventRef.current?.(event);
+    }
+  }, []);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
     const current = eventSourceRef.current;
@@ -853,13 +1259,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
+    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) {
+      // The view already exists on this path (a prompt is being sent): no
+      // anchored reload is pending, so buffered frames apply right away.
+      releaseLiveBuffer();
+      return;
+    }
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
     if (eventSourceSessionIdRef.current === sid) eventSourceSessionIdRef.current = null;
     if (eventConnectionAttemptRef.current?.source === result.source) eventConnectionAttemptRef.current = null;
+    liveEventBufferRef.current = null;
     result.source.close();
     throw new EventStreamConnectionError(result.status);
-  }, [connectEvents]);
+  }, [connectEvents, releaseLiveBuffer]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -1053,6 +1465,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           || sessionIdRef.current !== sid
           || !eventStreamGraceActiveRef.current
         ) return;
+        refreshErrorRef.current = null;
+        setRefreshError(null);
 
         const state = data.state;
         setSubagents((current) => mergeSubagentSnapshots(current, state?.subagents ?? []));
@@ -1424,10 +1838,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 ? prev
                 : [...prev.slice(0, -1), delivered];
             }
-            return [...prev, delivered];
+            // Splice race (#99): the entry may already sit in the DURABLE
+            // journal window — replace it in place. Only durable entries are
+            // searched: a repeat steer/queued delivery whose identical text
+            // sits in the live tail must still append (later same-text queue
+            // deliveries must render).
+            const durableCount = windowRef.current?.entryIds.length ?? 0;
+            const durableSlice = prev.slice(0, durableCount);
+            const upserted = upsertCompletedMessage(durableSlice, delivered);
+            if (upserted.length > durableSlice.length) {
+              return [...prev, delivered];
+            }
+            return [...upserted, ...prev.slice(durableCount)];
           });
         } else if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          const normalized = normalizeToolCalls(completed);
+          setMessages((prev) => upsertCompletedMessage(prev, normalized));
         }
         const sid = sessionIdRef.current;
         if (sid) void refreshContextUsage(sid);
@@ -1565,6 +1991,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"));
           const sid = sessionIdRef.current;
           if (sid) {
+            // Compaction rewrote the transcript: the old window's pages are
+            // stale — replace with the fresh post-compaction tail (#99).
+            windowRef.current = null;
             void loadSession(sid);
             void refreshContextUsage(sid);
           }
@@ -1826,6 +2255,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
     setActiveLeafId(entryId);
+    // Branch switch invalidates the windowed pages: the bounded tail of the
+    // target leaf replaces them (cache key carries the leaf, #99).
+    windowRef.current = null;
     await loadContext(sid, entryId);
   }, [loadContext]);
 
@@ -1834,6 +2266,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setActiveLeafId(leafId);
     const sid = sessionIdRef.current;
     if (!sid) return;
+    windowRef.current = null;
     await loadContext(sid, leafId);
     if (leafId) {
       sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
@@ -1929,6 +2362,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
       setCompactResult(readCompactResult(result, "manual"));
+      windowRef.current = null;
       await loadSession(sid, true);
     } catch (e) {
       setCompactError(e instanceof Error ? e.message : String(e));
@@ -2025,6 +2459,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(args ? { customInstructions: args } : {}),
           });
           setCompactResult(readCompactResult(result, "manual"));
+          windowRef.current = null;
           if (await loadSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
@@ -2268,50 +2703,104 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  // Load session on mount
+  // Load session on mount (#99): cached window already rendered synchronously;
+  // a lightweight state probe decides live vs offline. Live → subscribe SSE
+  // FIRST, await the connected boundary, load the journal tail anchored to it,
+  // then apply buffered post-boundary frames. Offline → bounded detail only,
+  // never spawning a host just to browse history.
   useEffect(() => {
-    if (session) {
-      sessionIdRef.current = session.id;
-      loadSession(session.id, true, true).then((agentState) => {
-        if (agentState?.running) {
-          loadTools(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
-            rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "start" });
-            void connectEvents(session.id);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
-          }
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-          if ((agentState.state?.subagents?.length ?? 0) > 0) {
-            void connectEvents(session.id);
-          }
-        }
-        const state = agentState?.state;
-        if (state) {
-          if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
-          if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-          if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-          if (state.thinkingLevel !== undefined) setThinkingLevel((state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
-          if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
-          if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
-          if (state.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, state.subagents ?? []));
-          if (state.planMode !== undefined) setPlanMode(state.planMode ?? null);
-        }
-      });
+    if (!session) {
+      return () => {
+        bashRecoveryIdRef.current += 1;
+        cancelEventStreamGrace();
+        closeEvents();
+      };
     }
+    const sid = session.id;
+    sessionIdRef.current = sid;
+    historyLoadGenRef.current += 1;
+    const generation = historyLoadGenRef.current;
+    const current = () => sessionIdRef.current === sid && historyLoadGenRef.current === generation;
+
+    const applyAgentState = (agentState: { running: boolean; state?: AgentStateResponse } | null) => {
+      if (!agentState?.running || !current()) return;
+      loadTools(sid);
+      const state = agentState.state;
+      if (state?.isStreaming || state?.isPromptRunning) {
+        sdkAgentActiveRef.current = Boolean(state.isStreaming);
+        rpcPromptPendingRef.current = Boolean(state.isPromptRunning);
+        agentRunningRef.current = true;
+        setAgentRunning(true);
+        setAgentPhase(state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+        dispatch({ type: "start" });
+        // Mid-turn attach: show the accumulated partial immediately (#99).
+        if (state.activePartial?.message) {
+          dispatch({ type: "update", message: normalizeToolCalls(state.activePartial.message as AgentMessage) });
+        }
+        if (!state.isStreaming && state.isPromptRunning) {
+          void waitForPromptSettlement(sid);
+        }
+      }
+      if (state?.isBashRunning) {
+        bashRunningRef.current = true;
+        setBashRunning(true);
+        void waitForBashSettlement(sid);
+      }
+      if (state) {
+        if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
+        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
+        if (state.thinkingLevel !== undefined) setThinkingLevel((state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+        if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
+        if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
+        if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
+        if (state.subagents !== undefined) setSubagents((currentSnapshots) => mergeSubagentSnapshots(currentSnapshots, state.subagents ?? []));
+        if (state.planMode !== undefined) setPlanMode(state.planMode ?? null);
+      }
+    };
+
+    const bootstrap = async () => {
+      let agentState: { running: boolean; state?: AgentStateResponse } | null = null;
+      try {
+        const stateRes = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/state`));
+        if (stateRes.ok) agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
+      } catch {
+        // State probe failed: fall through to the bounded detail load.
+      }
+      if (!current()) return;
+
+      if (agentState?.running) {
+        // Subscribe before the anchored history load; frames buffer until the
+        // window is installed. A dead stream must not block browsing.
+        const connection = connectEvents(sid);
+        applyAgentState(agentState);
+        const result = await connection;
+        if (!current()) return;
+        await loadSession(sid, windowRef.current === null, false, result.historyBoundary?.journal ?? null);
+        if (!current()) return;
+        releaseLiveBuffer();
+        if (result.status !== "connected" && result.source.readyState !== EventSource.OPEN) {
+          result.source.close();
+        }
+        return;
+      }
+
+      const loaded = await loadSession(sid, windowRef.current === null, true);
+      if (!current()) return;
+      applyAgentState(loaded);
+      if (loaded?.running) {
+        const connection = await connectEvents(sid);
+        if (!current()) return;
+        releaseLiveBuffer();
+        if (connection.status !== "connected" && connection.source.readyState !== EventSource.OPEN) {
+          connection.source.close();
+        }
+      }
+    };
+    void bootstrap();
     return () => {
       bashRecoveryIdRef.current += 1;
+      historyLoadGenRef.current += 1;
       cancelEventStreamGrace();
       closeEvents();
     };
@@ -2349,7 +2838,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
 
+  // Prepending an earlier page must not move the viewport (#99): restore the
+  // saved distance-from-bottom once the prepended content has laid out, and
+  // suppress the completion auto-follow for that render — browsing history
+  // is never a reason to jump to the bottom.
+  const prependScrollRestoreRef = useRef<number | null>(null);
+  const prependSkipFollowRef = useRef(false);
+  useLayoutEffect(() => {
+    const distance = prependScrollRestoreRef.current;
+    if (distance === null) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    prependScrollRestoreRef.current = null;
+    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    container.scrollTop = restoreScrollTop(container.scrollHeight, distance);
+  }, [messages.length]);
+
+  const handleLoadEarlier = useCallback(async () => {
+    const container = scrollContainerRef.current;
+    const before = messagesRef.current.length;
+    if (container) {
+      prependScrollRestoreRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+    }
+    prependSkipFollowRef.current = true;
+    completionScrollAllowedRef.current = false;
+    await loadEarlierHistory();
+    // Nothing was prepended (failure / stale anchor): drop the saved distance
+    // and the follow suppression so normal scrolling behavior resumes.
+    if (messagesRef.current.length === before) {
+      prependScrollRestoreRef.current = null;
+      prependSkipFollowRef.current = false;
+    }
+  }, [loadEarlierHistory]);
+
   useEffect(() => {
+    if (prependSkipFollowRef.current) {
+      prependSkipFollowRef.current = false;
+      return;
+    }
     if ((!agentRunning && !bashRunning) || !completionScrollAllowedRef.current) return;
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -2362,6 +2888,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (messages.length === 0) return;
+    if (prependSkipFollowRef.current) return;
     if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
       scrollToBottom("instant");
@@ -2419,6 +2946,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,
+    historyHasEarlier, historyLoading, handleLoadEarlier,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
     // Actions

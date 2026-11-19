@@ -118,8 +118,13 @@ test("live detail and state routes work without a persisted JSONL file", async (
       if (command.type === "get_entries") return { entries: [entry], leafId: entry.id };
       if (command.type === "get_tree") return { tree: [] };
       if (command.type === "get_state") return { isStreaming: true };
+      if (command.type === "get_history_anchor") {
+        return { seq: 0, journal: { lastEntryId: null, leafId: null, entryCount: 0, sizeBytes: 0, mtimeMs: 0 } };
+      }
       return {};
     },
+    // #99 contract: state snapshot carries the response frame's END seq.
+    getStateSnapshot: async () => ({ state: { isStreaming: true }, hostSeq: 0 }),
   }]]);
   t.after(() => {
     globalThis.__ompSessions = previousRegistry;
@@ -144,6 +149,7 @@ test("live detail and state routes work without a persisted JSONL file", async (
     assert.deepEqual(await stateResponse.json(), {
       running: true,
       state: { isStreaming: true },
+      hostSeq: 0,
     });
   });
 });

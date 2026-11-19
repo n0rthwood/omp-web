@@ -23,7 +23,7 @@ import { mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "bun";
-import { OMP_WEB_HOST_RUN_SUBDIR, type HostHelloFrame } from "../../lib/session-host-protocol";
+import { OMP_WEB_HOST_RUN_SUBDIR, type HostHelloFrame, type HostHistoryBoundary } from "../../lib/session-host-protocol";
 
 /** Directory shared with the web wrapper and the terminal daemon (contract §0). */
 export function hostsRunDir(): string {
@@ -176,6 +176,12 @@ export interface SessionTransportOptions {
   onInboundActivity?: () => void;
   /** A client finished its attach handshake — emit the session_info mirror. */
   onAttach?: () => void;
+  /**
+   * Fresh journal-mode attach (#99): capture the atomic journal/live boundary
+   * SYNCHRONOUSLY inside the attach handshake (durable flush + seq snapshot in
+   * one callback). No historical replay follows; the ack carries the boundary.
+   */
+  onJournalAttach?: () => HostHistoryBoundary;
   /** Activity-whitelist tap hit (agent/prompt/subagent lifecycle). */
   onActivity?: (frameType: string) => void;
   /** Tap a parsed SDK outbound frame AFTER it was queued (response overlays). */
@@ -214,6 +220,8 @@ export interface SessionTransport {
   readonly socketPath: string;
   /** Requested key naming socket/unit (may be a temp `__new__` id, NOT the real id). */
   readonly socketKey: string;
+  /** Current ring end seq (#99): the wire position a host snapshot splices at. */
+  currentSeq(): number;
   /** Stop listening, detach every client, resolve on server close. */
   close(): Promise<void>;
 }
@@ -562,18 +570,44 @@ export async function createSessionTransport(options: SessionTransportOptions): 
   const helloBytes = TEXT_ENCODER.encode(`${JSON.stringify(hello)}\n`);
 
   function handleAttach(client: ClientState, frame: Record<string, unknown>): void {
-    // Handshake: host_hello first (raw, unsequenced), then gap replay from the
-    // client's last-seen seq, then host_attach(seq) so the client can track its
-    // position, then live frames. Replay is enqueued synchronously inside the
-    // socket data callback, so no live frame can interleave ahead of it.
+    // Handshake: host_hello first (raw, unsequenced), then the attach ack.
+    // Legacy attach replays the client's gap from its last-seen seq BEFORE the
+    // ack; journal-mode attach (#99) NEVER replays history — the boundary is
+    // captured synchronously here (durable flush + seq in one callback) so the
+    // journal view and the live stream splice with no gap and no duplication.
+    // Everything is enqueued synchronously inside the socket data callback,
+    // so no live frame can interleave ahead of the handshake.
     const hostInfo: OutboundFrameInfo = { seqStart: true, bulk: false };
     enqueue(client, helloBytes, hostInfo);
     if (readyBytes) enqueue(client, readyBytes, hostInfo);
-    const lastSeen = typeof frame.lastSeenSeq === "number" ? frame.lastSeenSeq : 0;
-    // Replay is must-deliver: it completes the client's gap; the bulk drop
-    // policy applies to the live flood only.
-    for (const chunk of replayFrom(lastSeen)) enqueue(client, chunk, hostInfo);
-    enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({ type: "host_attach", seq })}\n`), hostInfo);
+    const journalMode = frame.historyMode === "journal";
+    let boundary: HostHistoryBoundary | undefined;
+    let boundaryError: string | undefined;
+    if (journalMode) {
+      // Capture can throw (latched disk failure, mid-rewrite atomic batch).
+      // An exception escaping the socket data callback would kill the host
+      // and strand the live session — surface it on the ack instead.
+      try {
+        boundary = options.onJournalAttach?.();
+      } catch (error) {
+        boundaryError = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[omp-web-host] journal attach boundary capture failed: ${boundaryError}\n`);
+      }
+    }
+    if (!journalMode) {
+      const lastSeen = typeof frame.lastSeenSeq === "number" && frame.lastSeenSeq >= 0 ? frame.lastSeenSeq : 0;
+      // Legacy gap replay is must-deliver; the bulk drop policy applies to
+      // the live flood only. Journal-mode NEVER replays — even when capture
+      // fails: the ack carries boundaryError and the client's next
+      // get_history_anchor rejects retryably (#100 preserves the view).
+      for (const chunk of replayFrom(lastSeen)) enqueue(client, chunk, hostInfo);
+    }
+    enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({
+      type: "host_attach",
+      seq,
+      ...(boundary ? { boundary } : {}),
+      ...(boundaryError ? { boundaryError } : {}),
+    })}\n`), hostInfo);
     options.onAttach?.();
   }
 
@@ -679,6 +713,7 @@ export async function createSessionTransport(options: SessionTransportOptions): 
     releasePrompt: (id) => { openPrompts.delete(id); },
     socketPath,
     socketKey: options.sessionId,
+    currentSeq: () => seq,
     close,
   };
 }

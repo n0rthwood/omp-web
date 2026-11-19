@@ -67,10 +67,9 @@ const cred = JSON.parse(readFileSync(CRED_FILE, "utf8"));
 mkdirSync(ARTIFACTS, { recursive: true });
 
 // ------------------------------------------------------------- fixtures -----
-// Two journals in the hermetic home: ALPHA (long, scrollable — 60 message
-// pairs so the lazy-render window (VISIBLE_PAGE_SIZE=50) is fully loaded
-// after the initial sentinel page-in and later completion events cause no
-// prepend/restore layout churn) and BETA (short).
+// Two journals in the hermetic home: ALPHA (long — 60 message pairs; the #99
+// journal window shows the last 5 durable messages initially, earlier pages
+// load only via the explicit button) and BETA (short).
 const cwd = join(process.env.HOME, "proj-100");
 mkdirSync(cwd, { recursive: true });
 const zeroUsage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -133,7 +132,7 @@ const INTERCEPT = `
     const method = ((init && init.method) || (input instanceof Request ? input.method : "GET")).toUpperCase();
     if (method === "GET") {
       const m = url.match(loadGet);
-      if (m) {
+      if (m && new URL(url, location.origin).searchParams.get("tail") !== "1") {
         const id = decodeURIComponent(m[1]);
         if (state.hangIds.has(id)) {
           return new Promise((resolve) => {
@@ -293,8 +292,8 @@ try {
 
   // ---- Scenario 1: initial empty failure is fatal --------------------------
   await openFresh(deeplink(alpha), { armInitialId: alpha.id });
-  // The nav resolver's plain GET still succeeds (only deferThinking GETs are
-  // armed), so ChatWindow mounts and its initial loadSession fails.
+  // Navigation's bounded metadata GET still succeeds; only ChatWindow's
+  // initial history load is armed, so the fatal error is tested at its source.
   await waitFor(async () => (await page.evaluate(() => document.body.innerText)).includes("Error: HTTP 500"), 15000, "fatal initial error");
   await check("initial-failure fatal full-screen error", async () => {
     const v = await view();
@@ -307,6 +306,13 @@ try {
   await openFresh(deeplink(alpha));
   await waitFor(async () => (await view()).scrollPresent, 15000, "chat render");
   await waitFor(async () => (await view()).bodyText.includes("ALPHA assistant reply 59"), 15000, "history rendered");
+  // #99 starts at five messages. Load a real earlier page so the test's
+  // reading position is away from the bottom, not clamped to a tiny tail.
+  const earlier = await page.$('[data-testid="load-earlier"]');
+  if (earlier) {
+    await earlier.click();
+    await waitFor(async () => (await view()).bodyText.includes("ALPHA user message 48"), 10000, "earlier history page");
+  }
   await markNodes();
   const draftText = "DRAFT-KEEP-100 unsent composer text";
   await page.type("textarea", "turn one prompt");
@@ -365,7 +371,7 @@ try {
       assert.equal(v.scrollPresent, true, "chat must stay mounted");
       assert.equal(v.scrollMarked, true, "scroll container must be the SAME DOM node");
       assert.equal(v.taMarked, true, "composer must be the SAME DOM node");
-      assert.ok(v.bodyText.includes("ALPHA user message 0"), "loaded history must remain");
+      assert.ok(v.bodyText.includes("ALPHA user message 58"), "loaded history window must remain");
       assert.ok(v.bodyText.includes("SYNTHETIC streamed reply"), "streamed message must remain");
       assert.equal(v.draft, draftText, "composer draft must survive");
       assert.equal(v.scrollTop, baseline.scrollTop, "scroll position must survive");
@@ -395,7 +401,7 @@ try {
   await check("next success clears shelf, chat intact", async () => {
     const v = await view();
     assert.equal(v.scrollPresent, true);
-    assert.ok(v.bodyText.includes("ALPHA user message 0"));
+    assert.ok(v.bodyText.includes("ALPHA user message 58"));
     assert.ok(!v.bodyText.includes("Session refresh failed"));
   });
   await shot("03-cleared-on-success");
