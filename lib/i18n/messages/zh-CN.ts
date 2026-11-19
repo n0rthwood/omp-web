@@ -102,6 +102,8 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.removeProjectTitle": "从侧边栏移除此项目",
     "sidebar.expandProject": "展开项目",
     "sidebar.collapseProject": "收起项目",
+    "sidebar.expandFolder": "展开文件夹",
+    "sidebar.collapseFolder": "收起文件夹",
     "sidebar.showMore": "显示更多",
     "sidebar.showLess": "收起",
     "sidebar.selectProject": "选择项目…",

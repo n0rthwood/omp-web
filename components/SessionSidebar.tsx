@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, typ
 import type { SessionInfo } from "@/lib/types";
 import { apiPath, machineStorageKey } from "@/lib/api-path";
 import { mostRecentProjectRoots } from "@/lib/project-recency";
+import { buildProjectForest, isProjectWithin, projectDisplayName, type ProjectForestNode } from "@/lib/project-nesting";
 import { loadRemovedProjects, normalizeProjectKey, saveRemovedProjects } from "@/lib/removed-projects";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { sessionDisplayTitle } from "@/lib/session-display-title";
@@ -128,9 +129,19 @@ interface WorktreeState {
   worktrees: WorktreeEntry[];
 }
 
+interface SidebarProjectGroup {
+  project: string;
+  name: string;
+  sessions: SessionInfo[];
+  modified: string;
+  depth: number;
+  children: SidebarProjectGroup[];
+}
+
 const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
 const PROJECT_SESSION_LIMIT = 5;
 const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
+const COLLAPSED_PROJECT_FOLDERS_STORAGE_KEY = "omp-web:collapsed-project-folders";
 /** Row hover popover width (issue #22) — reuses the #17 HomeCalendar
  *  positioning approach, opening to the right of the row instead of below
  *  it, since sidebar rows run the full width of a narrow column. */
@@ -158,10 +169,10 @@ function saveUnreadSessionIds(ids: Set<string>): void {
     // ignore storage quota / privacy-mode errors
   }
 }
-function loadCollapsedProjects(): Set<string> {
+function loadCollapsedProjects(storageKey = COLLAPSED_PROJECTS_STORAGE_KEY): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY));
+    const raw = window.localStorage.getItem(machineStorageKey(storageKey));
     if (!raw) return new Set();
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed)
@@ -172,11 +183,11 @@ function loadCollapsedProjects(): Set<string> {
   }
 }
 
-function saveCollapsedProjects(projects: Set<string>): void {
+function saveCollapsedProjects(projects: Set<string>, storageKey = COLLAPSED_PROJECTS_STORAGE_KEY): void {
   if (typeof window === "undefined") return;
   try {
-    if (projects.size === 0) window.localStorage.removeItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY));
-    else window.localStorage.setItem(machineStorageKey(COLLAPSED_PROJECTS_STORAGE_KEY), JSON.stringify([...projects]));
+    if (projects.size === 0) window.localStorage.removeItem(machineStorageKey(storageKey));
+    else window.localStorage.setItem(machineStorageKey(storageKey), JSON.stringify([...projects]));
   } catch {
     // Ignore storage quota and privacy-mode errors.
   }
@@ -428,6 +439,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [projectFilter, setProjectFilter] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
+  const [collapsedProjectFolders, setCollapsedProjectFolders] = useState<Set<string>>(() => new Set());
   const [hoveredProject, setHoveredProject] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState<string | null>(null);
   const [removedProjects, setRemovedProjects] = useState<Set<string>>(() => new Set());
@@ -449,6 +461,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     setCollapsedProjects(loadCollapsedProjects());
+    setCollapsedProjectFolders(new Set([...loadCollapsedProjects(COLLAPSED_PROJECT_FOLDERS_STORAGE_KEY)].map(normalizeProjectKey)));
     setRemovedProjects(loadRemovedProjects());
   }, []);
 
@@ -717,22 +730,66 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     onNewSession?.(tempId, project);
   }, [selectedCwd, onNewSession]);
 
-  const toggleProjectCollapsed = useCallback((project: string) => {
-    setCollapsedProjects((current) => {
+  const toggleProjectCollapsed = useCallback((project: string, isFolder = false) => {
+    const key = isFolder ? normalizeProjectKey(project) : project;
+    const setCollapsed = isFolder ? setCollapsedProjectFolders : setCollapsedProjects;
+    setCollapsed((current) => {
       const next = new Set(current);
-      if (next.has(project)) next.delete(project);
-      else next.add(project);
-      saveCollapsedProjects(next);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      saveCollapsedProjects(next, isFolder ? COLLAPSED_PROJECT_FOLDERS_STORAGE_KEY : COLLAPSED_PROJECTS_STORAGE_KEY);
       return next;
     });
   }, []);
 
   const selectedProject = projectRootFor(selectedCwd);
-  const projectPaths = mostRecentProjectRoots(sessionsForDisplay)
-    .filter((project) => !removedProjects.has(normalizeProjectKey(project)));
-  if (selectedProject && !removedProjects.has(normalizeProjectKey(selectedProject)) && !projectPaths.includes(selectedProject)) {
-    projectPaths.unshift(selectedProject);
-  }
+  const projectPaths = useMemo(() => {
+    const removedRoots = [...removedProjects];
+    const paths = mostRecentProjectRoots(sessionsForDisplay)
+      .filter((project) => !removedRoots.some((removed) => isProjectWithin(project, removed)));
+    if (selectedProject && !removedRoots.some((removed) => isProjectWithin(selectedProject, removed)) && !paths.includes(selectedProject)) {
+      paths.unshift(selectedProject);
+    }
+    return paths;
+  }, [sessionsForDisplay, removedProjects, selectedProject]);
+  const projectForest = useMemo(() => buildProjectForest(projectPaths), [projectPaths]);
+
+  // A nested deep link must remain visible even when its ancestors were
+  // collapsed before refresh. Include the leaf so its selected session shows.
+  const selectedProjectChainKey = useMemo(() => {
+    if (!selectedProject) return "[]";
+    const findChain = (nodes: ProjectForestNode[], ancestors: string[]): string[] | null => {
+      for (const node of nodes) {
+        const chain = [...ancestors, node.root];
+        if (node.root === selectedProject) return chain;
+        const match = findChain(node.children, chain);
+        if (match) return match;
+      }
+      return null;
+    };
+    const chain = findChain(projectForest, []);
+    return JSON.stringify(chain && chain.length > 1 ? chain : []);
+  }, [projectForest, selectedProject]);
+
+  useEffect(() => {
+    const [parent, ...folders] = JSON.parse(selectedProjectChainKey) as string[];
+    if (!parent) return;
+    setCollapsedProjects((current) => {
+      if (!current.has(parent)) return current;
+      const next = new Set(current);
+      next.delete(parent);
+      saveCollapsedProjects(next);
+      return next;
+    });
+    setCollapsedProjectFolders((current) => {
+      const keys = folders.map(normalizeProjectKey);
+      if (!keys.some((key) => current.has(key))) return current;
+      const next = new Set(current);
+      keys.forEach((key) => next.delete(key));
+      saveCollapsedProjects(next, COLLAPSED_PROJECT_FOLDERS_STORAGE_KEY);
+      return next;
+    });
+  }, [selectedProjectChainKey]);
   const handleRemoveProject = (project: string) => {
     const key = normalizeProjectKey(project);
     setRemovedProjects((current) => {
@@ -749,19 +806,22 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     setWtError(null);
     setWtConfirmRemove(null);
     setWtFilter("");
-    if (selectedProject && normalizeProjectKey(selectedProject) === key) {
+    if (selectedProject && isProjectWithin(selectedProject, project)) {
       setSelectedCwd(null);
     }
   };
 
-  const sessionsByProject = new Map<string, SessionInfo[]>();
-  for (const session of sessionsForDisplay) {
-    const project = session.projectRoot ?? session.cwd;
-    if (!project) continue;
-    const projectSessions = sessionsByProject.get(project);
-    if (projectSessions) projectSessions.push(session);
-    else sessionsByProject.set(project, [session]);
-  }
+  const sessionsByProject = useMemo(() => {
+    const groups = new Map<string, SessionInfo[]>();
+    for (const session of sessionsForDisplay) {
+      const project = session.projectRoot ?? session.cwd;
+      if (!project) continue;
+      const projectSessions = groups.get(project);
+      if (projectSessions) projectSessions.push(session);
+      else groups.set(project, [session]);
+    }
+    return groups;
+  }, [sessionsForDisplay]);
 
   // Per-project activity counts (running / unread) for the project rows, keyed
   // the same way as getRecentProjects (projectRoot ?? cwd). Small data set —
@@ -780,20 +840,30 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [sessionsForDisplay, runningSessionIds, unreadSessionIds]);
 
   const normalizedProjectFilter = projectFilter.trim().toLowerCase();
-  const projectGroups = projectPaths.flatMap((project) => {
-    const segments = project.replace(/[\\/]+$/, "").split(/[\\/]/);
-    const name = segments.at(-1) || project;
-    const sessions = sessionsByProject.get(project) ?? [];
-    if (!normalizedProjectFilter) return [{ project, name, sessions }];
-
-    const projectMatches = name.toLowerCase().includes(normalizedProjectFilter);
-    const matchingSessions = sessions.filter((session) => {
-      const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
-      return title.toLowerCase().includes(normalizedProjectFilter);
-    });
-    if (!projectMatches && matchingSessions.length === 0) return [];
-    return [{ project, name, sessions: projectMatches ? sessions : matchingSessions }];
-  });
+  const projectGroups = useMemo(() => {
+    const toGroup = (node: ProjectForestNode, depth: number): SidebarProjectGroup | null => {
+      const project = node.root;
+      const name = projectDisplayName(project);
+      const sessions = sessionsByProject.get(project) ?? [];
+      const modified = sessions.reduce((latest, session) => session.modified > latest ? session.modified : latest, "");
+      const children = node.children
+        .map((child) => toGroup(child, depth + 1))
+        .filter((child): child is SidebarProjectGroup => child !== null)
+        .sort((a, b) => b.modified.localeCompare(a.modified));
+      const projectMatches = !normalizedProjectFilter || name.toLowerCase().includes(normalizedProjectFilter);
+      const matchingSessions = projectMatches ? sessions : sessions.filter((session) => {
+        const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+        return title.toLowerCase().includes(normalizedProjectFilter);
+      });
+      if (!projectMatches && matchingSessions.length === 0 && children.length === 0) return null;
+      return { project, name, sessions: matchingSessions, modified, depth, children };
+    };
+    const projectOrder = new Map(projectPaths.map((project, index) => [project, index]));
+    return projectForest
+      .map((node) => toGroup(node, 0))
+      .filter((group): group is SidebarProjectGroup => group !== null)
+      .sort((a, b) => (projectOrder.get(a.project) ?? 0) - (projectOrder.get(b.project) ?? 0));
+  }, [projectForest, projectPaths, sessionsByProject, normalizedProjectFilter]);
 
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
@@ -1250,18 +1320,25 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
             </div>
           )
         )}
-        {!loading && !error && projectGroups.map(({ project, name, sessions }) => {
+        {!loading && !error && projectGroups.map(function renderProjectGroup({ project, name, sessions, modified, depth, children }: SidebarProjectGroup): ReactNode {
+          const isFolder = depth > 0;
           const isSelectedProject = project === selectedProject;
-          const isCollapsed = collapsedProjects.has(project) && !normalizedProjectFilter;
+          const isCollapsed = (isFolder ? collapsedProjectFolders.has(normalizeProjectKey(project)) : collapsedProjects.has(project)) && !normalizedProjectFilter;
           const isExpanded = expandedProjects.has(project);
           const visibleSessionsForProject = isExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_LIMIT);
           const sessionTree = buildSessionTree(visibleSessionsForProject);
           const showMore = sessions.length > PROJECT_SESSION_LIMIT;
+          // Direct sessions stay together as one block, ranked independently
+          // of descendant folders by this cwd's own most recent session.
+          const contents = [
+            { kind: "sessions" as const, modified },
+            ...children.map((group) => ({ kind: "folder" as const, modified: group.modified, group })),
+          ].sort((a, b) => b.modified.localeCompare(a.modified));
 
           return (
-            <section key={project} style={{ marginBottom: isCollapsed ? 3 : 9 }}>
+            <section key={project} style={{ marginBottom: isCollapsed ? 3 : 9, paddingLeft: isFolder ? 12 : 0 }}>
               <div
-                ref={projectMenuOpen === project ? wtDropdownRef : undefined}
+                ref={!isFolder && projectMenuOpen === project ? wtDropdownRef : undefined}
                 onMouseEnter={() => setHoveredProject(project)}
                 onMouseLeave={() => setHoveredProject((current) => current === project && projectMenuOpen !== project ? null : current)}
                 style={{
@@ -1275,9 +1352,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
               >
                 <button
                   type="button"
-                  onClick={() => toggleProjectCollapsed(project)}
-                  title={isCollapsed ? t("sidebar.expandProject") : t("sidebar.collapseProject")}
-                  aria-label={isCollapsed ? t("sidebar.expandProject") : t("sidebar.collapseProject")}
+                  onClick={() => toggleProjectCollapsed(project, isFolder)}
+                  title={isCollapsed ? t(isFolder ? "sidebar.expandFolder" : "sidebar.expandProject") : t(isFolder ? "sidebar.collapseFolder" : "sidebar.collapseProject")}
+                  aria-label={isCollapsed ? t(isFolder ? "sidebar.expandFolder" : "sidebar.expandProject") : t(isFolder ? "sidebar.collapseFolder" : "sidebar.collapseProject")}
                   aria-expanded={!isCollapsed}
                   style={{
                     display: "flex",
@@ -1374,7 +1451,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                     <line x1="1.5" y1="6" x2="10.5" y2="6" />
                   </svg>
                 </button>
-                {(
+                {!isFolder && (
                   <div style={{ position: "static", flexShrink: 0 }}>
                     <button
                       type="button"
@@ -1758,61 +1835,67 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 )}
               </div>
 
-              {!isCollapsed && sessions.length === 0 && isSelectedProject && (
-                <div style={{ padding: "6px 12px 7px 32px", color: "var(--text-dim)", fontSize: 11 }}>
-                  {t("sidebar.noSessions")}
-                </div>
-              )}
-              {!isCollapsed && sessionTree.length > 0 && (
-                <div style={{ paddingLeft: 12 }}>
-                  {sessionTree.map((node) => (
-                    <SessionTreeItem
-                      key={node.session.id}
-                      node={node}
-                      selectedSessionId={selectedSessionId}
-                      runningSessionIds={runningSessionIds}
-                      unreadSessionIds={unreadSessionIds}
-                      onSelectSession={handleSelectSessionFromList}
-                      onRenamed={() => refreshSessions(false)}
-                      onSessionDeleted={(id) => {
-                        onSessionDeleted?.(id);
-                        refreshSessions(false);
-                      }}
-                      depth={0}
-                      mode={treeMode}
-                      onHover={openRowPopover}
-                      isMobile={isMobile}
-                      onHoverEnd={closeRowPopover}
-                    />
-                  ))}
-                </div>
-              )}
-              {!isCollapsed && showMore && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExpandedProjects((current) => {
-                      const next = new Set(current);
-                      if (next.has(project)) next.delete(project);
-                      else next.add(project);
-                      return next;
-                    });
-                  }}
-                  style={{
-                    display: "block",
-                    margin: "3px 0 3px 32px",
-                    padding: "5px 8px",
-                    border: "none",
-                    background: "transparent",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    textAlign: "left",
-                  }}
-                >
-                  {isExpanded ? t("sidebar.showLess") : t("sidebar.showMore")}
-                </button>
-              )}
+              {!isCollapsed && contents.map((content) => (
+                content.kind === "folder" ? renderProjectGroup(content.group) : (
+                  <div key={project}>
+                    {sessions.length === 0 && isSelectedProject && !normalizedProjectFilter && (
+                      <div style={{ padding: "6px 12px 7px 32px", color: "var(--text-dim)", fontSize: 11 }}>
+                        {t("sidebar.noSessions")}
+                      </div>
+                    )}
+                    {sessionTree.length > 0 && (
+                      <div style={{ paddingLeft: 12 }}>
+                        {sessionTree.map((node) => (
+                          <SessionTreeItem
+                            key={node.session.id}
+                            node={node}
+                            selectedSessionId={selectedSessionId}
+                            runningSessionIds={runningSessionIds}
+                            unreadSessionIds={unreadSessionIds}
+                            onSelectSession={handleSelectSessionFromList}
+                            onRenamed={() => refreshSessions(false)}
+                            onSessionDeleted={(id) => {
+                              onSessionDeleted?.(id);
+                              refreshSessions(false);
+                            }}
+                            depth={0}
+                            mode={treeMode}
+                            onHover={openRowPopover}
+                            isMobile={isMobile}
+                            onHoverEnd={closeRowPopover}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {showMore && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExpandedProjects((current) => {
+                            const next = new Set(current);
+                            if (next.has(project)) next.delete(project);
+                            else next.add(project);
+                            return next;
+                          });
+                        }}
+                        style={{
+                          display: "block",
+                          margin: "3px 0 3px 32px",
+                          padding: "5px 8px",
+                          border: "none",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: 12,
+                          textAlign: "left",
+                        }}
+                      >
+                        {isExpanded ? t("sidebar.showLess") : t("sidebar.showMore")}
+                      </button>
+                    )}
+                  </div>
+                )
+              ))}
             </section>
           );
         })}

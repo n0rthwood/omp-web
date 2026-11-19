@@ -102,6 +102,8 @@ export const enLocale: LocalePlugin = {
     "sidebar.removeProjectTitle": "Remove this project from the sidebar",
     "sidebar.expandProject": "Expand project",
     "sidebar.collapseProject": "Collapse project",
+    "sidebar.expandFolder": "Expand folder",
+    "sidebar.collapseFolder": "Collapse folder",
     "sidebar.showMore": "Show more",
     "sidebar.showLess": "Show less",
     "sidebar.selectProject": "Select project…",
