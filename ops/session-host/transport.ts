@@ -387,20 +387,12 @@ export async function createSessionTransport(options: SessionTransportOptions): 
 
   function onDrain(client: ClientState): void {
     if (client.closed) return;
-    const head = client.queue[0];
-    if (head && client.inFlight > 0) {
-      const flushed = Math.min(client.inFlight, head.bytes.length - head.offset);
-      head.offset += flushed;
-      client.queuedBytes -= flushed;
-      client.inFlight = 0;
-      if (head.offset >= head.bytes.length) {
-        client.queue.shift();
-        if (head.fromAdapter) adapterAccepted(head.bytes.length);
-        head.cb?.(null);
-      }
-    } else {
-      client.inFlight = 0;
-    }
+    // Bun UDS socket.write DROPS the unaccepted tail (it is not buffered).
+    // drain means the kernel buffer emptied; bytes after entry.offset were
+    // never delivered, so rewrite them from entry.offset. Crediting inFlight
+    // as flushed (the old logic) skipped the dropped tail and corrupted the
+    // stream under backpressure.
+    client.inFlight = 0;
     pump(client);
   }
 
