@@ -1,3 +1,12 @@
+omp-web (0.5.25) jammy; urgency=medium
+
+  * Display nested project cwds as expandable, recency-sorted folder rows
+    under their parent project in the sidebar; parent grants already cover
+    nested sessions (prefix visibility), folder collapse/filter/deep-link
+    auto-expand included (#103).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 10:11:34 +0000
+
 omp-web (0.5.24) jammy; urgency=medium
 
   * Preserve rendered chat, composer drafts and scroll after failed background
