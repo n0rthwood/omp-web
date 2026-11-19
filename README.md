@@ -136,6 +136,9 @@ Requests to loopback addresses are never proxied, so a local provider (Ollama, L
 - **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
+- **Read without fighting the stream**: automatic following yields when you scroll up. The always-visible Following/Paused control resumes on demand; returning to the bottom uses the standard follow behavior. Following uses the MIT-licensed [`use-stick-to-bottom`](https://github.com/stackblitz-labs/use-stick-to-bottom), with reduced-motion support and no custom acceleration gestures.
+- **Jump through the conversation**: the session outline gives user and assistant messages independent anchors, including folded tool activity. Older targets load a bounded window rather than the full transcript; a separate historical view stays put while the agent continues, and Return to latest restores the live tail. Wide chat regions use an outline rail; narrow regions use a keyboard-accessible drawer.
+- **Keep history loading explicit**: sessions open with the latest five durable messages; Load earlier adds twenty. Ordinary scrolling never fetches older pages. Outline navigation requires the updated session API on the selected machine, so upgrade fleet remotes before the gateway when rolling out this feature.
 - **Configure less from the terminal**: manage providers, logins/API keys, model tests, plugins, and skill switches from the web UI.
 - **Use the interface in your language**: switch between the supported UI languages from the top bar.
 - **Run a shell beside the agent**: open a Terminal tab in the workspace (Bun/Linux/macOS only, off by default):
@@ -259,7 +262,8 @@ components/
   AppShell.tsx        # main layout, URL state, top panels, file tabs
   SessionSidebar.tsx  # project selector, session tree, Explorer
   DirectoryPicker.tsx # browsable and editable working-directory picker
-  ChatWindow.tsx      # messages, SSE, image drag/drop, minimap
+  ChatWindow.tsx      # grouped messages, scroll controls, stable entry targets
+  SessionOutline.tsx  # conversation outline rail and narrow-screen drawer
   ChatInput.tsx       # input bar, model/role/tools/thinking/compact/slash controls
   MessageView.tsx     # message, thinking, tool call/result rendering
   ModelsConfig.tsx    # provider and auth configuration panel

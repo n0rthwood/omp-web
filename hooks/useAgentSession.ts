@@ -22,9 +22,11 @@ import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { ContextUsage, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
 import { planModeTransitionErrorMessage, planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
-import { captureScrollDistance, restoreScrollTop } from "@/lib/chat-lazy-load";
 import { useWebUser } from "@/hooks/useWebUser";
 import type { HistoryBoundary, HistoryPage, JournalAnchor } from "@/lib/session-history";
+import { useStickToBottom } from "use-stick-to-bottom";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
+import type { SessionOutline, SessionOutlineEntry } from "@/lib/session-outline";
 import {
   EARLIER_PAGE_SIZE,
   INITIAL_HISTORY_WINDOW,
@@ -57,6 +59,17 @@ export interface SessionData {
   historyPage?: HistoryPage;
   /** Fresh atomic splice point when the tail route captured one for us. */
   historyBoundary?: HistoryBoundary;
+}
+
+/** Finite historic around-window shown above the live canonical state (#104). */
+interface HistoryOverlaySnapshot {
+  messages: AgentMessage[];
+  entryIds: string[];
+  targetEntryId: string;
+  hasEarlier: boolean;
+  headEntryId: string | null;
+  anchor: JournalAnchor;
+  leafId: string | null;
 }
 
 interface StreamingState {
@@ -199,9 +212,6 @@ export interface UseAgentSessionOptions {
 
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
-const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
-const USER_SCROLL_INTENT_MS = 1200;
-const AUTO_FOLLOW_BOTTOM_THRESHOLD_PX = 72;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
@@ -217,7 +227,11 @@ const MAX_LIVE_EVENT_BUFFER = 2000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
-const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
+// Upward scroll keys: an upward press is immediate human intent that cancels
+// auto-follow even during the library's transient resize-guard window (when a
+// keyboard-induced scroll event could otherwise be ignored). Downward/space keys
+// are left to the library's own scroll handling.
+const UPWARD_SCROLL_KEYS: Record<string, true> = { ArrowUp: true, PageUp: true, Home: true };
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
@@ -493,6 +507,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [planMode, setPlanMode] = useState<WebPlanModeInfo | null>(null);
   const [historyHasEarlier, setHistoryHasEarlier] = useState(cachedHasEarlier);
   const [historyLoading, setHistoryLoading] = useState(false);
+  // --- #104 outline + historic around-view state ---
+  const [outline, setOutline] = useState<SessionOutlineEntry[]>([]);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [outlineError, setOutlineError] = useState<string | null>(null);
+  // A finite historic around-window rendered ABOVE the live canonical state.
+  // While it is present the live messages/SSE/drafts keep advancing underneath
+  // untouched; the shown transcript is the overlay, never a live/historic splice.
+  const [historyOverlay, setHistoryOverlay] = useState<HistoryOverlaySnapshot | null>(null);
+  const [historyTargetEntryId, setHistoryTargetEntryId] = useState<string | null>(null);
+  const [historyNavigationLoading, setHistoryNavigationLoading] = useState(false);
+  const [historyNavigationError, setHistoryNavigationError] = useState<string | null>(null);
+  const historyBrowsing = historyOverlay !== null;
+  // Synchronous mirrors for the latest-click-wins / scope race guards (#104).
+  const entryIdsRef = useRef<string[]>(entryIds);
+  entryIdsRef.current = entryIds;
+  const historyOverlayRef = useRef<HistoryOverlaySnapshot | null>(null);
+  historyOverlayRef.current = historyOverlay;
+  const historyBrowsingRef = useRef(false);
+  historyBrowsingRef.current = historyBrowsing;
+  const historyNavGenRef = useRef(0);
+  const outlineGenRef = useRef(0);
+  const outlineInFlightRef = useRef(false);
+  const outlineAnchorRef = useRef<JournalAnchor | null>(null);
+  const outlineLeafRef = useRef<string | null>(null);
+  const historyNavAbortRef = useRef<AbortController | null>(null);
+  const outlineDirtyRef = useRef(false);
+  // Set by a loader immediately before it installs a fetched earlier page; the
+  // prepend layout effect consumes it on THAT commit (not on unrelated live
+  // growth during the fetch await). Stable visible-entry anchor + distance fallback.
+  const prependAnchorRef = useRef<{ entryId: string | null; offset: number; distance: number } | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventSourceSessionIdRef = useRef<string | null>(null);
   const eventConnectionAttemptRef = useRef<EventStreamConnectionAttempt | null>(null);
@@ -529,13 +573,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
-  const initialScrollDoneRef = useRef(false);
-  const completionScrollAllowedRef = useRef(true);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
-  const userScrollIntentUntilRef = useRef(0);
-  const ignoreProgrammaticScrollUntilRef = useRef(0);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const newSessionModelOverrideRef = useRef<SelectedModel | null>(null);
@@ -564,6 +602,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Synchronous mirror of the rendered list for the prepend handler (#99).
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+
+  // --- #104 follow controller: use-stick-to-bottom is the sole follow engine ---
+  // ResizeObserver tracks ALL transcript growth (stream/media/tools); the
+  // library cancels its own animation on any upward human scroll (wheel,
+  // touch, scrollbar, and the scroll events they emit). Upward keyboard intent
+  // is supplemented below for immediacy.
+  // No custom acceleration/two-screen gestures; reduced motion goes instant.
+  const reducedMotion = useReducedMotion();
+  const followMotion = reducedMotion ? "instant" as const : "smooth" as const;
+  const stick = useStickToBottom({ initial: "instant", resize: followMotion });
+  // Destructure the library's stable members so callback deps stay stable (the
+  // whole `stick` object is recreated each render; its members are memoized).
+  const { scrollRef: scrollContainerRef, contentRef: scrollContentRef, state: stickState, stopScroll, scrollToBottom } = stick;
+  // Follow mode is the library's lock state (escape-aware), not a raw geometry
+  // measurement: an upward human scroll escapes the lock, returning to the
+  // bottom re-locks. Explicit pause/resume drive the same lock.
+  // Use the INTERNAL lock, not the returned isAtBottom (which ORs in
+  // isNearBottom): otherwise pausing while parked near the bottom would read
+  // as still-following and the toggle could never resume. Every lock mutation
+  // also updates React state, so this re-renders reactively.
+  // A detached historic overlay never claims follow, even if the library's
+  // shrink-relock fires while browsing (guarded below).
+  const autoFollow = !historyBrowsing && stickState.isAtBottom;
+  const autoFollowRef = useRef(autoFollow);
+  autoFollowRef.current = autoFollow;
+  const pauseAutoFollow = useCallback(() => {
+    stopScroll();
+  }, [stopScroll]);
+  const resumeAutoFollow = useCallback(() => {
+    void scrollToBottom(followMotion);
+  }, [scrollToBottom, followMotion]);
+  // Toggling follow ON while browsing history returns to the live tail first.
+  const handleReturnToLatestRef = useRef<(() => Promise<void>) | null>(null);
+  const toggleAutoFollow = useCallback(() => {
+    if (autoFollowRef.current) {
+      pauseAutoFollow();
+      return;
+    }
+    if (historyBrowsingRef.current) {
+      void handleReturnToLatestRef.current?.();
+      return;
+    }
+    resumeAutoFollow();
+  }, [pauseAutoFollow, resumeAutoFollow]);
+  // The transcript actually on screen: the historic overlay while browsing,
+  // otherwise the live canonical window. Live state keeps advancing underneath.
+  const shownMessages = historyOverlay ? historyOverlay.messages : messages;
+  const shownEntryIds = historyOverlay ? historyOverlay.entryIds : entryIds;
+
+  // The library re-locks on content/viewport shrink near the bottom. While a
+  // historic overlay is shown that lock must not survive: drop it through the
+  // library's own stopScroll (no second scroll writer). Lock mutations update
+  // React state, so this re-runs on every relock attempt during browsing.
+  useLayoutEffect(() => {
+    if (historyBrowsing && stickState.isAtBottom) stopScroll();
+  }, [historyBrowsing, stickState.isAtBottom, stopScroll]);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -659,6 +753,80 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webUsername]);
 
+  // --- #104 historic view invalidation + outline loads ---
+  // Scope invalidation (session/leaf/compaction): drop the overlay AND make
+  // every in-flight navigation response stale. Never touches live state.
+  const clearHistoricView = useCallback(() => {
+    historyNavGenRef.current += 1;
+    historyNavAbortRef.current?.abort();
+    historyNavAbortRef.current = null;
+    setHistoryOverlay(null);
+    setHistoryTargetEntryId(null);
+    setHistoryNavigationLoading(false);
+    setHistoryNavigationError(null);
+    // Scope invalidation also frees the page-loading latch: a superseded loader's
+    // gen-guarded finally would otherwise never clear it, disabling LoadEarlier.
+    setHistoryLoading(false);
+  }, []);
+
+  // Human intent during a pending around-fetch: invalidate the request and
+  // clear loading WITHOUT mutating the shown view, resolved target or error.
+  // Late success/rejection/finalizers of the aborted request are ignored.
+  const cancelHistoryNavigation = useCallback(() => {
+    historyNavGenRef.current += 1;
+    historyNavAbortRef.current?.abort();
+    historyNavAbortRef.current = null;
+    setHistoryNavigationLoading(false);
+    setHistoryLoading(false);
+  }, []);
+
+  // Metadata-only outline (#104): one bounded request per durable change, never
+  // per streamed token. In-flight calls coalesce into a single trailing reload.
+  const loadOutline = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    if (outlineInFlightRef.current) {
+      outlineDirtyRef.current = true;
+      return;
+    }
+    outlineInFlightRef.current = true;
+    const generation = outlineGenRef.current;
+    setOutlineLoading(true);
+    setOutlineError(null);
+    try {
+      // No anchor or leaf pin: the server derives a fresh durable position and
+      // replays the CURRENT leaf (same default as the live tail). Pinning to
+      // windowRef.anchor would lag mid-turn; pinning leafId to a branch-selection
+      // entry would replay only to that stale leaf once the conversation continues.
+      // The RESPONSE anchor/leaf are stored for around navigation.
+      const params = new URLSearchParams({ outline: "1" });
+      const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as { outline?: SessionOutline };
+      if (sessionIdRef.current !== sid || outlineGenRef.current !== generation) return;
+      if (!d.outline) throw new Error("Malformed outline response");
+      outlineAnchorRef.current = d.outline.anchor;
+      outlineLeafRef.current = d.outline.leafId;
+      setOutline(d.outline.entries);
+    } catch (e) {
+      // Non-destructive: keep the last good outline, expose a retryable error.
+      if (sessionIdRef.current === sid && outlineGenRef.current === generation) {
+        setOutlineError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      outlineInFlightRef.current = false;
+      if (sessionIdRef.current === sid && outlineGenRef.current === generation) {
+        setOutlineLoading(false);
+        if (outlineDirtyRef.current) {
+          outlineDirtyRef.current = false;
+          void loadOutline();
+        }
+      } else {
+        outlineDirtyRef.current = false;
+      }
+    }
+  }, []);
+
   // Bounded journal refresh (#99): always `tail=5`, never a full-history GET.
   // `boundaryAnchor` is the FRESH atomic splice anchor from the connected SSE
   // frame — passed to bound the initial read. Background refreshes pass none:
@@ -690,6 +858,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setError(null);
           refreshErrorRef.current = null;
           setRefreshError(null);
+          clearHistoricView();
+          setOutline([]);
+          outlineAnchorRef.current = null;
           return null;
         }
         // A background refresh hitting a vanished session is still a failed
@@ -804,6 +975,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
 
       messagesLoaded = true;
+      // Durable window changed: refresh the outline (deduped, never per token).
+      void loadOutline();
       if (showLoading) setLoading(false);
       if (!includeState) return null;
 
@@ -851,7 +1024,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [installDurableWindow, persistWindowCache]);
+  }, [installDurableWindow, persistWindowCache, loadOutline, clearHistoricView]);
 
   // Branch navigation: bounded tail of the selected leaf (never full history).
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
@@ -888,6 +1061,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load context:", e);
     }
   }, [installDurableWindow]);
+
+  // Capture the visible position just before a fetched earlier page is installed.
+  // Prefers a stable visible data-entry-id + offset (immune to below-viewport live
+  // growth during the fetch await); falls back to distance-from-bottom.
+  const capturePrependAnchor = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      prependAnchorRef.current = null;
+      return;
+    }
+    const containerTop = container.getBoundingClientRect().top;
+    let entryId: string | null = null;
+    let offset = 0;
+    for (const el of container.querySelectorAll<HTMLElement>("[data-entry-id]")) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > containerTop && rect.top < containerTop + container.clientHeight) {
+        entryId = el.getAttribute("data-entry-id");
+        offset = rect.top - containerTop;
+        break;
+      }
+    }
+    prependAnchorRef.current = {
+      entryId,
+      offset,
+      distance: container.scrollHeight - container.scrollTop,
+    };
+  }, [scrollContainerRef]);
 
   // Explicit "Load earlier" click: one page of EARLIER_PAGE_SIZE messages
   // prepended before the window head. No scroll-triggered loading (#99).
@@ -935,6 +1135,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
         leafId: current.leafId,
       };
+      capturePrependAnchor();
       windowRef.current = next;
       setMessages((prev) => [...pageMessages, ...prev]);
       setEntryIds((prev) => [...pageEntryIds, ...prev]);
@@ -954,7 +1155,175 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setHistoryLoading(false);
       }
     }
-  }, [historyLoading, loadSession, persistWindowCache]);
+  }, [historyLoading, loadSession, persistWindowCache, capturePrependAnchor]);
+
+  // --- #104 outline jump: latest-click-wins bounded around-window ---
+  // Clicking any outline target pauses follow. A target already in the shown
+  // window only sets the highlight; an unloaded target fetches ONE around page
+  // using the outline's anchor/leaf. The overlay is a finite historic view over
+  // the ongoing live state — never a live/historic concatenation, never a write
+  // to the live window/cache. Generation guards cover success, rejection and
+  // finalizers; session/leaf/cancel invalidate stale responses.
+  const handleJumpToEntry = useCallback(async (entryId: string): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return false;
+    pauseAutoFollow();
+    const shownIds = historyBrowsingRef.current
+      ? (historyOverlayRef.current?.entryIds ?? [])
+      : entryIdsRef.current;
+    if (shownIds.includes(entryId)) {
+      // Latest click wins: a loaded target supersedes any pending around-fetch.
+      historyNavGenRef.current += 1;
+      historyNavAbortRef.current?.abort();
+      historyNavAbortRef.current = null;
+      setHistoryNavigationLoading(false);
+      setHistoryTargetEntryId(entryId);
+      setHistoryNavigationError(null);
+      return true;
+    }
+    const anchor = outlineAnchorRef.current ?? windowRef.current?.anchor ?? null;
+    const leafId = outlineLeafRef.current;
+    const generation = ++historyNavGenRef.current;
+    historyNavAbortRef.current?.abort();
+    const controller = new AbortController();
+    historyNavAbortRef.current = controller;
+    setHistoryNavigationLoading(true);
+    setHistoryNavigationError(null);
+    try {
+      const params = new URLSearchParams({
+        around: entryId,
+        limit: String(EARLIER_PAGE_SIZE),
+        deferThinking: "1",
+        deferMedia: "1",
+      });
+      if (anchor) params.set("anchor", JSON.stringify(anchor));
+      if (leafId !== null) params.set("leafId", leafId);
+      const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`), { signal: controller.signal });
+      if (res.status === 404 || res.status === 409) {
+        // Structured target-unavailable: keep the current view, retryable error.
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as {
+        context: { messages: AgentMessage[]; entryIds: string[] };
+        historyPage: HistoryPage;
+      };
+      if (sessionIdRef.current !== sid || historyNavGenRef.current !== generation) return false;
+      const pageIds = d.context.entryIds ?? [];
+      if (!d.historyPage || pageIds.length !== d.context.messages.length || !pageIds.includes(entryId)) {
+        throw new Error("History target unavailable");
+      }
+      const overlay: HistoryOverlaySnapshot = {
+        messages: d.context.messages,
+        entryIds: pageIds,
+        targetEntryId: entryId,
+        hasEarlier: d.historyPage.hasEarlier,
+        headEntryId: d.historyPage.headEntryId ?? pageIds[0] ?? null,
+        anchor: d.historyPage.anchor,
+        leafId: d.historyPage.anchor.leafId,
+      };
+      historyOverlayRef.current = overlay;
+      setHistoryOverlay(overlay);
+      setHistoryTargetEntryId(entryId);
+      setHistoryNavigationError(null);
+      return true;
+    } catch (e) {
+      if (sessionIdRef.current !== sid || historyNavGenRef.current !== generation) return false;
+      if (e instanceof DOMException && e.name === "AbortError") return false;
+      setHistoryNavigationError(e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      if (sessionIdRef.current === sid && historyNavGenRef.current === generation) {
+        setHistoryNavigationLoading(false);
+        historyNavAbortRef.current = null;
+      }
+    }
+  }, [pauseAutoFollow]);
+
+  // Return to the live tail: drop the overlay (live canonical messages kept
+  // advancing underneath), refresh the bounded tail only if it is missing,
+  // and resume follow.
+  const handleReturnToLatest = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    historyNavGenRef.current += 1;
+    historyNavAbortRef.current?.abort();
+    historyNavAbortRef.current = null;
+    historyOverlayRef.current = null;
+    setHistoryOverlay(null);
+    setHistoryTargetEntryId(null);
+    setHistoryNavigationLoading(false);
+    setHistoryNavigationError(null);
+    if (sid && windowRef.current === null) {
+      await loadSession(sid);
+    }
+    resumeAutoFollow();
+  }, [loadSession, resumeAutoFollow]);
+  handleReturnToLatestRef.current = handleReturnToLatest;
+
+  // "Load earlier" inside the historic overlay: prepend one page using the
+  // overlay's OWN anchor/head. Never touches the live window or its cache, and
+  // never concatenates a disjoint window (anchor must still match).
+  const loadEarlierOverlay = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    const base = historyOverlayRef.current;
+    if (!sid || !base || !base.hasEarlier || !base.headEntryId || historyLoading) return;
+    const generation = historyLoadGenRef.current;
+    const navGeneration = historyNavGenRef.current;
+    setHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({
+        deferThinking: "1",
+        deferMedia: "1",
+        before: base.headEntryId,
+        limit: String(EARLIER_PAGE_SIZE),
+        anchor: JSON.stringify(base.anchor),
+      });
+      // Mirror the around path: an explicit branch must page ITS OWN leaf, never
+      // the server-replayed default (which could prepend a different branch).
+      if (base.leafId !== null) params.set("leafId", base.leafId);
+      const res = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as {
+        context: { messages: AgentMessage[]; entryIds: string[] };
+        historyPage: HistoryPage;
+      };
+      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation || historyNavGenRef.current !== navGeneration) return;
+      const current = historyOverlayRef.current;
+      if (!current) return;
+      if (!sameAnchor(d.historyPage.anchor, current.anchor)) {
+        // Journal rewritten under the overlay: keep the view, retryable error.
+        setHistoryNavigationError("Session journal changed; return to latest and retry");
+        return;
+      }
+      const pageMessages = d.context.messages;
+      const pageIds = d.context.entryIds ?? [];
+      if (pageMessages.length === 0) {
+        const next = { ...current, hasEarlier: false };
+        historyOverlayRef.current = next;
+        setHistoryOverlay(next);
+        return;
+      }
+      const next: HistoryOverlaySnapshot = {
+        ...current,
+        messages: [...pageMessages, ...current.messages],
+        entryIds: [...pageIds, ...current.entryIds],
+        hasEarlier: d.historyPage.hasEarlier,
+        headEntryId: d.historyPage.headEntryId ?? pageIds[0] ?? current.headEntryId,
+      };
+      capturePrependAnchor();
+      historyOverlayRef.current = next;
+      setHistoryOverlay(next);
+    } catch (e) {
+      if (sessionIdRef.current === sid && historyLoadGenRef.current === generation && historyNavGenRef.current === navGeneration) {
+        setHistoryNavigationError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (sessionIdRef.current === sid && historyLoadGenRef.current === generation && historyNavGenRef.current === navGeneration) {
+        setHistoryLoading(false);
+      }
+    }
+  }, [historyLoading, capturePrependAnchor]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -1857,6 +2226,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         const sid = sessionIdRef.current;
         if (sid) void refreshContextUsage(sid);
+        // Durable completion: refresh the outline so mid-turn entries are
+        // reachable before turn end (coalesced, never per streamed token).
+        if (sid) void loadOutline();
         dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });
         break;
@@ -1992,8 +2364,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const sid = sessionIdRef.current;
           if (sid) {
             // Compaction rewrote the transcript: the old window's pages are
-            // stale — replace with the fresh post-compaction tail (#99).
+            // stale (#99) and the historic overlay's target may be compacted
+            // away — drop the overlay and reload the post-compaction tail.
             windowRef.current = null;
+            clearHistoricView();
             void loadSession(sid);
             void refreshContextUsage(sid);
           }
@@ -2003,7 +2377,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, confirmPrompt, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, cancelEventStreamGrace, clearHistoricView, confirmPrompt, handleExtensionUiRequest, loadOutline, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   // A send path that failed before the server accepted the submission must
@@ -2082,7 +2456,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     dispatch({ type: "start" });
-    completionScrollAllowedRef.current = true;
+    // Sending leaves any historic browsing view (the user engages the live tail
+    // again). Follow is NOT force-resumed: if the user had scrolled up to read,
+    // that intent is preserved — the library re-locks only when they return to
+    // the bottom or toggle follow on.
+    clearHistoricView();
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
@@ -2172,13 +2550,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, restoreFailedSubmission, cancelEventStreamGrace, closeEvents, submissions]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, restoreFailedSubmission, cancelEventStreamGrace, closeEvents, submissions, clearHistoricView]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
-    completionScrollAllowedRef.current = true;
+    clearHistoricView();
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
     try {
@@ -2200,7 +2578,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingBash(null);
       setBashRunning(false);
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, clearHistoricView]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
@@ -2254,24 +2632,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
+    // Explicit branch selection invalidates the historic view + outline scope.
+    clearHistoricView();
+    outlineGenRef.current += 1;
+    // Drop the old branch's outline so the rail never shows stale entries while
+    // the new branch loads; refetch once the new window is installed.
+    setOutline([]);
+    outlineAnchorRef.current = null;
     setActiveLeafId(entryId);
     // Branch switch invalidates the windowed pages: the bounded tail of the
     // target leaf replaces them (cache key carries the leaf, #99).
     windowRef.current = null;
     await loadContext(sid, entryId);
-  }, [loadContext]);
+    void loadOutline();
+  }, [loadContext, clearHistoricView, loadOutline]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current) return;
     setActiveLeafId(leafId);
+    clearHistoricView();
+    outlineGenRef.current += 1;
+    setOutline([]);
+    outlineAnchorRef.current = null;
     const sid = sessionIdRef.current;
     if (!sid) return;
     windowRef.current = null;
     await loadContext(sid, leafId);
+    void loadOutline();
     if (leafId) {
       sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
     }
-  }, [loadContext]);
+  }, [loadContext, clearHistoricView, loadOutline]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
@@ -2363,6 +2754,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
       setCompactResult(readCompactResult(result, "manual"));
       windowRef.current = null;
+      clearHistoricView();
       await loadSession(sid, true);
     } catch (e) {
       setCompactError(e instanceof Error ? e.message : String(e));
@@ -2370,7 +2762,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       setIsCompacting(false);
     }
-  }, [isCompacting, loadSession]);
+  }, [isCompacting, loadSession, clearHistoricView]);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     const modelCwd = newSessionCwd ?? session?.cwd ?? "";
@@ -2460,6 +2852,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           setCompactResult(readCompactResult(result, "manual"));
           windowRef.current = null;
+          clearHistoricView();
           if (await loadSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
@@ -2538,7 +2931,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, appendCommandOutput, ensureNewSession, handleSetPlanMode, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, planMode, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, appendCommandOutput, ensureNewSession, handleSetPlanMode, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, planMode, promoteNewSession, onSessionStatsPanelOpen, clearHistoricView]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -2674,34 +3067,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [setToolPresetState]);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    messagesEndRef.current?.scrollIntoView({ behavior });
-  }, []);
-
-
-  const markUserScrollIntent = useCallback((event: Event) => {
-    if (event instanceof KeyboardEvent) {
-      if (!SCROLL_KEYS.has(event.key)) return;
-      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
-    }
-    userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
-  }, []);
-
-  const handleScrollPositionChange = useCallback(() => {
-    if (!agentRunningRef.current && !bashRunningRef.current) return;
-    if (Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom <= AUTO_FOLLOW_BOTTOM_THRESHOLD_PX) {
-      completionScrollAllowedRef.current = true;
-      return;
-    }
-    if (Date.now() <= userScrollIntentUntilRef.current) {
-      completionScrollAllowedRef.current = false;
-    }
-  }, []);
 
   // Load session on mount (#99): cached window already rendered synchronously;
   // a lightweight state probe decides live vs offline. Live → subscribe SSE
@@ -2719,6 +3084,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = session.id;
     sessionIdRef.current = sid;
     historyLoadGenRef.current += 1;
+    // Session scope change: invalidate outline + any historic navigation.
+    outlineGenRef.current += 1;
+    clearHistoricView();
+    setOutline([]);
+    outlineAnchorRef.current = null;
     const generation = historyLoadGenRef.current;
     const current = () => sessionIdRef.current === sid && historyLoadGenRef.current === generation;
 
@@ -2801,6 +3171,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => {
       bashRecoveryIdRef.current += 1;
       historyLoadGenRef.current += 1;
+      outlineGenRef.current += 1;
+      clearHistoricView();
       cancelEventStreamGrace();
       closeEvents();
     };
@@ -2816,88 +3188,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange);
   }, [data?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
 
+  // Immediate upward keyboard intent cancels follow even before the browser
+  // emits the resulting scroll event (the library handles wheel/touch/scrollbar
+  // and the scroll event itself). Editable targets are excluded so typing in the
+  // composer never pauses the transcript.
   useEffect(() => {
-    window.addEventListener("keydown", markUserScrollIntent);
-    return () => {
-      window.removeEventListener("keydown", markUserScrollIntent);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!UPWARD_SCROLL_KEYS[event.key]) return;
+      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
+      pauseAutoFollow();
     };
-  }, [markUserScrollIntent]);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pauseAutoFollow]);
 
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
-    container.addEventListener("wheel", markUserScrollIntent, { passive: true });
-    container.addEventListener("touchstart", markUserScrollIntent, { passive: true });
-    container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
-    return () => {
-      container.removeEventListener("pointerdown", markUserScrollIntent);
-      container.removeEventListener("wheel", markUserScrollIntent);
-      container.removeEventListener("touchstart", markUserScrollIntent);
-      container.removeEventListener("scroll", handleScrollPositionChange);
-    };
-  }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
-
-  // Prepending an earlier page must not move the viewport (#99): restore the
-  // saved distance-from-bottom once the prepended content has laid out, and
-  // suppress the completion auto-follow for that render — browsing history
-  // is never a reason to jump to the bottom.
-  const prependScrollRestoreRef = useRef<number | null>(null);
-  const prependSkipFollowRef = useRef(false);
+  // Prepending an earlier page must not move the viewport (#99/#104): the library
+  // does not compensate scroll anchoring while follow is escaped. Restore on the
+  // actual prepend commit (the loader sets prependAnchorRef right before install),
+  // never on unrelated live growth during the await. Follow stays paused.
   useLayoutEffect(() => {
-    const distance = prependScrollRestoreRef.current;
-    if (distance === null) return;
+    const anchor = prependAnchorRef.current;
+    if (anchor === null) return;
     const container = scrollContainerRef.current;
     if (!container) return;
-    prependScrollRestoreRef.current = null;
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    container.scrollTop = restoreScrollTop(container.scrollHeight, distance);
-  }, [messages.length]);
+    prependAnchorRef.current = null;
+    let top: number | null = null;
+    if (anchor.entryId) {
+      const el = container.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(anchor.entryId)}"]`);
+      if (el) {
+        top = container.scrollTop + (el.getBoundingClientRect().top - container.getBoundingClientRect().top) - anchor.offset;
+      }
+    }
+    if (top === null) top = container.scrollHeight - anchor.distance;
+    // Write through the library's scrollTop setter so the resulting scroll event is
+    // ignored (ignoreScrollToTop) — a direct write could re-lock follow when paused
+    // near the bottom, yanking the viewport on LoadEarlier.
+    stickState.scrollTop = Math.max(0, top);
+  }, [shownMessages.length, scrollContainerRef, stickState]);
 
+  // Explicit "Load earlier": one bounded page prepended before the shown head.
+  // While browsing history it pages the OVERLAY (own anchor/head/leaf, never the
+  // live window/cache); otherwise it pages the live journal window. No scroll autoload.
   const handleLoadEarlier = useCallback(async () => {
-    const container = scrollContainerRef.current;
-    const before = messagesRef.current.length;
-    if (container) {
-      prependScrollRestoreRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+    pauseAutoFollow();
+    if (historyBrowsingRef.current) {
+      await loadEarlierOverlay();
+    } else {
+      await loadEarlierHistory();
     }
-    prependSkipFollowRef.current = true;
-    completionScrollAllowedRef.current = false;
-    await loadEarlierHistory();
-    // Nothing was prepended (failure / stale anchor): drop the saved distance
-    // and the follow suppression so normal scrolling behavior resumes.
-    if (messagesRef.current.length === before) {
-      prependScrollRestoreRef.current = null;
-      prependSkipFollowRef.current = false;
-    }
-  }, [loadEarlierHistory]);
-
-  useEffect(() => {
-    if (prependSkipFollowRef.current) {
-      prependSkipFollowRef.current = false;
-      return;
-    }
-    if ((!agentRunning && !bashRunning) || !completionScrollAllowedRef.current) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const frame = requestAnimationFrame(() => {
-      ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-      container.scrollTo({ top: container.scrollHeight, behavior: "instant" });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [agentRunning, bashRunning, messages.length, streamState.streamingMessage, agentPhase, pendingBash]);
-
-  useEffect(() => {
-    if (messages.length === 0) return;
-    if (prependSkipFollowRef.current) return;
-    if (!initialScrollDoneRef.current) {
-      initialScrollDoneRef.current = true;
-      scrollToBottom("instant");
-      return;
-    }
-    if (completionScrollAllowedRef.current) {
-      scrollToBottom(agentRunningRef.current || bashRunningRef.current ? "instant" : "smooth");
-    }
-  }, [messages.length, agentRunning, bashRunning, scrollToBottom]);
+  }, [loadEarlierHistory, loadEarlierOverlay, pauseAutoFollow]);
 
   // Load model list
   useEffect(() => {
@@ -2937,7 +3276,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    data, loading, error, refreshError, activeLeafId, messages, entryIds, streamState,
+    data, loading, error, refreshError, activeLeafId, messages: shownMessages, entryIds: shownEntryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
@@ -2946,9 +3285,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,
-    historyHasEarlier, historyLoading, handleLoadEarlier,
+    historyHasEarlier: historyBrowsing ? (historyOverlay?.hasEarlier ?? false) : historyHasEarlier,
+    historyLoading, handleLoadEarlier,
+    // #104 follow controller + outline + historic navigation
+    autoFollow, pauseAutoFollow, resumeAutoFollow, toggleAutoFollow,
+    outline, outlineLoading, outlineError, loadOutline,
+    historyBrowsing, historyTargetEntryId, historyNavigationLoading, historyNavigationError,
+    handleJumpToEntry, handleReturnToLatest, cancelHistoryNavigation,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, eventSourceRef, scrollContainerRef, scrollContentRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,

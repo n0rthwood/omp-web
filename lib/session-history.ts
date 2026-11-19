@@ -5,9 +5,11 @@
 // provides:
 //   * the frozen splice types shared with the host bridge and the window UI
 //     (JournalAnchor / HistoryBoundary / HistoryPage),
-//   * readSessionHistory(): bounded tail/before/after pages with transcript
-//     semantics identical to buildSessionContext (compaction elision, branch
-//     parent chain, entryIds parallel to messages),
+//   * readSessionHistory(): bounded tail/before/after/around pages with
+//     transcript semantics identical to buildSessionContext (compaction
+//     elision, branch parent chain, entryIds parallel to messages),
+//   * readSessionOutline(): metadata-only transcript outline (#104) —
+//     no entry bodies are parsed for modern journals,
 //   * a metadata spine + byte-offset index per journal file so a warm refresh
 //     reads only O(window) bytes instead of re-parsing every entry body.
 //
@@ -35,6 +37,7 @@ import type { ContextUsage } from "./omp-types";
 import { getOmpRuntime } from "./omp-runtime";
 import { buildSessionContext, entryToUiMessage, parseDefaultModel } from "./session-reader";
 import { computeSessionTotalActiveMs } from "./session-timing";
+import type { SessionOutline, SessionOutlineEntry } from "./session-outline";
 import type {
   AgentMessage,
   SessionContext,
@@ -71,6 +74,13 @@ export interface HistoryPage {
   hasEarlier: boolean;
   /** Entry id of the page's first message; pass as `before` for the previous page. */
   headEntryId: string | null;
+  /**
+   * True when displayable entries exist after this page's last message (#104).
+   * Optional for legacy producers; window reads always populate it.
+   */
+  hasLater?: boolean;
+  /** Entry id of the transcript's last rendered message at the anchor (null when empty). */
+  tailEntryId?: string | null;
 }
 
 export interface ReadSessionHistoryOptions {
@@ -80,6 +90,12 @@ export interface ReadSessionHistoryOptions {
   before?: string;
   /** Warm delta: messages strictly after this entry id, up to the anchor. */
   after?: string;
+  /**
+   * Inclusive window centered on this entry id (#104): up to `limit`
+   * messages containing the target, edge-clamped. Missing/non-visible
+   * targets raise HistoryTargetUnavailableError — never a tail fallback.
+   */
+  around?: string;
   /** Branch leaf; undefined = replayed leaf, null = no active branch. */
   leafId?: string | null;
   /** Bound the read to this durable position; later appends are excluded. */
@@ -96,6 +112,24 @@ export interface SessionHistoryResult {
   totalActiveMs?: number;
   /** Bounded header/title-slot metadata parsed during indexing (no extra scan). */
   header?: SessionHeader;
+}
+
+/** Why an `around` target could not be included in a window (#104). */
+export type HistoryTargetUnavailableReason = "not_found" | "not_visible" | "stale_anchor";
+
+/**
+ * Structured failure for outline/around navigation: the route maps this to
+ * 409 (stale anchor — journal rewritten under the caller's snapshot) or 404
+ * (target absent or not on the visible branch), code
+ * `history_target_unavailable`. Never degrade these into a tail window.
+ */
+export class HistoryTargetUnavailableError extends Error {
+  readonly reason: HistoryTargetUnavailableReason;
+  constructor(reason: HistoryTargetUnavailableReason) {
+    super(`history target unavailable: ${reason}`);
+    this.name = "HistoryTargetUnavailableError";
+    this.reason = reason;
+  }
 }
 
 export const DEFAULT_HISTORY_LIMIT = 5;
@@ -131,6 +165,13 @@ const tokenizer = new Tokenizer();
 
 const PREVIEW_CAP = 200;
 
+/** Tool-name labels kept per message record for tool-only outline previews. */
+const TOOL_NAME_LABEL_CAP = 8;
+/** Per-name character bound so pathological names cannot bloat the spine. */
+const TOOL_NAME_CHAR_CAP = 48;
+/** Tool-name scan bound; beyond it the total is unknown ("… more"). */
+const TOOL_NAME_SCAN_CAP = 64;
+
 /**
  * One durable journal record: metadata only. `end` is the byte offset just
  * past the record's terminating newline, so [offset, end) re-reads exactly
@@ -161,6 +202,8 @@ interface JournalRecordMeta {
   hasSummary?: boolean;
   /** compaction only. */
   firstKeptEntryId?: string;
+  /** message entries only: toolCall names in block order (bounded count, outline). */
+  toolNames?: string[];
   /** label only. */
   targetId?: string;
   label?: string | null;
@@ -198,11 +241,26 @@ interface JournalIndex {
   /** Fixed-width title slot title, when present (overrides header.title). */
   slotTitle: string | undefined;
   /**
-   * Legacy (version < 3) migrated view, keyed by scanned byte extent. The
-   * v1 migration assigns fresh ids, so it must run ONCE per file version —
-   * re-migrating per page would make before/after cursors unstable.
+   * Legacy (version < 3) migrated views, keyed by scanned byte extent,
+   * newest last, bounded LRU. The v1 migration assigns fresh random ids, so
+   * each extent must migrate ONCE and stay retained: re-migrating per page
+   * (or after an append) would renumber ids and break navigation targets.
    */
-  legacyCache: LegacyCache | undefined;
+  legacyViews: LegacyCache[];
+  /**
+   * Bounded byte fingerprint at the legacy spine's scan boundary, captured
+   * when the extent grows. Detects overwrites near an appended prefix's old
+   * boundary; it does NOT see arbitrary middle-of-prefix rewrites (those are
+   * caught fail-closed by the rebuild signal + invalidated extents).
+   * `start`/`end` are BYTE offsets (the text is decoded; .length is not bytes).
+   */
+  legacyBoundaryProbe: { start: number; end: number; text: string } | undefined;
+  /**
+   * Extents whose retained legacy view was LRU-evicted or wiped by a rebuild
+   * (rewrite signal). Anchored navigation on these extents fails stale even
+   * when the rewrite shares the snapshot's mtime millisecond. Bounded.
+   */
+  legacyEvictedExtents: number[];
 }
 
 
@@ -213,9 +271,14 @@ interface LegacyCache {
   metas: JournalRecordMeta[];
   byId: Map<string, JournalRecordMeta>;
   tree: SessionTreeNode[];
+  /** Bounded bytes at scanEnd when the view was built (rewrite detection). */
+  tailProbe: string;
 }
 const MAX_CACHED_JOURNALS = 8;
 const MAX_CACHED_BODIES_PER_JOURNAL = 400;
+const MAX_LEGACY_VIEWS_PER_JOURNAL = 4;
+/** Byte budget for idless-spine boundary probes (same-size rewrite detection). */
+const LEGACY_PROBE_BYTES = 256;
 
 declare global {
   var __ompJournalIndexCache: Map<string, JournalIndex> | undefined;
@@ -255,6 +318,32 @@ function appendPreview(current: string, value: unknown): string {
   return joined.length > PREVIEW_CAP ? joined.slice(0, PREVIEW_CAP) : joined;
 }
 
+/**
+ * ToolCall labels for the outline: normalized toolName/name (matching
+ * normalizeToolCalls), file order, bounded count with an overflow marker so
+ * even a thousands-of-calls turn keeps metadata O(record). Names themselves
+ * are capped defensively; the joined preview is PREVIEW_CAP-bounded anyway.
+ */
+function toolNameLabels(content: unknown[]): string[] {
+  const labels: string[] = [];
+  let seen = 0;
+  for (const block of content) {
+    if (!isPlainRecord(block) || block.type !== "toolCall") continue;
+    seen++;
+    if (labels.length < TOOL_NAME_LABEL_CAP) {
+      const name = typeof block.toolName === "string" ? block.toolName
+        : typeof block.name === "string" ? block.name
+          : "";
+      labels.push(name.slice(0, TOOL_NAME_CHAR_CAP));
+    }
+    if (seen > TOOL_NAME_SCAN_CAP) break;
+  }
+  if (seen > TOOL_NAME_LABEL_CAP) {
+    labels.push(seen > TOOL_NAME_SCAN_CAP ? "… more" : `+${seen - TOOL_NAME_LABEL_CAP} more`);
+  }
+  return labels;
+}
+
 function metaFromEntry(entry: Record<string, unknown>, offset: number, end: number): JournalRecordMeta | null {
   const id = entry.id;
   const type = entry.type;
@@ -284,6 +373,10 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
     if (typeof content === "string") {
       preview = appendPreview(preview, content);
     } else if (Array.isArray(content)) {
+      // Tool labels are collected independently of the text-preview cap so
+      // tool-only assistants (and huge-text turns) still get outline labels.
+      const toolNames = toolNameLabels(content);
+      if (toolNames.length > 0) meta.toolNames = toolNames;
       for (const block of content) {
         if (!isPlainRecord(block)) continue;
         if (block.type === "image") meta.hasImage = true;
@@ -313,6 +406,10 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
     if (typeof entry.summary === "string") meta.preview = appendPreview("", entry.summary);
   } else if (type === "compaction") {
     meta.firstKeptEntryId = typeof entry.firstKeptEntryId === "string" ? entry.firstKeptEntryId : "";
+    if (typeof entry.summary === "string") {
+      const preview = appendPreview("", entry.summary);
+      if (preview) meta.preview = preview;
+    }
   } else if (type === "label") {
     meta.targetId = typeof entry.targetId === "string" ? entry.targetId : undefined;
     meta.label = typeof entry.label === "string" ? entry.label : null;
@@ -420,6 +517,8 @@ function indexRecordLine(index: JournalIndex, line: Buffer, offset: number, end:
  * bytes inside the already-scanned region — detected by re-checking the last
  * indexed record's id against its recorded bytes. Cheap: one record re-read,
  * not a full-file scan. On mismatch the spine is rebuilt from byte zero.
+ * Idless legacy spines have no record ids; their rewrites are detected by
+ * bounded byte probes at view/scan boundaries (legacyView).
  */
 function ensureIndex(fd: number, index: JournalIndex, fileSize: number, mtimeMs: number, bound: number): void {
   const scanBound = Math.min(bound, fileSize);
@@ -445,16 +544,31 @@ function ensureIndex(fd: number, index: JournalIndex, fileSize: number, mtimeMs:
     index.headFingerprint = "";
     index.header = undefined;
     index.slotTitle = undefined;
-    index.legacyCache = undefined;
+    // A rebuild is a rewrite signal (same-size mtime change, shrink, head or
+    // tail-record mismatch). Record every wiped view's extent as invalidated
+    // so anchored legacy navigation fails stale even when the rewrite lands
+    // in the SAME millisecond as the snapshot's mtime — the bounded byte
+    // probes alone cannot see an arbitrary middle-of-prefix rewrite.
+    for (const view of index.legacyViews) index.legacyEvictedExtents.push(view.scanEnd);
+    while (index.legacyEvictedExtents.length > MAX_LEGACY_VIEWS_PER_JOURNAL * 2) index.legacyEvictedExtents.shift();
+    index.legacyViews = [];
+    index.legacyBoundaryProbe = undefined;
   }
   scanForward(fd, index, scanBound);
+  if (index.version !== undefined && index.version < 3 && index.scannedTo > 0) {
+    // Legacy spine: remember the bytes at the new scan boundary so a later
+    // anchored read can detect an overwrite near the old boundary after an
+    // append (idless v1 spines have no record ids for verifyTailRecord).
+    const start = Math.max(0, index.scannedTo - LEGACY_PROBE_BYTES);
+    index.legacyBoundaryProbe = { start, end: index.scannedTo, text: readRange(fd, start, index.scannedTo).toString("utf8") };
+  }
   index.sizeBytes = fileSize;
   index.mtimeMs = mtimeMs;
 }
 
 function verifyTailRecord(fd: number, index: JournalIndex, fileSize: number): boolean {
   const last = index.records[index.records.length - 1];
-  if (!last) return index.scannedTo === 0;
+  if (!last) return true; // idless spine: rewrites detected via boundary probes
   // An offset-shifting rewrite moves the record's terminating newline; the
   // byte at end-1 must still be a newline and the id must still sit at offset.
   if (last.end > fileSize) return false;
@@ -475,7 +589,13 @@ function verifyHead(fd: number, index: JournalIndex, fileSize: number): boolean 
     index.headFingerprint = head;
     return true;
   }
-  if (head === index.headFingerprint) return true;
+  // Compare only the captured prefix: an append grows the head window, and
+  // treating that growth as a rewrite would rebuild the spine (and wipe
+  // retained legacy views) on every append to a sub-1024B journal.
+  if (head.length >= index.headFingerprint.length && head.slice(0, index.headFingerprint.length) === index.headFingerprint) {
+    index.headFingerprint = head;
+    return true;
+  }
   index.headFingerprint = head;
   return false;
 }
@@ -507,7 +627,9 @@ function loadIndex(filePath: string): LoadedJournal {
         headFingerprint: "",
         header: undefined,
         slotTitle: undefined,
-        legacyCache: undefined,
+        legacyViews: [],
+        legacyBoundaryProbe: undefined,
+        legacyEvictedExtents: [],
       };
       cache.set(filePath, index);
       while (cache.size > MAX_CACHED_JOURNALS) {
@@ -632,6 +754,58 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * Outline role for a rendered display record, or null when the record is a
+ * rendered message that the outline does not list (toolResult/bashExecution/
+ * custom_message). Such positions still count toward ordinals so outline
+ * ordinals match the window readers' rendered-message positions exactly.
+ */
+function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | null {
+  if (meta.type === "message") {
+    if (meta.role === "user") return "user";
+    if (meta.role === "assistant") return "assistant";
+    return null;
+  }
+  if (meta.type === "compaction") return "summary";
+  if (meta.type === "branch_summary") return "summary";
+  return null;
+}
+
+/**
+ * Deterministic bounded plain preview from spine metadata only. Text wins;
+ * tool-only assistants fall back to their toolCall labels, image-only turns
+ * to "[image]". Whitespace is collapsed by appendPreview at index time.
+ */
+function outlinePreview(meta: JournalRecordMeta): string {
+  if (meta.preview) return meta.preview;
+  if (meta.toolNames && meta.toolNames.length > 0) {
+    const joined = meta.toolNames.join(", ");
+    return joined.length > PREVIEW_CAP ? joined.slice(0, PREVIEW_CAP) : joined;
+  }
+  return meta.hasImage ? "[image]" : "";
+}
+
+/** Rendered display positions (metadata only), shared by windows + outline. */
+function renderedPositions(display: JournalRecordMeta[]): number[] {
+  const positions: number[] = [];
+  for (let i = 0; i < display.length; i++) {
+    if (rendersMessage(display[i])) positions.push(i);
+  }
+  return positions;
+}
+
+/**
+ * Inclusive around window over rendered positions (#104): centered on the
+ * target, clamped at the transcript edges, at most `limit` positions. The
+ * caller guarantees the target position exists.
+ */
+function aroundRange(at: number, total: number, limit: number): { start: number; end: number } {
+  let start = Math.max(0, at - Math.floor((limit - 1) / 2));
+  const end = Math.min(start + limit, total);
+  start = Math.max(0, end - limit);
+  return { start, end };
 }
 
 /** Settings from metadata (thinking level + default model), no bodies needed. */
@@ -936,9 +1110,10 @@ export async function readSessionHistory(
     loaded = loadIndex(normalized);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      if (options.around !== undefined) throw new HistoryTargetUnavailableError("not_found");
       return {
         context: { messages: [], entryIds: [], thinkingLevel: "off", model: null },
-        page: { anchor: { ...EMPTY_ANCHOR }, hasEarlier: false, headEntryId: null },
+        page: { anchor: { ...EMPTY_ANCHOR }, hasEarlier: false, headEntryId: null, hasLater: false, tailEntryId: null },
       };
     }
     throw error;
@@ -950,6 +1125,11 @@ export async function readSessionHistory(
     ensureIndex(fd, index, fileSize, mtimeMs, fileSize);
 
     const boundAnchor = bindAnchor(index, options.anchor, fileSize);
+    // around/outline navigation must never silently relocate: a stale anchor
+    // (rewrite/shrink under the caller's snapshot) is a structured failure.
+    if (options.around !== undefined && options.anchor && !boundAnchor) {
+      throw new HistoryTargetUnavailableError("stale_anchor");
+    }
     let visible = index.records;
     if (boundAnchor) {
       visible = boundAnchor.lastEntryId === null
@@ -966,7 +1146,7 @@ export async function readSessionHistory(
         : replayedLeaf;
 
     if (index.version !== undefined && index.version < 3) {
-      return legacyRead(fd, index, visible, options.leafId, limit, options, anchor, deferOptions);
+      return legacyRead(fd, index, legacyScanExtent(index, visible, boundAnchor), options.leafId, limit, options, anchor, deferOptions);
     }
 
     const path = branchMetaPath(visibleById, leafId);
@@ -974,16 +1154,26 @@ export async function readSessionHistory(
     const settings = settingsFromMeta(path);
 
     // Display positions that render a message — metadata only.
-    const renderPositions: number[] = [];
-    for (let i = 0; i < display.length; i++) {
-      if (rendersMessage(display[i])) renderPositions.push(i);
-    }
+    const renderPositions = renderedPositions(display);
 
     // Select the window over positions; parse bodies only for the slice.
     let start: number;
     let end: number;
     let hasEarlier: boolean;
-    if (options.after !== undefined) {
+    let hasLater: boolean;
+    if (options.around !== undefined) {
+      const at = renderPositions.findIndex((pos) => display[pos].id === options.around);
+      if (at < 0) {
+        // Missing, compacted-away or other-branch target: structured failure,
+        // NEVER a tail fallback that would silently relocate the reader.
+        throw new HistoryTargetUnavailableError(
+          visibleById.has(options.around) ? "not_visible" : "not_found",
+        );
+      }
+      ({ start, end } = aroundRange(at, renderPositions.length, limit));
+      hasEarlier = start > 0;
+      hasLater = end < renderPositions.length;
+    } else if (options.after !== undefined) {
       const at = renderPositions.findIndex((pos) => display[pos].id === options.after);
       if (at >= 0) {
         start = at + 1;
@@ -995,15 +1185,18 @@ export async function readSessionHistory(
         end = renderPositions.length;
       }
       hasEarlier = start > 0;
+      hasLater = end < renderPositions.length;
     } else if (options.before !== undefined) {
       const at = renderPositions.findIndex((pos) => display[pos].id === options.before);
       end = at >= 0 ? at : renderPositions.length;
       start = Math.max(0, end - limit);
       hasEarlier = start > 0;
+      hasLater = end < renderPositions.length;
     } else {
       end = renderPositions.length;
       start = Math.max(0, end - limit);
       hasEarlier = start > 0;
+      hasLater = end < renderPositions.length;
     }
 
     const messages: AgentMessage[] = [];
@@ -1012,10 +1205,25 @@ export async function readSessionHistory(
       const meta = display[renderPositions[i]];
       const body = bodyAt(fd, index, meta);
       if (!body) continue;
-      const message = entryToUiMessage(body, deferOptions);
+      let message: AgentMessage | null;
+      try {
+        message = entryToUiMessage(body, deferOptions);
+      } catch (error) {
+        // A malformed around TARGET must fail structured, not 500; other
+        // entries keep the existing skip-on-bad-body behavior.
+        if (meta.id === options.around) throw new HistoryTargetUnavailableError("not_found");
+        throw error;
+      }
       if (!message) continue;
       messages.push(message);
       entryIds.push(meta.id);
+    }
+
+    // Frozen contract: an around window MUST include its target. A body that
+    // cannot be read/converted inside the slice is a structured failure, not
+    // a silently relocated page.
+    if (options.around !== undefined && !entryIds.includes(options.around)) {
+      throw new HistoryTargetUnavailableError("not_found");
     }
 
     const context: SessionContext = {
@@ -1028,10 +1236,16 @@ export async function readSessionHistory(
       anchor,
       hasEarlier,
       headEntryId: entryIds[0] ?? null,
+      hasLater,
+      tailEntryId: renderPositions.length > 0 ? display[renderPositions[renderPositions.length - 1]].id : null,
     };
     const tree = buildSpineTree(visible, index.treeCache);
     if (!boundAnchor) index.treeCache = { count: visible.length, tree };
-    const contextUsage = await contextUsageFromBranch(path, settings.model, (meta) => bodyAt(fd, index, meta));
+    // around reads stay body-bounded to the selected slice: usage would parse
+    // the assistant anchor + every later body, so it is skipped for around.
+    const contextUsage = options.around !== undefined
+      ? undefined
+      : await contextUsageFromBranch(path, settings.model, (meta) => bodyAt(fd, index, meta));
     return {
       context,
       page,
@@ -1045,10 +1259,175 @@ export async function readSessionHistory(
   }
 }
 
+export interface ReadSessionOutlineOptions {
+  /** Branch leaf; undefined = replayed leaf, null = no active branch. */
+  leafId?: string | null;
+  /** Bound the outline to this durable position; stale anchors throw. */
+  anchor?: JournalAnchor;
+}
+
+/**
+ * Metadata-only transcript outline (#104): one entry per durable
+ * user/assistant/summary message on the visible branch, with a bounded
+ * deterministic preview and the rendered-message ordinal. Modern journals
+ * never parse entry bodies here — the spine scan (once per file version)
+ * carries ids, roles, timestamps and capped previews/tool labels. Legacy
+ * journals reuse the cached migrated view; ids match the window readers'.
+ * Stale anchors raise HistoryTargetUnavailableError instead of silently
+ * re-deriving, so an outline can never relocate a navigation snapshot.
+ */
+export async function readSessionOutline(
+  filePath: string,
+  options: ReadSessionOutlineOptions = {},
+): Promise<SessionOutline> {
+  const normalized = normalizePath(filePath);
+  let loaded: LoadedJournal;
+  try {
+    loaded = loadIndex(normalized);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      // A valid EMPTY anchor (fresh all-zero boundary of a transient live
+      // session) describes "nothing durable yet": empty outline, not stale.
+      // A non-empty anchor against a missing file is a real stale snapshot.
+      if (options.anchor && (options.anchor.entryCount !== 0 || options.anchor.lastEntryId !== null)) {
+        throw new HistoryTargetUnavailableError("stale_anchor");
+      }
+      return { anchor: options.anchor ?? { ...EMPTY_ANCHOR }, leafId: null, entries: [] };
+    }
+    throw error;
+  }
+  const { fd, index, fileSize, mtimeMs } = loaded;
+  try {
+    ensureIndex(fd, index, fileSize, mtimeMs, fileSize);
+    const boundAnchor = bindAnchor(index, options.anchor, fileSize);
+    if (options.anchor && !boundAnchor) throw new HistoryTargetUnavailableError("stale_anchor");
+    const visible = boundAnchor
+      ? boundAnchor.lastEntryId === null ? [] : index.records.slice(0, boundAnchor.entryCount)
+      : index.records;
+    const visibleById = boundAnchor ? new Map(visible.map((record) => [record.id, record])) : index.byId;
+    const anchor = boundAnchor ?? anchorFromIndex(index, fileSize, mtimeMs);
+
+    if (index.version !== undefined && index.version < 3) {
+      const scanEnd = legacyScanExtent(index, visible, boundAnchor);
+      // Anchored snapshots must never silently re-migrate (fresh random ids).
+      // Decide stale BEFORE any migration so a failed check cannot heal the
+      // cache with a wrong-id view: detected prefix rewrite, or no retained
+      // view while the file changed since the snapshot (rewrite/eviction).
+      // Matching mtime with no view = never-read extent, legitimately migrates.
+      if (boundAnchor) {
+        if (invalidateRewrittenLegacyViews(fd, index, scanEnd)) {
+          throw new HistoryTargetUnavailableError("stale_anchor");
+        }
+        const retained = index.legacyViews.some((view) => view.scanEnd === scanEnd);
+        if (!retained && (
+          boundAnchor.mtimeMs !== index.mtimeMs
+          || index.legacyEvictedExtents.includes(scanEnd)
+        )) {
+          throw new HistoryTargetUnavailableError("stale_anchor");
+        }
+      }
+      const legacy = legacyView(fd, index, scanEnd);
+      // Same leaf contract as legacyRead: null clears, unknown replays.
+      const resolvedLeaf = options.leafId === null
+        ? null
+        : options.leafId !== undefined && legacy.byId.has(options.leafId)
+          ? options.leafId
+          : undefined;
+      const full = buildSessionContext(legacy.entries, resolvedLeaf, {});
+      const entries: SessionOutlineEntry[] = [];
+      for (let ordinal = 0; ordinal < full.entryIds.length; ordinal++) {
+        const meta = legacy.byId.get(full.entryIds[ordinal]);
+        if (!meta) continue;
+        const role = outlineRole(meta);
+        if (!role) continue;
+        entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal });
+      }
+      const leafId = resolvedLeaf === undefined ? resolveLeafFromMeta(legacy.metas, legacy.byId) : resolvedLeaf;
+      return { anchor, leafId, entries };
+    }
+
+    const replayedLeaf = resolveLeafFromMeta(visible, visibleById);
+    const leafId = options.leafId === null
+      ? null
+      : options.leafId !== undefined && visibleById.has(options.leafId)
+        ? options.leafId
+        : replayedLeaf;
+    const display = displayMetaPath(branchMetaPath(visibleById, leafId));
+    const positions = renderedPositions(display);
+    const entries: SessionOutlineEntry[] = [];
+    for (let ordinal = 0; ordinal < positions.length; ordinal++) {
+      const meta = display[positions[ordinal]];
+      const role = outlineRole(meta);
+      if (!role) continue;
+      entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal });
+    }
+    return { anchor, leafId, entries };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The fixed title slot is authoritative over the header's inline title. */
 function foldSlotTitle(header: SessionHeader, slotTitle: string | undefined): SessionHeader {
   if (slotTitle === undefined) return header;
   return { ...header, title: slotTitle };
+}
+
+/**
+ * Byte extent a legacy read must cover. With records, the last visible
+ * record's end bounds it. With an EMPTY visible set under an anchor (idless
+ * v1 spines, or a header-only empty snapshot), the anchor's byte size bounds
+ * it — never the current scanned extent, which would leak post-anchor
+ * appends into the snapshot. Unanchored reads use the full scanned extent.
+ */
+function legacyScanExtent(index: JournalIndex, visible: JournalRecordMeta[], boundAnchor: JournalAnchor | null): number {
+  if (visible.length > 0) return visible[visible.length - 1].end;
+  if (boundAnchor) return Math.min(boundAnchor.sizeBytes, index.scannedTo);
+  return index.scannedTo;
+}
+
+/**
+ * Cache lookup of a retained legacy view with the same bounded rewrite
+ * probes legacyView applies (no migration). Returns undefined on miss or
+ * detected rewrite (views dropped); callers then build a fresh view.
+ * Anchored navigation reuses its snapshot's view so migrated target ids
+ * stay stable across later appends.
+ */
+function retainedLegacyView(fd: number, index: JournalIndex, scanEnd: number): LegacyCache | undefined {
+  invalidateRewrittenLegacyViews(fd, index, scanEnd);
+  const probeStart = Math.max(0, scanEnd - LEGACY_PROBE_BYTES);
+  const probe = readRange(fd, probeStart, scanEnd).toString("utf8");
+  const at = index.legacyViews.findIndex((view) => view.scanEnd === scanEnd);
+  if (at < 0) return undefined;
+  const [view] = index.legacyViews.splice(at, 1);
+  if (view.tailProbe !== probe) {
+    index.legacyViews = [];
+    return undefined;
+  }
+  index.legacyViews.push(view); // refresh LRU position
+  return view;
+}
+
+/**
+ * Legacy rewrite probe: when the scan boundary moved past a requested extent
+ * (append), the bytes captured at the old boundary must still sit at the same
+ * offsets; a mismatch means the prefix was rewritten — drop every retained
+ * view before any cache hit. Returns true when a rewrite was detected.
+ */
+function invalidateRewrittenLegacyViews(fd: number, index: JournalIndex, scanEnd: number): boolean {
+  if (index.version === undefined || index.version >= 3) return false;
+  if (
+    index.legacyBoundaryProbe
+    && index.legacyBoundaryProbe.end > scanEnd
+  ) {
+    const p = index.legacyBoundaryProbe;
+    const expected = readRange(fd, p.start, p.end).toString("utf8");
+    if (expected !== p.text) {
+      index.legacyViews = [];
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1060,14 +1439,28 @@ function foldSlotTitle(header: SessionHeader, slotTitle: string | undefined): Se
 async function legacyRead(
   fd: number,
   index: JournalIndex,
-  visible: JournalRecordMeta[],
+  scanEnd: number,
   leafId: string | null | undefined,
   limit: number,
   options: ReadSessionHistoryOptions,
   anchor: JournalAnchor,
   deferOptions: { deferThinking?: boolean; deferToolResultImages?: boolean },
 ): Promise<SessionHistoryResult> {
-  const legacy = legacyView(fd, index, visible);
+  // Navigation-only strictness (tail/before/after keep re-deriving): decide
+  // stale BEFORE migration so a failed check never re-inserts a wrong-id view.
+  if (options.around !== undefined && options.anchor) {
+    if (invalidateRewrittenLegacyViews(fd, index, scanEnd)) {
+      throw new HistoryTargetUnavailableError("stale_anchor");
+    }
+    const retained = index.legacyViews.some((view) => view.scanEnd === scanEnd);
+    if (!retained && (
+      options.anchor.mtimeMs !== index.mtimeMs
+      || index.legacyEvictedExtents.includes(scanEnd)
+    )) {
+      throw new HistoryTargetUnavailableError("stale_anchor");
+    }
+  }
+  const legacy = legacyView(fd, index, scanEnd);
   const { entries, metas, byId } = legacy;
   // Explicit migrated leaf honored when it exists; otherwise replay the
   // migrated leaf (undefined lets the SDK resolve it, null clears it).
@@ -1076,28 +1469,64 @@ async function legacyRead(
     : leafId !== undefined && byId.has(leafId)
       ? leafId
       : undefined;
+  // Target-only conversion pre-check: a malformed around TARGET must fail
+  // structured, not 500. Unrelated malformed entries keep prior behavior
+  // (buildSessionContext below is intentionally NOT wrapped).
+  if (options.around !== undefined) {
+    const targetEntry = legacy.entriesById.get(options.around);
+    if (targetEntry) {
+      try {
+        entryToUiMessage(targetEntry, deferOptions);
+      } catch {
+        throw new HistoryTargetUnavailableError("not_found");
+      }
+    }
+  }
   const full = buildSessionContext(entries, resolvedLeaf, deferOptions);
-  const contextUsage = await contextUsageFromBranch(
-    branchMetaPath(byId, resolvedLeaf === undefined ? resolveLeafFromMeta(metas, byId) : resolvedLeaf),
-    full.model,
-    (meta) => legacy.entriesById.get(meta.id) ?? null,
-  );
+  // around windows skip usage: it tokenizes the assistant anchor + tail, and
+  // around responses stay bounded to the selected slice (legacy bodies are
+  // already migrated in full by legacyView, the compatibility path).
+  const contextUsage = options.around !== undefined
+    ? undefined
+    : await contextUsageFromBranch(
+      branchMetaPath(byId, resolvedLeaf === undefined ? resolveLeafFromMeta(metas, byId) : resolvedLeaf),
+      full.model,
+      (meta) => legacy.entriesById.get(meta.id) ?? null,
+    );
   const rendered = full.messages.map((message, i) => ({ id: full.entryIds[i], message }));
   let windowEntries: typeof rendered;
   let hasEarlier: boolean;
-  if (options.after !== undefined) {
+  let hasLater: boolean;
+  if (options.around !== undefined) {
+    const at = rendered.findIndex((item) => item.id === options.around);
+    if (at < 0) {
+      // Same structured contract as the modern path — never a tail fallback.
+      // The pre-migration guard already rejected stale anchored snapshots,
+      // so an absent id here is provably not on the visible branch.
+      throw new HistoryTargetUnavailableError(byId.has(options.around) ? "not_visible" : "not_found");
+    }
+    const { start, end } = aroundRange(at, rendered.length, limit);
+    windowEntries = rendered.slice(start, end);
+    hasEarlier = start > 0;
+    hasLater = end < rendered.length;
+  } else if (options.after !== undefined) {
     const afterIdx = rendered.findIndex((item) => item.id === options.after);
     windowEntries = afterIdx >= 0 ? rendered.slice(afterIdx + 1) : rendered.slice(-limit);
     if (options.limit !== undefined) windowEntries = windowEntries.slice(0, limit);
     hasEarlier = (afterIdx >= 0 ? afterIdx + 1 : rendered.length - windowEntries.length) > 0;
+    hasLater = afterIdx >= 0
+      ? afterIdx + 1 + windowEntries.length < rendered.length
+      : false;
   } else if (options.before !== undefined) {
     const beforeIdx = rendered.findIndex((item) => item.id === options.before);
     const end = beforeIdx >= 0 ? beforeIdx : rendered.length;
     windowEntries = rendered.slice(Math.max(0, end - limit), end);
     hasEarlier = end - windowEntries.length > 0;
+    hasLater = end < rendered.length;
   } else {
     windowEntries = rendered.slice(-limit);
     hasEarlier = rendered.length > windowEntries.length;
+    hasLater = false;
   }
   return {
     context: {
@@ -1106,7 +1535,13 @@ async function legacyRead(
       thinkingLevel: full.thinkingLevel,
       model: full.model,
     },
-    page: { anchor, hasEarlier, headEntryId: windowEntries[0]?.id ?? null },
+    page: {
+      anchor,
+      hasEarlier,
+      headEntryId: windowEntries[0]?.id ?? null,
+      hasLater,
+      tailEntryId: rendered[rendered.length - 1]?.id ?? null,
+    },
     tree: legacy.tree,
     ...(contextUsage ? { contextUsage } : {}),
     totalActiveMs: computeSessionTotalActiveMs(entries),
@@ -1115,16 +1550,18 @@ async function legacyRead(
 }
 
 /**
- * Migrated legacy view, cached per scanned byte extent. v1 ids are assigned
- * by the migration itself, so re-running it per page would renumber ids and
- * break before/after cursors; one migration per file version keeps them
- * stable. Invalidated with the spine on any rewrite/append.
+ * Migrated legacy view for one byte extent, retained in a bounded per-journal
+ * LRU. v1 ids are assigned randomly by the migration itself, so each extent
+ * migrates ONCE and its view stays cached: an anchored navigation snapshot
+ * keeps its migrated target ids even after later appends grow the file (the
+ * prefix extent's cached view is reused, never re-migrated). Views drop only
+ * on LRU eviction or a detected rewrite (spine invalidation).
  */
-function legacyView(fd: number, index: JournalIndex, visible: JournalRecordMeta[]): LegacyCache {
-  // v1 records have no ids, so the spine may be empty even though the file
-  // has content: fall back to the scanned byte extent when unanchored.
-  const scanEnd = visible.length > 0 ? visible[visible.length - 1].end : index.scannedTo;
-  if (index.legacyCache && index.legacyCache.scanEnd === scanEnd) return index.legacyCache;
+function legacyView(fd: number, index: JournalIndex, scanEnd: number): LegacyCache {
+  const retained = retainedLegacyView(fd, index, scanEnd);
+  if (retained) return retained;
+  const probeStart = Math.max(0, scanEnd - LEGACY_PROBE_BYTES);
+  const probe = readRange(fd, probeStart, scanEnd).toString("utf8");
 
   const raw: Record<string, unknown>[] = [];
   let pending = "";
@@ -1173,7 +1610,15 @@ function legacyView(fd: number, index: JournalIndex, visible: JournalRecordMeta[
     metas,
     byId,
     tree: buildSpineTree(metas, undefined),
+    tailProbe: probe,
   };
-  index.legacyCache = cache;
+  index.legacyViews.push(cache);
+  while (index.legacyViews.length > MAX_LEGACY_VIEWS_PER_JOURNAL) {
+    const evicted = index.legacyViews.shift();
+    if (evicted) {
+      index.legacyEvictedExtents.push(evicted.scanEnd);
+      if (index.legacyEvictedExtents.length > MAX_LEGACY_VIEWS_PER_JOURNAL * 2) index.legacyEvictedExtents.shift();
+    }
+  }
   return cache;
 }
