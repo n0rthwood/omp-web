@@ -164,7 +164,7 @@ interface JournalRecordMeta {
   /** label only. */
   targetId?: string;
   label?: string | null;
-  /** model_usage only: captured active leaf (may be null). */
+  /** model_usage only: undefined selects itself, null clears, string captures a leaf. */
   activeLeafId?: string | null;
   /** model_change only. */
   modelSelector?: string;
@@ -317,7 +317,9 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
     meta.targetId = typeof entry.targetId === "string" ? entry.targetId : undefined;
     meta.label = typeof entry.label === "string" ? entry.label : null;
   } else if (type === "model_usage") {
-    meta.activeLeafId = typeof entry.activeLeafId === "string" ? entry.activeLeafId : null;
+    if (entry.activeLeafId === null || typeof entry.activeLeafId === "string") {
+      meta.activeLeafId = entry.activeLeafId;
+    }
   } else if (type === "model_change") {
     if (typeof entry.model === "string") {
       meta.modelSelector = entry.model;
