@@ -313,6 +313,11 @@ export class AgentSessionWrapper {
       }
       return;
     }
+    if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "host_seq") {
+      // Per-client transient drops advance the ring without transferring bytes.
+      if ("seq" in parsed && typeof parsed.seq === "number") this.lastSeenSeq = parsed.seq;
+      return;
+    }
     if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "host_attach") {
       // host_attach.seq is the authoritative ring position — never byte-sum
       // client-side (duplicate ready + live/replay copies make that unreliable).
