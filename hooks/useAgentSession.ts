@@ -287,6 +287,8 @@ function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
   }
 }
 
+export type RefreshErrorState = { count: number; message: string };
+
 function extractMessageText(message: Partial<AgentMessage>): string {
   const content = (message as { content?: unknown }).content;
   if (typeof content === "string") return content;
@@ -388,6 +390,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
+  // Non-blocking background-refresh failure indicator (#100).
+  const [refreshError, setRefreshError] = useState<RefreshErrorState | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
@@ -467,6 +471,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [submissions] = useState(createSubmissionTracker);
   const inFlightPromptRef = useRef<{ promptId: string; message: string; images?: AttachedImage[] } | null>(null);
   const modelSwitchPendingRef = useRef(false);
+  // Synchronous mirrors for loadSession's failure routing (#100): a
+  // turn-completion refresh can reject before React commits the rendered
+  // messages/streaming state, and a stale "nothing rendered" read would wipe
+  // the view. Updated during render and on every failure/success below.
+  const hasRenderedContentRef = useRef(false);
+  const refreshErrorRef = useRef<RefreshErrorState | null>(null);
+  hasRenderedContentRef.current = data !== null || messages.length > 0 || streamState.isStreaming || agentRunning || bashRunning;
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -527,8 +538,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setActiveLeafId(null);
           setMessages([]);
           setError(null);
+          refreshErrorRef.current = null;
+          setRefreshError(null);
+          return null;
         }
-        return null;
+        // A background refresh hitting a vanished session is still a failed
+        // load (#100): route it through the same non-blocking indicator.
+        throw new Error("HTTP 404");
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
@@ -541,6 +557,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPlanMode(d.planMode ?? null);
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
+      refreshErrorRef.current = null;
+      setRefreshError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
         setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
       }
@@ -574,7 +592,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
     } catch (e) {
-      setError(String(e));
+      // A late rejection for a session we already navigated away from must
+      // not touch the new view (same guard as the success path).
+      if (sessionIdRef.current !== sid) return null;
+      const message = String(e);
+      // #100: a failed refresh is fatal only while nothing is rendered. Once
+      // messages/streaming are on screen it becomes a non-blocking count that
+      // the next successful fetch/reconcile clears; the rendered view,
+      // composer draft and scroll position are never touched by the failure.
+      if (!hasRenderedContentRef.current) {
+        setError(message);
+      } else {
+        const next = { count: (refreshErrorRef.current?.count ?? 0) + 1, message };
+        refreshErrorRef.current = next;
+        setRefreshError(next);
+      }
       return null;
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
@@ -1157,6 +1189,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
       if (promptRunIdRef.current !== runId) return;
+      refreshErrorRef.current = null;
+      setRefreshError(null);
       const state = data.state;
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
@@ -1191,6 +1225,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         || sessionIdRef.current !== sid
         || promptRunIdRef.current !== runId
       ) return;
+      refreshErrorRef.current = null;
+      setRefreshError(null);
       if (data.state?.contextUsage !== undefined) setContextUsage(data.state.contextUsage ?? null);
     } catch {
       // The next refresh retries; state reconciliation owns error recovery.
@@ -2374,7 +2410,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    data, loading, error, activeLeafId, messages, entryIds, streamState,
+    data, loading, error, refreshError, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,

@@ -216,7 +216,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   }, [chatInputRef]);
 
   const {
-    loading, error, messages, entryIds, streamState,
+    loading, error, refreshError, data, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
@@ -438,7 +438,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     );
   }
 
-  if (error) {
+  // #100: the full-screen error is reserved for an initial load with nothing
+  // rendered. Once the session view exists (loaded data — even an empty
+  // session — messages, or streaming), a failed background refresh only
+  // raises the non-blocking indicator below — never replaces the chat.
+  if (error && data === null && messages.length === 0 && !streamState.isStreaming && !agentRunning && !bashRunning) {
     return (
       <div className="flex h-full items-center justify-center text-red-400">
         {error}
@@ -574,6 +578,41 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             <NoticeShelf notices={notices} floating align="right" />
           </div>
         </div>
+        {refreshError && (
+          <div
+            data-testid="session-refresh-error"
+            role="status"
+            style={{
+              position: "absolute",
+              bottom: 8,
+              left: 0,
+              right: 0,
+              zIndex: 40,
+              padding: `0 ${CHAT_COLUMN_PADDING}px`,
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              title={refreshError.message}
+              style={{
+                width: "fit-content",
+                maxWidth: "100%",
+                margin: "0 auto",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                borderRadius: 12,
+                border: "1px solid color-mix(in srgb, #ef4444 35%, var(--border))",
+                background: "color-mix(in srgb, #ef4444 12%, var(--bg-panel))",
+                color: "#ef4444",
+                fontSize: 12,
+                padding: "4px 12px",
+              }}
+            >
+              {t("chat.refreshFailed", { count: refreshError.count, error: refreshError.message })}
+            </div>
+          </div>
+        )}
         <div ref={scrollContainerRef} className="chat-session-scroll min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]">
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: 820, margin: "0 auto" }}>
