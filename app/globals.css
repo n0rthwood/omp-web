@@ -228,6 +228,37 @@ body {
   background-color: var(--text);
 }
 
+/* #104: brief emphasis when auto-follow pauses (static under reduced motion). */
+@keyframes follow-pause-emphasis {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  60% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.follow-pause-emphasis {
+  animation: follow-pause-emphasis 0.9s ease-out 1;
+}
+
+/* #104: brief highlight on the outline-jump target block. */
+@keyframes entry-target-flash {
+  0% { background-color: color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { background-color: transparent; }
+}
+.entry-target-flash {
+  border-radius: 10px;
+  animation: entry-target-flash 1.6s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .follow-pause-emphasis {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .entry-target-flash {
+    animation: none;
+    background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+}
+
 :root {
   /* System monospace stack. omp-web is a local tool: it must not depend on a
      font CDN at build or at runtime, and the terminal-native faces below are

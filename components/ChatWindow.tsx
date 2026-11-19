@@ -20,6 +20,7 @@ import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, findStoppedAnswerIndices, getAssistantErrorMessage, getDisplayableAssistantBlocks, hasFinalAnswerBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
+import { SessionOutline } from "./SessionOutline";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
@@ -141,8 +142,18 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, children, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, expandSignal = null, children, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; expandSignal?: { id: string; epoch: number } | null; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  // #104: an outline jump into a folded process group must reveal its target
+  // before the UI scrolls to it. The signal carries the RESOLVED target id +
+  // seek epoch and is only passed to the group actually containing that
+  // anchored entry — unrelated pending clicks never re-open old groups, while
+  // a same-id re-click after manual collapse bumps the epoch and re-expands.
+  const hasExpandSignal = expandSignal !== null;
+  const expandEpoch = expandSignal?.epoch ?? 0;
+  useEffect(() => {
+    if (hasExpandSignal) setExpanded(true);
+  }, [hasExpandSignal, expandEpoch]);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
@@ -219,7 +230,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     agentPhase,
     isNew,
     historyHasEarlier, historyLoading, handleLoadEarlier,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, scrollContainerRef, scrollContentRef,
+    autoFollow, toggleAutoFollow,
+    outline, outlineLoading, outlineError, loadOutline,
+    historyBrowsing, historyTargetEntryId, historyNavigationLoading, historyNavigationError,
+    handleJumpToEntry, handleReturnToLatest, cancelHistoryNavigation,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
@@ -230,6 +245,261 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
   const sessionBusy = agentRunning || bashRunning;
+
+  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
+
+  // --- #104 outline / scroll UI state (hook owns follow + history navigation) ---
+  const chatRegionRef = useRef<HTMLDivElement | null>(null);
+  const [regionWidth, setRegionWidth] = useState(0);
+  // Rail needs room for the transcript column AND the outline: below this
+  // container width (also true when a side panel eats width on a wide screen)
+  // the outline becomes a drawer instead.
+  const outlineRailSpace = regionWidth >= 1000;
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const outlineRail = outlineRailSpace && !railCollapsed;
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const outlineTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [readingEntryId, setReadingEntryId] = useState<string | null>(null);
+  const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
+  const [followJustPaused, setFollowJustPaused] = useState(false);
+  const prevAutoFollowRef = useRef(autoFollow);
+  const jumpSeqRef = useRef(0);
+  const seekFrameRef = useRef<number | null>(null);
+  // Re-clicking the same outline row (or retrying a failed jump) must still
+  // scroll: the hook's target id may not change, so bump a local epoch.
+  const [jumpEpoch, setJumpEpoch] = useState(0);
+  const lastJumpRequestRef = useRef<string | null>(null);
+  // Expansion signal published only once a seek's target is resolved — never
+  // on an unrelated pending request.
+  const [groupExpand, setGroupExpand] = useState<{ id: string; epoch: number } | null>(null);
+
+  const closeOutline = useCallback(() => setOutlineOpen(false), []);
+  const handleOutlineRetry = useCallback(() => { void loadOutline(); }, [loadOutline]);
+  const handleOutlineJump = useCallback((entryId: string) => {
+    if (!outlineRailSpace) setOutlineOpen(false);
+    lastJumpRequestRef.current = entryId;
+    setJumpEpoch((n) => n + 1);
+    void handleJumpToEntry(entryId);
+  }, [outlineRailSpace, handleJumpToEntry]);
+  const handleReturnLatest = useCallback(() => {
+    lastJumpRequestRef.current = null;
+    void handleReturnToLatest();
+  }, [handleReturnToLatest]);
+
+  // Session switch invalidates any stale jump request (failed-jump guard must
+  // not suppress seeks in the new session).
+  useEffect(() => {
+    lastJumpRequestRef.current = null;
+    setGroupExpand(null);
+  }, [session?.id]);
+  const handleOutlineTrigger = useCallback(() => {
+    if (outlineRailSpace) setRailCollapsed((v) => !v);
+    else setOutlineOpen((v) => !v);
+  }, [outlineRailSpace]);
+
+  // Growing back to rail width dismisses any open drawer (the rail takes over).
+  useEffect(() => {
+    if (outlineRailSpace) setOutlineOpen(false);
+  }, [outlineRailSpace]);
+
+  // Container-based responsiveness (not viewport): the side panel shrinking
+  // the chat must demote the rail to a drawer too.
+  useEffect(() => {
+    const el = chatRegionRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) setRegionWidth(entry.contentRect.width);
+    });
+    observer.observe(el);
+    setRegionWidth(el.clientWidth);
+    return () => observer.disconnect();
+  }, [loading, isEmptyNew, error]);
+
+  // Brief emphasis when following pauses (static under reduced motion).
+  useEffect(() => {
+    const was = prevAutoFollowRef.current;
+    prevAutoFollowRef.current = autoFollow;
+    if (was && !autoFollow) {
+      setFollowJustPaused(true);
+      const id = window.setTimeout(() => setFollowJustPaused(false), 1200);
+      return () => window.clearTimeout(id);
+    }
+    setFollowJustPaused(false);
+    return undefined;
+  }, [autoFollow]);
+
+  // Current-reading indication: the entry block spanning a probe line near
+  // the top of the viewport (falls back to the first visible block, and to
+  // the last block when scrolled to the bottom). Pure measurement — never
+  // writes the transcript scroll position.
+  useEffect(() => {
+    // Nothing consumes readingEntryId while the outline is hidden — skip all
+    // per-frame measurement cost in that case.
+    if (!outlineRail && !outlineOpen) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const blocks = container.querySelectorAll<HTMLElement>("[data-entry-id]");
+      const containerRect = container.getBoundingClientRect();
+      const probe = containerRect.top + Math.min(120, containerRect.height / 3);
+      let current: string | null = null;
+      let firstVisible: string | null = null;
+      let last: string | null = null;
+      for (const block of blocks) {
+        const id = block.dataset.entryId;
+        if (!id) continue;
+        last = id;
+        const rect = block.getBoundingClientRect();
+        if (rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) continue;
+        if (firstVisible === null) firstVisible = id;
+        if (rect.top <= probe && rect.bottom > probe) current = id;
+      }
+      const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+      setReadingEntryId(current ?? firstVisible ?? (atBottom ? last : null));
+    };
+    const schedule = () => {
+      if (!raf) raf = window.requestAnimationFrame(measure);
+    };
+    container.addEventListener("scroll", schedule, { passive: true });
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
+    observer?.observe(container);
+    const content = scrollContentRef.current;
+    if (content) observer?.observe(content);
+    // Folded-group expansion / overlay swaps can add anchors without changing
+    // content height — watch childList too so reading indication stays fresh.
+    const mutations = typeof MutationObserver !== "undefined" && content ? new MutationObserver(schedule) : null;
+    if (content) mutations?.observe(content, { childList: true, subtree: true });
+    schedule();
+    return () => {
+      container.removeEventListener("scroll", schedule);
+      mutations?.disconnect();
+      observer?.disconnect();
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [loading, isEmptyNew, outlineRail, outlineOpen, entryIds, historyBrowsing, historyTargetEntryId, scrollContainerRef, scrollContentRef]);
+
+  // Position the transcript at a resolved history target ONCE, instantly,
+  // after its block has mounted (folded process groups auto-expand first).
+  // The stick-to-bottom library remains the only follow animator — no bespoke
+  // seek tween. A short rAF retry covers React commit latency; latest click
+  // wins, and pointer/wheel/touch/scroll-key intent cancels the pending seek
+  // and highlight before commit. Highlight is brief, static in reduced motion.
+  useEffect(() => {
+    const target = historyTargetEntryId;
+    if (seekFrameRef.current !== null) {
+      window.cancelAnimationFrame(seekFrameRef.current);
+      seekFrameRef.current = null;
+    }
+    // Every seek start clears the previous highlight.
+    setHighlightedEntryId(null);
+    if (!target || historyNavigationLoading || historyNavigationError) return;
+    // An epoch bump from a NEW outline click whose around-fetch is still in
+    // flight must not re-seek the OLD resolved target — wait for the hook to
+    // publish the clicked id (the target-change run handles it then).
+    if (lastJumpRequestRef.current !== null && lastJumpRequestRef.current !== target) return;
+    const seq = ++jumpSeqRef.current;
+    // Target resolved: publish the expansion signal so ONLY the group whose
+    // anchored entries contain this id re-opens (epoch covers same-id re-click).
+    setGroupExpand({ id: target, epoch: jumpEpoch });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    let attempts = 0;
+    let highlightTimer = 0;
+    const cancelOnIntent = () => {
+      if (jumpSeqRef.current !== seq) return;
+      jumpSeqRef.current += 1;
+      if (seekFrameRef.current !== null) {
+        window.cancelAnimationFrame(seekFrameRef.current);
+        seekFrameRef.current = null;
+      }
+      if (highlightTimer) {
+        window.clearTimeout(highlightTimer);
+        highlightTimer = 0;
+      }
+      setHighlightedEntryId(null);
+    };
+    const cancelOnScrollKey = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT" || (event.target as HTMLElement | null)?.isContentEditable) return;
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelOnIntent();
+    };
+    container.addEventListener("pointerdown", cancelOnIntent);
+    container.addEventListener("wheel", cancelOnIntent, { passive: true });
+    container.addEventListener("touchstart", cancelOnIntent, { passive: true });
+    container.addEventListener("keydown", cancelOnScrollKey);
+    const trySeek = () => {
+      seekFrameRef.current = null;
+      if (jumpSeqRef.current !== seq) return;
+      const el = container.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(target)}"]`);
+      if (!el) {
+        attempts += 1;
+        if (attempts < 30) {
+          seekFrameRef.current = window.requestAnimationFrame(trySeek);
+        } else {
+          // Exhausted: target never mounted — drop stale highlight/request.
+          setHighlightedEntryId(null);
+          lastJumpRequestRef.current = null;
+        }
+        return;
+      }
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const desiredTop = container.scrollTop + elRect.top - containerRect.top - Math.min(96, containerRect.height / 5);
+      const maxTop = container.scrollHeight - container.clientHeight;
+      container.scrollTop = Math.max(0, Math.min(desiredTop, maxTop));
+      if (jumpSeqRef.current !== seq) return;
+      // Seek committed — the stale-request guard has served its purpose.
+      lastJumpRequestRef.current = null;
+      setHighlightedEntryId(target);
+      highlightTimer = window.setTimeout(() => {
+        if (jumpSeqRef.current === seq) setHighlightedEntryId(null);
+      }, 1600);
+    };
+    seekFrameRef.current = window.requestAnimationFrame(trySeek);
+    return () => {
+      if (seekFrameRef.current !== null) {
+        window.cancelAnimationFrame(seekFrameRef.current);
+        seekFrameRef.current = null;
+      }
+      if (highlightTimer) window.clearTimeout(highlightTimer);
+      container.removeEventListener("pointerdown", cancelOnIntent);
+      container.removeEventListener("wheel", cancelOnIntent);
+      container.removeEventListener("touchstart", cancelOnIntent);
+      container.removeEventListener("keydown", cancelOnScrollKey);
+    };
+  }, [historyTargetEntryId, historyNavigationLoading, historyNavigationError, jumpEpoch, scrollContainerRef]);
+
+  // Human scroll intent DURING a pending around-fetch cancels the navigation
+  // itself (hook invalidates/aborts and clears loading without mutating the
+  // shown view) — not merely the late scroll positioning.
+  useEffect(() => {
+    if (!historyNavigationLoading) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    // Named wrapper: never leak the DOM Event into the hook fn, and keep one
+    // stable identity across all add/remove sites (callback identity matters).
+    const cancelNav = () => cancelHistoryNavigation();
+    const cancelNavOnKey = (event: KeyboardEvent) => {
+      const el = event.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT" || el?.isContentEditable) return;
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelNav();
+    };
+    container.addEventListener("pointerdown", cancelNav);
+    container.addEventListener("wheel", cancelNav, { passive: true });
+    container.addEventListener("touchstart", cancelNav, { passive: true });
+    container.addEventListener("keydown", cancelNavOnKey);
+    return () => {
+      container.removeEventListener("pointerdown", cancelNav);
+      container.removeEventListener("wheel", cancelNav);
+      container.removeEventListener("touchstart", cancelNav);
+      container.removeEventListener("keydown", cancelNavOnKey);
+    };
+  }, [historyNavigationLoading, cancelHistoryNavigation, scrollContainerRef]);
+
 
   useEffect(() => {
     if (!extensionDialog || soundedExtensionDialogIdRef.current === extensionDialog.id) return;
@@ -324,8 +594,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     return history.reverse();
   }, [messages]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
-  const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -520,7 +788,116 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
         </div>
       ) : (
       <>
-      <div className="relative flex min-w-0 flex-1 overflow-hidden">
+      <div ref={chatRegionRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div
+          data-testid="chat-scroll-header"
+          className="flex flex-shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1.5"
+          style={{ background: "var(--bg)" }}
+        >
+          <button
+            type="button"
+            data-testid="auto-follow-toggle"
+            aria-pressed={autoFollow}
+            title={autoFollow ? t("outline.followOnTitle") : t("outline.followOffTitle")}
+            onClick={toggleAutoFollow}
+            className={`flex h-6 flex-shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors ${autoFollow ? "border-border text-text-muted hover:text-text" : "border-[var(--accent)] text-[var(--accent)] hover:brightness-110"} ${followJustPaused && !autoFollow ? "follow-pause-emphasis" : ""}`}
+            style={{ background: autoFollow ? "transparent" : "color-mix(in srgb, var(--accent) 10%, transparent)" }}
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {autoFollow
+                ? <path d="M6 1.5v8M2.8 6.5 6 9.7l3.2-3.2" />
+                : <path d="M3.5 2.5v7M8.5 2.5v7" />}
+            </svg>
+            <span className="whitespace-nowrap">{autoFollow ? t("outline.followOn") : t("outline.followOff")}</span>
+          </button>
+          {historyBrowsing && (
+            <span
+              data-testid="history-browsing-status"
+              role="status"
+              className="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px]"
+              style={{ background: "color-mix(in srgb, #d97706 12%, transparent)", color: "#d97706" }}
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="6" cy="6" r="4.5" />
+                <path d="M6 3.5V6l1.8 1.2" />
+              </svg>
+              <span className="whitespace-nowrap">{t("outline.historyBrowsing")}</span>
+            </span>
+          )}
+          {/* Live blocks are hidden from the historical body, so the header
+              keeps an accurate global activity indicator while browsing. */}
+          {historyBrowsing && (sessionBusy || isCompacting || streamState.isStreaming) && (
+            <span
+              data-testid="history-live-activity"
+              role="status"
+              className="flex min-w-0 items-center gap-1.5 text-[11px] text-text-muted"
+            >
+              <span className="inline-block h-2 w-2 flex-shrink-0 animate-[pulse_1.5s_infinite] rounded-full" style={{ background: "var(--accent)" }} aria-hidden="true" />
+              <span className="max-w-[260px] truncate">
+                {isCompacting ? t("chat.compacting") : (phaseLabel(agentPhase, t) ?? t("outline.liveActivity"))}
+              </span>
+            </span>
+          )}
+          {historyNavigationLoading && (
+            <span role="status" data-testid="history-nav-loading" className="flex items-center gap-1.5 text-[11px] text-text-muted">
+              <span className="inline-block h-3 w-3 animate-[spin_1s_linear_infinite] rounded-full border-[1.5px] border-border border-t-[var(--accent)]" aria-hidden="true" />
+              <span className="whitespace-nowrap">{t("outline.historyLoading")}</span>
+            </span>
+          )}
+          {historyNavigationError && (
+            <span
+              role="alert"
+              data-testid="history-nav-error"
+              className="flex min-w-0 items-center gap-1.5 text-[11px] text-[#ef4444]"
+              title={historyNavigationError}
+            >
+              <span className="max-w-[220px] truncate">{t("outline.historyFailed")}</span>
+              {(lastJumpRequestRef.current ?? historyTargetEntryId) && (
+                <button
+                  type="button"
+                  data-testid="history-nav-retry"
+                  onClick={() => handleOutlineJump(lastJumpRequestRef.current ?? historyTargetEntryId!)}
+                  className="flex-shrink-0 rounded-full border border-border px-2 py-0.5 text-text-muted transition-colors hover:text-text"
+                >
+                  {t("outline.retry")}
+                </button>
+              )}
+            </span>
+          )}
+          <span className="min-w-2 flex-1" aria-hidden="true" />
+          {historyBrowsing && (
+            <button
+              type="button"
+              data-testid="return-to-latest"
+              onClick={handleReturnLatest}
+              className="flex h-6 flex-shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-[filter] hover:brightness-110"
+              style={{ background: "var(--accent)", color: "#fff" }}
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M6 10.5v-8M2.8 5.5 6 2.3l3.2 3.2" />
+              </svg>
+              <span className="whitespace-nowrap">{t("outline.returnLatest")}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            ref={outlineTriggerRef}
+            data-testid="outline-toggle"
+            aria-expanded={outlineRail || outlineOpen}
+            aria-controls="session-outline-panel"
+            aria-haspopup={outlineRailSpace ? undefined : "dialog"}
+            onClick={handleOutlineTrigger}
+            className="flex h-6 flex-shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-[11px] text-text-muted transition-colors hover:text-text"
+            style={outlineRail ? { color: "var(--accent)", borderColor: "color-mix(in srgb, var(--accent) 45%, var(--border))" } : undefined}
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
+              <path d="M1.5 2.5h9M1.5 6h6M1.5 9.5h7.5" />
+            </svg>
+            <span className="whitespace-nowrap">{t("outline.trigger")}</span>
+            {outline.length > 0 && <span className="tabular-nums text-text-dim">{outline.length}</span>}
+          </button>
+        </div>
+        <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           style={{
             position: "absolute",
@@ -571,8 +948,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             </div>
           </div>
         )}
-        <div ref={scrollContainerRef} className="chat-session-scroll min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]">
-          <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+        {/* The follow library finds wheel targets via the overflow shorthand;
+            mixed hidden/auto axes prevent its immediate upward-wheel escape. */}
+        <div ref={scrollContainerRef} className="chat-session-scroll min-w-0 flex-1 overflow-auto pt-4 [scrollbar-width:none]">
+          <div ref={scrollContentRef} style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: 820, margin: "0 auto" }}>
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
@@ -584,7 +963,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
               }
 
-              const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; anchor?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 const prevAssistantEntryId =
                   msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
@@ -599,13 +978,40 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     if (r === "user") break;
                     if (r === "assistant") { showTimestamp = false; break; }
                   }
-                  // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
-                  if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
+                  // Hide on the currently-streaming tail (the streaming bubble
+                  // owns the live timestamp) — never in the frozen historic view.
+                  if (showTimestamp && !historyBrowsing && streamState.isStreaming && idx === messages.length - 1) {
                     showTimestamp = false;
                   }
                 }
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
-                return (
+                // #104: exactly one meaningful block per outline-listed entry
+                // gets data-entry-id. Only user/assistant/compaction roles are
+                // anchored (branch_summary converts to a user message in
+                // session-reader) — paired toolResult entries render null and
+                // would leave zero-height wrappers polluting measurement.
+                // Split final-assistant renders pass anchor=false on the
+                // folded process half so the answer half (or the whole block
+                // for tool-only entries) is the unique outline/scroll target.
+                const entryId = entryIds[idx];
+                const anchorRole = msg.role === "user" || msg.role === "assistant"
+                  || (msg.role === "custom" && (msg as CustomMessage).customType === "compaction");
+                const anchor = options.anchor !== false && !!entryId && anchorRole;
+                // Empty/empty-thinking-only non-error assistants render null in
+                // MessageView but the outline still lists them — show a compact
+                // marker inside the anchor so every outline entry has a target.
+                const emptyAssistant = msg.role === "assistant"
+                  && getDisplayableAssistantBlocks(msg as AssistantMessage).length === 0
+                  && !getAssistantErrorMessage(msg as AssistantMessage);
+                const view = emptyAssistant ? (
+                  <div
+                    key={`${keyPrefix}-view-${idx}`}
+                    data-testid="empty-assistant-marker"
+                    className="py-1 text-xs italic text-text-dim"
+                  >
+                    {t("chat.emptyAssistant")}
+                  </div>
+                ) : (
                   <MessageView
                     key={`${keyPrefix}-view-${idx}`}
                     message={msg}
@@ -613,9 +1019,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
-                    entryId={entryIds[idx]}
+                    entryId={entryId}
                     onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
-                    forking={forkingEntryId === entryIds[idx]}
+                    forking={forkingEntryId === entryId}
                     onNavigate={sessionBusy ? undefined : handleNavigate}
                     prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
                     onEditContent={handleEditContent}
@@ -624,6 +1030,17 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
                   />
+                );
+                if (!anchor) return view;
+                return (
+                  <div
+                    key={`${keyPrefix}-entry-${idx}`}
+                    data-entry-id={entryId}
+                    className={highlightedEntryId === entryId ? "entry-target-flash" : undefined}
+                    style={{ minWidth: 0 }}
+                  >
+                    {view}
+                  </div>
                 );
               };
 
@@ -650,7 +1067,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   continue;
                 }
 
-                const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
+                const isLiveTail = !historyBrowsing && (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
                 if (isLiveTail) {
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
@@ -687,16 +1104,21 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 // recap became the "final" message. Only the process messages
                 // between them fold, one group per run.
                 const stoppedAnswers = new Set(findStoppedAnswerIndices(messages, userIdx, finalAssistantIdx));
-                let run: { start: number; nodes: ReactNode[]; count: number; toolCalls: number } | null = null;
-                const addToRun = (start: number, node: ReactNode, toolCalls: number) => {
-                  if (!run) run = { start, nodes: [], count: 0, toolCalls: 0 };
+                let run: { start: number; nodes: ReactNode[]; count: number; toolCalls: number; entryIds: string[] } | null = null;
+                // anchored=false halves (stopped/final process splits whose
+                // answer renders outside) must NOT join group membership —
+                // otherwise seeking the outside answer force-opens the group.
+                const addToRun = (start: number, entryIdx: number, node: ReactNode, toolCalls: number, anchored = true) => {
+                  if (!run) run = { start, nodes: [], count: 0, toolCalls: 0, entryIds: [] };
                   run.nodes.push(node);
                   run.count += 1;
                   run.toolCalls += toolCalls;
+                  const runEntryId = entryIds[entryIdx];
+                  if (anchored && runEntryId) run.entryIds.push(runEntryId);
                 };
                 const flushRun = (isLast: boolean) => {
                   if (!run) return;
-                  const { start, nodes, count, toolCalls } = run;
+                  const { start, nodes, count, toolCalls, entryIds: runEntryIds } = run;
                   run = null;
                   rendered.push(
                     <div key={`process-group-${userIdx}-${isLast ? finalAssistantIdx : start}`}>
@@ -705,6 +1127,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                         defaultExpanded={isLast && !finalAnswerMessage}
                         t={t}
                         toolCallCount={toolCalls}
+                        expandSignal={groupExpand !== null && runEntryIds.includes(groupExpand.id) ? groupExpand : null}
                       >
                         {nodes}
                       </ProcessDetailsGroup>
@@ -720,12 +1143,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     if (split.processBlocks.length > 0) {
                       addToRun(
                         processIdx,
+                        processIdx,
                         renderMessage(processIdx, {
                           keyPrefix: "process-stopped",
                           messageOverride: withAssistantBlocks(stoppedMessage, split.processBlocks, { omitUsage: true }),
                           showTimestamp: false,
+                          anchor: false,
                         }),
                         countToolCallBlocks(split.processBlocks),
+                        false,
                       );
                     }
                     flushRun(false);
@@ -733,14 +1159,21 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     continue;
                   }
                   if (hasDisplayableProcessMessage(processMessage)) {
-                    addToRun(processIdx, renderMessage(processIdx, { keyPrefix: "process" }), countToolCalls(messages, [processIdx]));
+                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process" }), countToolCalls(messages, [processIdx]));
+                  } else if (processMessage.role === "assistant" && entryIds[processIdx]) {
+                    // Empty/empty-thinking-only assistant entries are listed
+                    // by the outline but MessageView renders null for them —
+                    // keep a compact anchored marker so seeks never exhaust.
+                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process-empty" }), 0);
                   }
                 }
                 if (finalProcessMessage) {
                   addToRun(
                     finalAssistantIdx,
-                    renderMessage(finalAssistantIdx, { keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false }),
+                    finalAssistantIdx,
+                    renderMessage(finalAssistantIdx, { keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false, anchor: !finalAnswerMessage }),
                     countToolCallBlocks(finalSplit.processBlocks),
+                    !finalAnswerMessage,
                   );
                 }
                 flushRun(true);
@@ -759,6 +1192,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   }
                   const writtenFiles = extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd);
                   rendered.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage, writtenFiles }));
+                }
+                if (!finalProcessMessage && !finalAnswerMessage && entryIds[finalAssistantIdx]) {
+                  // Empty final assistant (no displayable blocks, no error):
+                  // outline lists it, so render a compact anchored marker.
+                  rendered.push(renderMessage(finalAssistantIdx, { keyPrefix: "empty-final" }));
                 }
                 for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
                   rendered.push(renderMessage(renderIdx));
@@ -788,23 +1226,26 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 </>
               );
             })()}
-            {streamState.isStreaming && streamState.streamingMessage && (
+            {/* #104: while browsing history, live-only streaming/pending
+                content is hidden from the transcript body. Global agent
+                activity still shows in the header controls + composer. */}
+            {!historyBrowsing && streamState.isStreaming && streamState.streamingMessage && (
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
             )}
 
-            {agentRunning && !streamState.streamingMessage && agentPhase && (
+            {!historyBrowsing && agentRunning && !streamState.streamingMessage && agentPhase && (
               <div className="py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
               </div>
             )}
 
-            {bashRunning && !pendingBash && (
+            {!historyBrowsing && bashRunning && !pendingBash && (
               <div className="py-2 text-[13px] text-text-muted">
                  <span className="animate-[pulse_1.5s_infinite]">{t("chat.runningCommand")}</span>
               </div>
             )}
 
-            {pendingBash && (
+            {!historyBrowsing && pendingBash && (
               <MessageView
                 message={{
                   role: "bashExecution",
@@ -817,9 +1258,38 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             )}
 
 
-            <div ref={messagesEndRef} />
             </div>
           </div>
+        </div>
+        {outlineRail && (
+          <SessionOutline
+            variant="rail"
+            entries={outline}
+            loading={outlineLoading}
+            error={outlineError}
+            onRetryLoad={handleOutlineRetry}
+            readingEntryId={readingEntryId}
+            targetEntryId={historyTargetEntryId}
+            navigating={historyNavigationLoading}
+            onJump={handleOutlineJump}
+            onClose={closeOutline}
+          />
+        )}
+        {outlineOpen && !outlineRail && (
+          <SessionOutline
+            variant="drawer"
+            entries={outline}
+            loading={outlineLoading}
+            error={outlineError}
+            onRetryLoad={handleOutlineRetry}
+            readingEntryId={readingEntryId}
+            targetEntryId={historyTargetEntryId}
+            navigating={historyNavigationLoading}
+            onJump={handleOutlineJump}
+            onClose={closeOutline}
+            triggerRef={outlineTriggerRef}
+          />
+        )}
         </div>
       </div>
 
