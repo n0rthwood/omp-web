@@ -1,3 +1,22 @@
+omp-web (0.5.23) jammy; urgency=medium
+
+  * Steer/follow-up messages no longer vanish on a degraded host connection
+    (closes #97). Every non-fire-and-forget mutation (steer, follow_up,
+    set_*, compact, fork, navigate_tree, reload, auto_name, clear_queue,
+    abort*, execute_slash_command, delete_session, ...) is now bounded at
+    30 s (OMP_WEB_MUTATION_TIMEOUT_MS override); prompt stays
+    fire-and-forget and bash stays unbounded.
+  * A pending-command timeout now degrades the wrapper: retryable reject,
+    detach-only destroy, and registry eviction, so the next request
+    re-attaches a fresh wrapper to the surviving host instead of reusing
+    a zombie that stopped round-tripping commands.
+  * send() fails fast when the host connection is closed (not just when
+    the wrapper's alive flag lags): the route returns 500 and the browser
+    restores the composer draft instead of 200-acking silently dropped
+    bytes.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 19 Nov 2026 03:41:07 +0000
+
 omp-web (0.5.22) jammy; urgency=medium
 
   * Fix host→web stream corruption and permanent RPC decoder hang that
