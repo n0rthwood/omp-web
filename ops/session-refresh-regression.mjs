@@ -57,11 +57,20 @@ if (!CRED_FILE) {
   console.error("usage: bun ops/session-refresh-regression.mjs --credentials <json> [--base url] [--artifacts dir]");
   process.exit(2);
 }
+// Fixture creation is destructive to the selected session store: refuse the
+// ordinary user home even if this manual harness is invoked without overrides.
+if (!process.env.HOME || !/^\/tmp\/omp[^/]*\/home\/?$/.test(process.env.HOME)) {
+  throw new Error("Set HOME to a disposable /tmp/omp*/home directory shared with the verification server");
+}
+
 const cred = JSON.parse(readFileSync(CRED_FILE, "utf8"));
 mkdirSync(ARTIFACTS, { recursive: true });
 
 // ------------------------------------------------------------- fixtures -----
-// Two journals in the hermetic home: ALPHA (long, scrollable) and BETA (short).
+// Two journals in the hermetic home: ALPHA (long, scrollable — 60 message
+// pairs so the lazy-render window (VISIBLE_PAGE_SIZE=50) is fully loaded
+// after the initial sentinel page-in and later completion events cause no
+// prepend/restore layout churn) and BETA (short).
 const cwd = join(process.env.HOME, "proj-100");
 mkdirSync(cwd, { recursive: true });
 const zeroUsage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -79,7 +88,7 @@ function makeJournal(tag, pairs) {
   sm.flushSync();
   return { id: sm.getSessionId(), file: sm.getSessionFile() };
 }
-const alpha = makeJournal("ALPHA", 12);
+const alpha = makeJournal("ALPHA", 60);
 const beta = makeJournal("BETA", 2);
 const deeplink = (s) => `${BASE}/p/${encodeURIComponent(cwd)}/s/${s.id}`;
 
@@ -297,7 +306,7 @@ try {
   // ---- Scenario 2: content survives failed turn-completion refreshes -------
   await openFresh(deeplink(alpha));
   await waitFor(async () => (await view()).scrollPresent, 15000, "chat render");
-  await waitFor(async () => (await view()).bodyText.includes("ALPHA assistant reply 11"), 15000, "history rendered");
+  await waitFor(async () => (await view()).bodyText.includes("ALPHA assistant reply 59"), 15000, "history rendered");
   await markNodes();
   const draftText = "DRAFT-KEEP-100 unsent composer text";
   await page.type("textarea", "turn one prompt");
