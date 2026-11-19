@@ -65,6 +65,7 @@ type PendingCommand = {
   command: string;
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
+  timer?: NodeJS.Timeout;
 };
 
 const RUNNING_STATE_EVENT_TYPES: Record<string, true> = {
@@ -82,6 +83,9 @@ const MAX_SUBAGENT_HISTORY = 128;
 /** How long shutdown() waits for the host to close its socket after the
  *  shutdown frame before falling back to stopping its transient unit. */
 const HOST_SHUTDOWN_GRACE_MS = 5_000;
+
+/** Read-only host queries must never hang a route; a lost response fails retryable. */
+const READ_ONLY_COMMAND_TIMEOUT_MS = 30_000;
 
 export interface RpcSessionStartOptions {
   toolNames?: string[];
@@ -122,7 +126,8 @@ export class AgentSessionWrapper {
   // until the host_attach ack makes lastSeenSeq authoritative.
   private attached = false;
   private readonly seenFrameEnds = new Set<number>();
-  private readonly decoder = new RpcFrameDecoder();
+  private decoder = new RpcFrameDecoder();
+  private decodeErrorLoggedAt = 0;
   private lineBuffer = Buffer.alloc(0);
   private readonly terminate: { allowed: boolean };
   private readonly attachToHost: () => void;
@@ -295,8 +300,22 @@ export class AgentSessionWrapper {
     try {
       decoded = this.decoder.push(parsed);
     } catch (error) {
-      console.error("[omp-web] host frame decode failed:", error instanceof Error ? error.message : error);
-      return;
+      // The SDK decoder never clears its pending chunk sequence on throw, so one
+      // interrupted/truncated sequence poisons EVERY later frame. Reset and retry
+      // once: a non-chunk frame that interrupted a sequence is delivered intact on
+      // the retry; a genuinely corrupt chunk is dropped and the client reconciles
+      // via get_entries/get_state. Throttle the log so a burst cannot flood journald.
+      this.decoder = new RpcFrameDecoder();
+      const now = Date.now();
+      if (now - this.decodeErrorLoggedAt >= 1000) {
+        this.decodeErrorLoggedAt = now;
+        console.error("[omp-web] host frame decode failed (decoder reset):", error instanceof Error ? error.message : error);
+      }
+      try {
+        decoded = this.decoder.push(parsed);
+      } catch {
+        return; // unrecoverable single frame; drop it, stream stays healthy
+      }
     }
     if (!decoded) return; // rpc_chunk mid-reassembly: nothing to forward yet
     if (!this.attached) {
@@ -363,6 +382,7 @@ export class AgentSessionWrapper {
     const pending = id ? this.pendingCommands.get(id) : undefined;
     if (!pending || !id) return; // negotiation / client-owned responses pass through
     this.pendingCommands.delete(id);
+    clearTimeout(pending.timer);
     const command = pending.command;
     if (command === "set_model" || command === "set_role_model" || command === "reload") {
       invalidateModelsCache();
@@ -670,9 +690,17 @@ export class AgentSessionWrapper {
   }
 
   private registerPending(id: string, command: string): Promise<unknown> {
-    return new Promise<unknown>((resolve, reject) => {
-      this.pendingCommands.set(id, { command, resolve, reject });
-    });
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const entry: PendingCommand = { command, resolve, reject };
+    if (command.startsWith("get_")) {
+      entry.timer = setTimeout(() => {
+        if (this.pendingCommands.get(id) !== entry) return; // already settled
+        this.pendingCommands.delete(id);
+        reject(new Error(`Timed out waiting for host response: ${command}`));
+      }, READ_ONLY_COMMAND_TIMEOUT_MS);
+    }
+    this.pendingCommands.set(id, entry);
+    return promise;
   }
 
   /** Detach-only: the host survives web disconnects (contract §3). */
