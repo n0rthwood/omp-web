@@ -2576,7 +2576,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             }}
                             placeholder={t("chat.filterModels")}
                             aria-label={t("chat.filterModels")}
-                            autoFocus
+                            autoFocus={!isMobile}
                             autoComplete="off"
                             spellCheck={false}
                             style={{
