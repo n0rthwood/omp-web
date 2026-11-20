@@ -1,3 +1,15 @@
+omp-web (0.5.30) jammy; urgency=medium
+
+  * Move the plan approval dialog (plan_review) onto the same side surface
+    as ask: right-panel tab on desktop, closable bottom drawer with reopen
+    pill on mobile; the chat is no longer covered by a blurred overlay
+    while reviewing a plan. Plan markdown, feedback textarea and
+    Continue planning / Approve and implement keep their exact response
+    payloads; host cancel clears the surface and answered/cancelled
+    receipts stay readable (#110).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 20 Nov 2026 18:20:00 +0800
+
 omp-web (0.5.29) jammy; urgency=medium
 
   * Rework the ask question dialog: questions open in the right-side panel
