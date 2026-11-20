@@ -1,3 +1,12 @@
+omp-web (0.5.28) jammy; urgency=medium
+
+  * Stop autofocusing the model-dropdown filter on mobile: opening the model
+    picker no longer raises the system keyboard or churns the viewport on
+    iOS/Android; tapping the filter still focuses it, desktop unchanged
+    (#108).
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 20 Nov 2026 00:30:00 +0800
+
 omp-web (0.5.27) jammy; urgency=medium
 
   * Adopt a mature follow controller (pinned use-stick-to-bottom): streaming
