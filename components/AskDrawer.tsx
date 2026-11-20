@@ -1,16 +1,17 @@
 "use client";
 
-import { AskDialogContent, type AskDialogRequest, type AskDialogResponse } from "./AskDialogContent";
+import { AskDialogContent, type AskDialogResponse, type SidePanelDialogRequest } from "./AskDialogContent";
+import { PlanReviewContent } from "./PlanReviewContent";
 
 export function AskDrawer({ request, onRespond, open, onClose }: {
-  request: AskDialogRequest;
+  request: SidePanelDialogRequest;
   onRespond: (response: AskDialogResponse) => void;
   open: boolean;
   onClose: () => void;
 }) {
   return (
     <div
-      data-testid="ask-drawer"
+      data-testid={request.method === "plan_review" ? "plan-drawer" : "ask-drawer"}
       hidden={!open}
       style={{
         position: "fixed",
@@ -30,7 +31,11 @@ export function AskDrawer({ request, onRespond, open, onClose }: {
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
-      <AskDialogContent request={request} onRespond={onRespond} variant="drawer" onClose={onClose} />
+      {request.method === "plan_review" ? (
+        <PlanReviewContent request={request} onRespond={onRespond} variant="drawer" onClose={onClose} />
+      ) : (
+        <AskDialogContent request={request} onRespond={onRespond} variant="drawer" onClose={onClose} />
+      )}
     </div>
   );
 }

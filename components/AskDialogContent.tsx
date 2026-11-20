@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { PlanReviewRequest } from "./PlanReviewContent";
 import type { ExtensionUiRequest } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import { MarkdownBody } from "./MarkdownBody";
 
 export type AskDialogRequest = Extract<ExtensionUiRequest, { method: "ask" }>;
 export type AskDialogResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
-export type AskDialogResponder = (request: AskDialogRequest, response: AskDialogResponse) => void;
+/** Blocking dialogs rendered on the shared side-panel/drawer surface (#110). */
+export type SidePanelDialogRequest = AskDialogRequest | PlanReviewRequest;
+export type SidePanelDialogResponder = (request: SidePanelDialogRequest, response: AskDialogResponse) => void;
 
 function recommendedSelections(request: AskDialogRequest): Record<string, number[]> {
   const recommended: Record<string, number[]> = {};
