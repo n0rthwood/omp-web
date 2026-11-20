@@ -10,8 +10,9 @@ export interface Tab {
   filePath?: string;
   sourceSessionId?: string | null;
   initialDisplayMode?: "source" | "preview" | "diff";
-  kind?: "file" | "terminal" | "ask"; // default "file" when absent
+  kind?: "file" | "terminal" | "ask" | "plan"; // default "file" when absent
   terminalId?: string; // present when kind === "terminal"; the server-side terminal id
+  /** Extension request id for kind "ask"/"plan" side-dialog tabs. */
   askRequestId?: string;
 }
 
@@ -73,8 +74,17 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {tab.kind === "ask" ? (
-                <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 13, height: 13, borderRadius: 3, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontSize: 10, fontWeight: 750 }}>?</span>
+              {tab.kind === "ask" || tab.kind === "plan" ? (
+                tab.kind === "plan" ? (
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 13, height: 13, borderRadius: 3, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)" }}>
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                  </span>
+                ) : (
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 13, height: 13, borderRadius: 3, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontSize: 10, fontWeight: 750 }}>?</span>
+                )
               ) : tab.kind === "terminal" ? <TerminalIcon size={13} /> : getFileIcon(tab.label, 13)}
             </span>
             <span

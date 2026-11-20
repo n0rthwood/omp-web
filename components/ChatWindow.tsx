@@ -21,8 +21,7 @@ import { countToolCallBlocks, findStoppedAnswerIndices, getAssistantErrorMessage
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
 import { SessionOutline } from "./SessionOutline";
-import { MarkdownBody } from "./MarkdownBody";
-import type { AskDialogRequest, AskDialogResponder } from "./AskDialogContent";
+import type { SidePanelDialogRequest, SidePanelDialogResponder } from "./AskDialogContent";
 import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { OmpWordmark } from "./OmpWordmark";
@@ -47,9 +46,9 @@ interface Props {
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
-  onAskDialogChange?: (request: AskDialogRequest | null) => void;
-  onRespondAskDialog?: (respond: AskDialogResponder | null) => void;
-  onRevealAsk?: () => void;
+  onSideDialogChange?: (request: SidePanelDialogRequest | null) => void;
+  onRespondSideDialog?: (respond: SidePanelDialogResponder | null) => void;
+  onRevealSideDialog?: () => void;
   onSubagentsChange?: (subagents: SubagentSnapshot[]) => void;
   /** Completion sound state + controls, owned by AppShell so tasks finishing in
    *  a non-active workspace can still ring. */
@@ -199,7 +198,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, onAskDialogChange, onRespondAskDialog, onRevealAsk, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -250,14 +249,14 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   });
 
   useEffect(() => {
-    onAskDialogChange?.(extensionDialog?.method === "ask" ? extensionDialog : null);
-    return () => onAskDialogChange?.(null);
-  }, [extensionDialog, onAskDialogChange]);
+    onSideDialogChange?.(extensionDialog?.method === "ask" || extensionDialog?.method === "plan_review" ? extensionDialog : null);
+    return () => onSideDialogChange?.(null);
+  }, [extensionDialog, onSideDialogChange]);
 
   useEffect(() => {
-    onRespondAskDialog?.(respondToExtensionUi);
-    return () => onRespondAskDialog?.(null);
-  }, [respondToExtensionUi, onRespondAskDialog]);
+    onRespondSideDialog?.(respondToExtensionUi);
+    return () => onRespondSideDialog?.(null);
+  }, [respondToExtensionUi, onRespondSideDialog]);
   const sessionBusy = agentRunning || bashRunning;
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
@@ -731,7 +730,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
         </div>
       )}
 
-      {extensionDialog && extensionDialog.method !== "ask" && (
+      {extensionDialog && extensionDialog.method !== "ask" && extensionDialog.method !== "plan_review" && (
         <ExtensionDialog
           request={extensionDialog}
           onRespond={respondToExtensionUi}
@@ -1280,19 +1279,21 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
               />
             )}
 
-            {extensionDialog?.method === "ask" && (
+            {(extensionDialog?.method === "ask" || extensionDialog?.method === "plan_review") && (
               <div
-                data-testid="ask-inline-card"
+                data-testid={extensionDialog.method === "plan_review" ? "plan-inline-card" : "ask-inline-card"}
                 style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, margin: "10px 0", padding: "9px 10px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", fontSize: 12 }}
               >
                 <span aria-hidden="true" style={{ display: "grid", placeItems: "center", flexShrink: 0, width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontWeight: 750 }}>?</span>
-                <span style={{ flexShrink: 0, color: "var(--text)", fontWeight: 600 }}>{t("chat.agentQuestion")}</span>
+                <span style={{ flexShrink: 0, color: "var(--text)", fontWeight: 600 }}>
+                  {t(extensionDialog.method === "plan_review" ? "chat.planApproval" : "chat.agentQuestion")}
+                </span>
                 <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-muted)" }}>
-                  {extensionDialog.questions[0]?.question.slice(0, 120)}
+                  {(extensionDialog.method === "plan_review" ? extensionDialog.title : extensionDialog.questions[0]?.question)?.slice(0, 120)}
                 </span>
                 <button
                   type="button"
-                  onClick={onRevealAsk}
+                  onClick={onRevealSideDialog}
                   style={{ flexShrink: 0, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--accent)", cursor: "pointer" }}
                 >
                   {t("chat.openQuestion")}
@@ -1452,7 +1453,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
 
 type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" | "plan_review" }
+  { method: "select" | "confirm" | "input" | "editor" }
 >;
 
 export function ExtensionDialog({
@@ -1464,11 +1465,9 @@ export function ExtensionDialog({
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
-  const [planFeedback, setPlanFeedback] = useState("");
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
-    setPlanFeedback("");
   }, [request]);
 
   const submitValue = () => {
@@ -1478,100 +1477,6 @@ export function ExtensionDialog({
       onRespond(request, { value });
     }
   };
-
-  if (request.method === "plan_review") {
-    return (
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 90,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 16,
-          background: "color-mix(in srgb, #000 30%, transparent)",
-          backdropFilter: "blur(2px)",
-        }}
-      >
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={`plan-review-${request.id}`}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            width: "min(820px, 100%)",
-            height: "min(820px, calc(100dvh - 32px))",
-            overflow: "hidden",
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            background: "var(--bg)",
-            boxShadow: "0 24px 80px rgba(0,0,0,0.34)",
-          }}
-        >
-          <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ color: "var(--accent)", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-              {t("chat.planApproval")}
-            </div>
-            <div id={`plan-review-${request.id}`} style={{ marginTop: 4, color: "var(--text)", fontSize: 15, fontWeight: 680 }}>
-              {request.title}
-            </div>
-            <div style={{ marginTop: 5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10, overflowWrap: "anywhere" }}>
-              {request.planFilePath}
-            </div>
-          </div>
-
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "18px 20px" }}>
-            <MarkdownBody>{request.planContent}</MarkdownBody>
-          </div>
-
-          <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-            <textarea
-              value={planFeedback}
-              onChange={(event) => setPlanFeedback(event.target.value)}
-              placeholder={t("chat.planFeedback")}
-              aria-label={t("chat.planFeedback")}
-              style={{
-                width: "100%",
-                minHeight: 64,
-                maxHeight: 150,
-                padding: "9px 10px",
-                border: "1px solid var(--border)",
-                borderRadius: 7,
-                outline: "none",
-                resize: "vertical",
-                background: "var(--bg)",
-                color: "var(--text)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 11,
-                lineHeight: 1.5,
-              }}
-            />
-            <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8, marginTop: 9 }}>
-              <button
-                type="button"
-                onClick={() => onRespond(request, {
-                  value: JSON.stringify({ action: "refine", feedback: planFeedback.trim() }),
-                })}
-                style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text)", cursor: "pointer" }}
-              >
-                {t("chat.refinePlan")}
-              </button>
-              <button
-                type="button"
-                onClick={() => onRespond(request, { value: JSON.stringify({ action: "approve" }) })}
-                style={{ padding: "7px 12px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "#fff", cursor: "pointer", fontWeight: 650 }}
-              >
-                {t("chat.approvePlan")}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
 
   return (
     <div

@@ -5,8 +5,9 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, ToolbarIconButton } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
-import { AskDialogContent, type AskDialogRequest, type AskDialogResponder, type AskDialogResponse } from "./AskDialogContent";
+import { AskDialogContent, type AskDialogResponse, type SidePanelDialogRequest, type SidePanelDialogResponder } from "./AskDialogContent";
 import { AskDrawer } from "./AskDrawer";
+import { PlanReviewContent } from "./PlanReviewContent";
 import { MarkdownBody } from "./MarkdownBody";
 import { FileViewer } from "./FileViewer";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -387,76 +388,78 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   // A terminal tab carries kind:"terminal" + terminalId (server-side id).
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
-  const [askRequest, setAskRequest] = useState<AskDialogRequest | null>(null);
-  const [askDrawerOpen, setAskDrawerOpen] = useState(false);
-  const askRequestRef = useRef<AskDialogRequest | null>(null);
-  const askResponderRef = useRef<AskDialogResponder | null>(null);
-  // Keep a snapshot for every retained ask tab, not just the newest question.
-  const lastAskRef = useRef(new Map<string, {
-    request: AskDialogRequest;
+  const [surfaceRequest, setSurfaceRequest] = useState<SidePanelDialogRequest | null>(null);
+  const [surfaceDrawerOpen, setSurfaceDrawerOpen] = useState(false);
+  const surfaceRequestRef = useRef<SidePanelDialogRequest | null>(null);
+  const surfaceResponderRef = useRef<SidePanelDialogResponder | null>(null);
+  // Keep a snapshot for every retained side-dialog tab (ask or plan review),
+  // not just the newest request.
+  const lastSurfaceRef = useRef(new Map<string, {
+    request: SidePanelDialogRequest;
     status: "pending" | "answered" | "cancelled";
   }>());
-  const handleAskDialogChange = useCallback((request: AskDialogRequest | null) => {
-    const previous = askRequestRef.current;
+  const handleSideDialogChange = useCallback((request: SidePanelDialogRequest | null) => {
+    const previous = surfaceRequestRef.current;
     if (previous && previous.id !== request?.id) {
-      const receipt = lastAskRef.current.get(previous.id);
+      const receipt = lastSurfaceRef.current.get(previous.id);
       if (receipt?.status === "pending") receipt.status = "cancelled";
     }
     if (request) {
-      lastAskRef.current.set(request.id, { request, status: "pending" });
+      lastSurfaceRef.current.set(request.id, { request, status: "pending" });
     }
-    askRequestRef.current = request;
-    setAskRequest(request);
+    surfaceRequestRef.current = request;
+    setSurfaceRequest(request);
   }, []);
-  const handleRespondAskDialog = useCallback((respond: AskDialogResponder | null) => {
-    askResponderRef.current = respond;
+  const handleRespondSideDialog = useCallback((respond: SidePanelDialogResponder | null) => {
+    surfaceResponderRef.current = respond;
   }, []);
-  const respondToAsk = useCallback((request: AskDialogRequest, response: AskDialogResponse) => {
+  const respondToSurface = useCallback((request: SidePanelDialogRequest, response: AskDialogResponse) => {
     // A retained tab must never send an answer through a new session's hook.
-    const respond = askResponderRef.current;
-    if (askRequestRef.current !== request || !respond) return;
-    const receipt = lastAskRef.current.get(request.id);
+    const respond = surfaceResponderRef.current;
+    if (surfaceRequestRef.current !== request || !respond) return;
+    const receipt = lastSurfaceRef.current.get(request.id);
     if (receipt) receipt.status = "cancelled" in response ? "cancelled" : "answered";
     respond(request, response);
-    askRequestRef.current = null;
-    setAskRequest(null);
-    setAskDrawerOpen(false);
+    surfaceRequestRef.current = null;
+    setSurfaceRequest(null);
+    setSurfaceDrawerOpen(false);
   }, []);
-  const revealAskTab = useCallback((request: AskDialogRequest) => {
-    const tabId = `ask:${request.id}`;
-    const label = translate("chat.agentQuestion");
+  const revealSurfaceTab = useCallback((request: SidePanelDialogRequest) => {
+    const isPlan = request.method === "plan_review";
+    const tabId = `${isPlan ? "plan" : "ask"}:${request.id}`;
+    const label = translate(isPlan ? "chat.planApproval" : "chat.agentQuestion");
     setFileTabs((current) => {
       const existing = current.find((tab) => tab.id === tabId);
-      if (!existing) return [...current, { id: tabId, kind: "ask", label, askRequestId: request.id }];
+      if (!existing) return [...current, { id: tabId, kind: isPlan ? "plan" : "ask", label, askRequestId: request.id }];
       return existing.label === label ? current : current.map((tab) => tab.id === tabId ? { ...tab, label } : tab);
     });
     setActiveFileTabId(tabId);
     setRightPanelOpen(true);
   }, [translate]);
   useEffect(() => {
-    if (!askRequest) {
-      setAskDrawerOpen(false);
+    if (!surfaceRequest) {
+      setSurfaceDrawerOpen(false);
       return;
     }
     if (isMobile) {
-      setAskDrawerOpen(true);
+      setSurfaceDrawerOpen(true);
       setSidebarOpen(false);
       setRightPanelOpen(false);
     } else {
-      revealAskTab(askRequest);
+      revealSurfaceTab(surfaceRequest);
     }
-  }, [askRequest, isMobile, revealAskTab]);
-  const handleRevealAsk = useCallback(() => {
-    const request = askRequestRef.current;
+  }, [surfaceRequest, isMobile, revealSurfaceTab]);
+  const handleRevealSideDialog = useCallback(() => {
+    const request = surfaceRequestRef.current;
     if (!request) return;
     if (isMobile) {
-      setAskDrawerOpen(true);
+      setSurfaceDrawerOpen(true);
       setSidebarOpen(false);
       setRightPanelOpen(false);
     } else {
-      revealAskTab(request);
+      revealSurfaceTab(request);
     }
-  }, [isMobile, revealAskTab]);
+  }, [isMobile, revealSurfaceTab]);
   // Server-wide flag — fetched once; gates the "New Terminal" affordance.
   const [terminalsEnabled, setTerminalsEnabled] = useState(false);
 
@@ -685,11 +688,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     // one repo keep their open tabs. Mirror handleCloseFileTab and close the
     // now-empty right panel.
     setFileTabs([]);
-    lastAskRef.current.clear();
-    askRequestRef.current = null;
-    askResponderRef.current = null;
-    setAskRequest(null);
-    setAskDrawerOpen(false);
+    lastSurfaceRef.current.clear();
+    surfaceRequestRef.current = null;
+    surfaceResponderRef.current = null;
+    setSurfaceRequest(null);
+    setSurfaceDrawerOpen(false);
     setActiveFileTabId(null);
     setRightPanelOpen(false);
     // Restore the workspace we switched to: its last open session, matched
@@ -995,11 +998,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     // Unmounting TerminalPanel (navigation/reload) never deletes — that is
     // what lets a reload reattach to the live process.
     const closing = fileTabs.find((t) => t.id === tabId);
-    if (closing?.kind === "ask" && askRequest && closing.askRequestId === askRequest.id) {
-      respondToAsk(askRequest, { cancelled: true });
+    if ((closing?.kind === "ask" || closing?.kind === "plan") && surfaceRequest && closing.askRequestId === surfaceRequest.id) {
+      respondToSurface(surfaceRequest, { cancelled: true });
     }
-    if (closing?.kind === "ask" && closing.askRequestId) {
-      lastAskRef.current.delete(closing.askRequestId);
+    if ((closing?.kind === "ask" || closing?.kind === "plan") && closing.askRequestId) {
+      lastSurfaceRef.current.delete(closing.askRequestId);
     }
     if (closing?.kind === "terminal" && closing.terminalId) {
       void fetch(apiPath(`/api/terminals/${encodeURIComponent(closing.terminalId)}`), { method: "DELETE" })
@@ -1015,7 +1018,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-  }, [fileTabs, askRequest, respondToAsk]);
+  }, [fileTabs, surfaceRequest, respondToSurface]);
 
   const handleNewTerminal = useCallback(() => {
     if (!activeCwd) return;
@@ -1120,7 +1123,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   }, [projectTrustBusy, projectTrustCwd]);
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
-  const activeAskReceipt = activeFileTab?.askRequestId ? lastAskRef.current.get(activeFileTab.askRequestId) : null;
+  const activeSurfaceReceipt = activeFileTab?.askRequestId ? lastSurfaceRef.current.get(activeFileTab.askRequestId) : null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
 
   // The floating Files panel follows the active browsing cwd (worktree
@@ -2171,9 +2174,9 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               onContextUsageChange={handleContextUsageChange}
               onSubagentsChange={setSubagents}
               onOpenFile={handleOpenLinkedFile}
-              onAskDialogChange={handleAskDialogChange}
-              onRespondAskDialog={handleRespondAskDialog}
-              onRevealAsk={handleRevealAsk}
+              onSideDialogChange={handleSideDialogChange}
+              onRespondSideDialog={handleRespondSideDialog}
+              onRevealSideDialog={handleRevealSideDialog}
               soundEnabled={soundEnabled}
               onSoundToggle={onSoundToggle}
               playDoneSound={playDoneSound}
@@ -2300,25 +2303,34 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
 
         {/* File content */}
         <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {activeFileTab?.kind === "ask" ? (
-            askRequest && activeFileTab.askRequestId === askRequest.id ? (
+          {(activeFileTab?.kind === "ask" || activeFileTab?.kind === "plan") ? (
+            surfaceRequest && activeFileTab.askRequestId === surfaceRequest.id ? (
               isMobile ? (
-                <button type="button" onClick={handleRevealAsk} style={{ margin: 16, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-panel)", color: "var(--accent)", cursor: "pointer" }}>
+                <button type="button" onClick={handleRevealSideDialog} style={{ margin: 16, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-panel)", color: "var(--accent)", cursor: "pointer" }}>
                   {translate("chat.openQuestion")}
                 </button>
+              ) : surfaceRequest.method === "plan_review" ? (
+                <PlanReviewContent key={surfaceRequest.id} variant="panel" request={surfaceRequest} onRespond={(response) => respondToSurface(surfaceRequest, response)} />
               ) : (
-                <AskDialogContent key={askRequest.id} variant="panel" request={askRequest} onRespond={(response) => respondToAsk(askRequest, response)} />
+                <AskDialogContent key={surfaceRequest.id} variant="panel" request={surfaceRequest} onRespond={(response) => respondToSurface(surfaceRequest, response)} />
               )
-            ) : activeAskReceipt ? (
-              <div data-testid="ask-receipt" style={{ height: "100%", overflowY: "auto", padding: 16 }}>
+            ) : activeSurfaceReceipt ? (
+              <div data-testid={activeSurfaceReceipt.request.method === "plan_review" ? "plan-receipt" : "ask-receipt"} style={{ height: "100%", overflowY: "auto", padding: 16 }}>
                 <div role="status" style={{ marginBottom: 16, color: "var(--accent)", fontSize: 13, fontWeight: 600 }}>
-                  {translate(activeAskReceipt.status === "answered" ? "chat.answered" : "chat.questionCancelled")}
+                  {translate(activeSurfaceReceipt.status === "answered" ? "chat.answered" : "chat.questionCancelled")}
                 </div>
-                {activeAskReceipt.request.questions.map((question) => (
-                  <section key={question.id} style={{ marginBottom: 16 }}>
-                    <MarkdownBody>{question.question}</MarkdownBody>
+                {activeSurfaceReceipt.request.method === "plan_review" ? (
+                  <section>
+                    <div style={{ marginBottom: 6, color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{activeSurfaceReceipt.request.title}</div>
+                    <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflowWrap: "anywhere" }}>{activeSurfaceReceipt.request.planFilePath}</div>
                   </section>
-                ))}
+                ) : (
+                  activeSurfaceReceipt.request.questions.map((question) => (
+                    <section key={question.id} style={{ marginBottom: 16 }}>
+                      <MarkdownBody>{question.question}</MarkdownBody>
+                    </section>
+                  ))
+                )}
               </div>
             ) : (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
@@ -2406,24 +2418,33 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         </svg>
       </button>
     </div>
-    {isMobile && askRequest && (
+    {isMobile && surfaceRequest && (
       <>
         <AskDrawer
-          key={askRequest.id}
-          request={askRequest}
-          open={askDrawerOpen}
-          onClose={() => setAskDrawerOpen(false)}
-          onRespond={(response) => respondToAsk(askRequest, response)}
+          key={surfaceRequest.id}
+          request={surfaceRequest}
+          open={surfaceDrawerOpen}
+          onClose={() => setSurfaceDrawerOpen(false)}
+          onRespond={(response) => respondToSurface(surfaceRequest, response)}
         />
-        {!askDrawerOpen && (
+        {!surfaceDrawerOpen && (
           <button
             type="button"
-            data-testid="ask-reopen-pill"
-            onClick={handleRevealAsk}
+            data-testid={surfaceRequest.method === "plan_review" ? "plan-reopen-pill" : "ask-reopen-pill"}
+            onClick={handleRevealSideDialog}
             style={{ position: "fixed", bottom: "calc(env(safe-area-inset-bottom) + 12px)", left: "50%", transform: "translateX(-50%)", zIndex: 400, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 4px 18px rgba(0,0,0,0.2)", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
           >
-            <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontWeight: 750 }}>?</span>
-            {translate("chat.agentQuestion")}
+            {surfaceRequest.method === "plan_review" ? (
+              <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)" }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+              </span>
+            ) : (
+              <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontWeight: 750 }}>?</span>
+            )}
+            {translate(surfaceRequest.method === "plan_review" ? "chat.planApproval" : "chat.agentQuestion")}
           </button>
         )}
       </>
