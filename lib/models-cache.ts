@@ -10,6 +10,8 @@ export interface ModelsData {
   thinkingLevelPins: Record<string, string>;
   /** omp's model roles (default/smol/slow/plan/commit/…) with their assignments. */
   roles: ModelRoleAssignment[];
+  /** Chat models that credential-wise exist but the `enabledModels` allow-list hides. */
+  hiddenModelCount?: number;
   modelError?: string;
   /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
   modelScopeWarnings?: string[];

@@ -61,6 +61,14 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   // browser's selector can group models the same way `/model` does.
   const roles = listModelRoles(settings, [...visible]);
 
+  // A scoped install silently hides every model the allow-list omits, which is
+  // how a configured provider can vanish from the picker with no signal (#111).
+  // Report the shortfall so the composer can say so; say nothing when no scope
+  // is in effect, where "0 hidden" would be misleading noise.
+  const hiddenModelCount = scope.scopedModels.length > 0
+    ? modelRegistry.getAvailable().length - visible.length
+    : undefined;
+
   return withModelRuntimeError(
     {
       models: Object.fromEntries(nameMap),
@@ -70,6 +78,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
       thinkingLevelMaps: {},
       thinkingLevelPins,
       roles,
+      ...(hiddenModelCount !== undefined ? { hiddenModelCount } : {}),
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
     },
     modelError,

@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ModelRegistry, Settings } from "@oh-my-pi/pi-coding-agent";
 import { resolveModelScope, type ScopedModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 
 /**
@@ -16,6 +17,28 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 
 /** The slice of `ModelRegistry` model scoping needs. */
 export type ModelScopeRegistry = Pick<ModelRegistry, "getAvailable">;
+
+/**
+ * Keep cross-provider glob leakage out of the visible list.
+ *
+ * omp's resolver globs a pattern against `provider/modelId` *and* the bare
+ * `modelId`, so `anthropic/claude-opus-5*` also matches
+ * `openrouter/anthropic/claude-opus-5` — the same logical model re-sold by a
+ * proxy. A pattern that names a real provider is a statement about that
+ * provider only, so anchor it. Exact references already behave this way; only
+ * globs leak (#111).
+ */
+function anchorToNamedProvider(
+  pattern: string,
+  models: readonly ScopedModel[],
+  providerIds: ReadonlySet<string>,
+): ScopedModel[] {
+  const slash = pattern.indexOf("/");
+  if (slash <= 0) return [...models];
+  const providerId = pattern.slice(0, slash);
+  if (!providerIds.has(providerId)) return [...models];
+  return models.filter((scoped) => scoped.model.provider === providerId);
+}
 
 export interface ModelScopeResult {
   /** Models the UI should offer, in resolver order (all available when unscoped). */
@@ -69,15 +92,33 @@ export async function resolveVisibleModels(
     };
   }
 
-  const scopedModels = await resolveModelScope(cleaned, modelRegistry, undefined, settings);
-
-  // omp's resolver drops unmatched patterns silently. Re-resolve each pattern on
-  // its own so a typo surfaces in the UI instead of quietly shrinking the list.
+  const providerIds = new Set(modelRegistry.getAvailable().map((model) => model.provider));
+  // Resolve one pattern at a time: anchoring is a per-pattern decision, and it
+  // also subsumes the old re-resolve pass that surfaced omp's silent drops.
+  const scopedModels: ScopedModel[] = [];
+  const seen = new Set<string>();
   const warnings: string[] = [];
-  await Promise.all(cleaned.map(async (pattern) => {
+  let runnerModels: Model<Api>[] | undefined;
+  for (const pattern of cleaned) {
     const matched = await resolveModelScope([pattern], modelRegistry, undefined, settings);
-    if (matched.length === 0) warnings.push(`No model matches "${pattern}" in enabledModels.`);
-  }));
+    const anchored = anchorToNamedProvider(pattern, matched, providerIds);
+    if (anchored.length === 0) {
+      // A pattern naming a non-chat runner (judge, search, image, …) is not a
+      // typo; omp keeps those out of the chat scope by design.
+      runnerModels ??= modelRegistry.getAvailable("all").filter((model) => modelKind(model) !== "chat");
+      const runnerRegistry: ModelScopeRegistry = { getAvailable: () => runnerModels ?? [] };
+      const namesRunner = runnerModels.length > 0
+        && (await resolveModelScope([pattern], runnerRegistry, undefined, settings)).length > 0;
+      if (!namesRunner) warnings.push(`No model matches "${pattern}" in enabledModels.`);
+      continue;
+    }
+    for (const scoped of anchored) {
+      const key = `${scoped.model.provider}/${scoped.model.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      scopedModels.push(scoped);
+    }
+  }
 
   if (scopedModels.length === 0) {
     return {

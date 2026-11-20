@@ -65,6 +65,8 @@ interface Props {
   modelError?: string | null;
   /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
   modelScopeWarnings?: string[];
+  /** Models that exist but the `enabledModels` allow-list hides from the picker. */
+  hiddenModelCount?: number;
   onModelChange?: (provider: string, modelId: string) => void;
   /** omp's model roles (default/smol/slow/plan/commit/…) with their assignments. */
   modelRoles?: ModelRoleAssignment[];
@@ -174,8 +176,10 @@ export function filterModelOptions(options: ModelOption[], query: string): Model
   const normalizedQuery = query.trim().toLocaleLowerCase();
   if (!normalizedQuery) return options;
 
+  // The provider is part of what a user types: "openrouter" has to find the
+  // models re-sold by that provider, whose names and ids say nothing about it.
   return options.filter((option) => (
-    `${option.name} ${option.modelId}`
+    `${option.name} ${option.modelId} ${option.provider}`
       .toLocaleLowerCase()
       .includes(normalizedQuery)
   ));
@@ -455,6 +459,25 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   return <ModelNoticeBanner tone="error" title="Model error" body={error} />;
 }
 
+/**
+ * States how many models the `enabledModels` allow-list is hiding.
+ *
+ * A scoped install drops every model outside the allow-list without saying so,
+ * which reads as "my provider is broken" when a configured key is involved
+ * (#111). Renders nothing when no scope is in effect, since "0 hidden" is noise.
+ */
+export function ModelHiddenCountBanner({ hiddenModelCount }: { hiddenModelCount?: number }) {
+  const { t } = useI18n();
+  if (!hiddenModelCount || hiddenModelCount <= 0) return null;
+  return (
+    <ModelNoticeBanner
+      tone="warning"
+      title={t("i18n.modelsHiddenTitle")}
+      body={t("i18n.modelsHiddenBody", { count: hiddenModelCount })}
+    />
+  );
+}
+
 /** Surfaces `enabledModels` patterns that matched nothing, so a typo is visible (#307). */
 export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
   if (!warnings || warnings.length === 0) return null;
@@ -468,7 +491,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, onModelChange,
   modelRoles, onRoleModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
@@ -1665,6 +1688,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        <ModelHiddenCountBanner hiddenModelCount={hiddenModelCount} />
         {/* Queued steering / follow-up messages (delivered by omp on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{

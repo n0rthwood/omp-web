@@ -179,6 +179,7 @@ type ModelCatalogState =
 
 type Selection =
   | { type: "roles" }
+  | { type: "allowList" }
   | { type: "provider"; name: string }
   | { type: "model"; providerName: string; index: number }
   | { type: "oauth"; providerId: string }
@@ -1820,6 +1821,169 @@ function AddProviderPicker({
   );
 }
 
+// ── enabledModels allow-list ──────────────────────────────────────────────────
+
+interface AllowListResponse {
+  patterns?: string[];
+  warnings?: string[];
+  projectOverride?: boolean;
+  error?: string;
+}
+
+/**
+ * Which models `enabledModels` lets through.
+ *
+ * omp defines no `ui` metadata for this setting, so the generic settings form
+ * cannot render it and nothing in the browser could read it. Without an editor
+ * a configured provider's models disappear from the picker with no way to find
+ * out why (#111).
+ */
+function ModelAllowListPanel({ cwd, onSaved }: { cwd?: string | null; onSaved?: () => void }) {
+  const { t } = useI18n();
+  const [patterns, setPatterns] = useState<string[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [projectOverride, setProjectOverride] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cwdQuery = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
+
+  useEffect(() => {
+    if (!cwd) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await fetch(apiPath(`/api/model-roles/allow-list${cwdQuery}`), { signal: controller.signal });
+        const data = await res.json() as AllowListResponse;
+        if (data.error) throw new Error(data.error);
+        setPatterns(data.patterns ?? []);
+        setWarnings(data.warnings ?? []);
+        setProjectOverride(data.projectOverride === true);
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [cwd, cwdQuery]);
+
+  const save = useCallback(async (next: string[]) => {
+    if (!cwd) return;
+    setSaving(true);
+    setError(null);
+    setSavedOk(false);
+    try {
+      const res = await fetch(apiPath("/api/model-roles/allow-list"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, patterns: next }),
+      });
+      const data = await res.json() as AllowListResponse;
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setPatterns(data.patterns ?? []);
+      setWarnings(data.warnings ?? []);
+      setProjectOverride(data.projectOverride === true);
+      setSavedOk(true);
+      onSaved?.();
+      setTimeout(() => setSavedOk(false), 2000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [cwd, onSaved]);
+
+  if (!cwd) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("i18n.openSessionToReload")}</div>;
+  }
+  if (loading) {
+    return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.loading")}</div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <SectionTitle>{t("i18n.modelAllowList")}</SectionTitle>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
+          {t("i18n.modelAllowListHint")}
+        </div>
+      </div>
+
+      {projectOverride && (
+        <div style={{ fontSize: 11, color: "#f59e0b", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 10px", lineHeight: 1.6 }}>
+          {t("i18n.modelAllowListProjectOverride")}
+        </div>
+      )}
+
+      {error && (
+        <div style={{ fontSize: 11, color: "#f87171", lineHeight: 1.5 }}>{error}</div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {patterns.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("i18n.modelAllowListEmpty")}</div>
+        )}
+        {patterns.map((pattern, index) => (
+          <div key={`${pattern}-${index}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              value={pattern}
+              onChange={(e) => {
+                const next = [...patterns];
+                next[index] = e.target.value;
+                setPatterns(next);
+              }}
+              spellCheck={false}
+              style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+            />
+            <button
+              onClick={() => {
+                const next = patterns.filter((_, i) => i !== index);
+                setPatterns(next);
+                void save(next);
+              }}
+              disabled={saving}
+              title={t("i18n.delete")}
+              style={{ padding: "5px 9px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-dim)", cursor: saving ? "default" : "pointer", fontSize: 12, flexShrink: 0 }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {warnings.length > 0 && (
+        <div style={{ fontSize: 11, color: "#f59e0b", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+          {warnings.join("\n")}
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          onClick={() => setPatterns([...patterns, ""])}
+          disabled={saving}
+          style={{ padding: "6px 11px", background: "none", border: "1px dashed var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 12 }}
+        >
+          + {t("i18n.modelAllowListAdd")}
+        </button>
+        <button
+          onClick={() => void save(patterns)}
+          disabled={saving}
+          style={{ padding: "6px 14px", background: saving ? "var(--bg-panel)" : "var(--accent)", border: "none", borderRadius: 5, color: saving ? "var(--text-muted)" : "#fff", cursor: saving ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
+        >
+          {savedOk ? t("i18n.saved") : saving ? t("i18n.saving") : t("i18n.save")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }: { cwd?: string | null; onClose: () => void; embedded?: boolean; onModelsChanged?: () => void }) {
@@ -2015,6 +2179,9 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     if (selection.type === "roles") {
       return <ModelRolesPanel cwd={cwd ?? null} onRolesChanged={onModelsChanged} />;
     }
+    if (selection.type === "allowList") {
+      return <ModelAllowListPanel cwd={cwd ?? null} onSaved={onModelsChanged} />;
+    }
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
@@ -2114,6 +2281,19 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
                   <line x1="4" y1="17" x2="20" y2="17" /><circle cx="15" cy="17" r="2.2" />
                 </svg>
                 <span style={{ fontSize: 12, color: "var(--text)", flex: 1 }}>{t("roles.title")}</span>
+              </div>
+              {/* The allow-list decides which models exist at all, so it sits
+                  next to the role table rather than under any one provider. */}
+              <div
+                onClick={() => setSelection({ type: "allowList" })}
+                style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", background: selection?.type === "allowList" ? "var(--bg-selected)" : "none" }}
+                onMouseEnter={(e) => { if (selection?.type !== "allowList") e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { if (selection?.type !== "allowList") e.currentTarget.style.background = "none"; }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-muted)", flexShrink: 0 }}>
+                  <path d="M3 6h18M6 12h12M10 18h4" />
+                </svg>
+                <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("i18n.modelAllowList")}</span>
               </div>
               <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
 
