@@ -11,6 +11,10 @@ const markdownSanitizeSchema = {
   attributes: {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
+    a: (defaultSchema.attributes?.a || []).map((attribute) =>
+      Array.isArray(attribute) && attribute[0] === "className"
+        ? [...attribute, "chat-path-link"]
+        : attribute),
   },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };

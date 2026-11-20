@@ -5,6 +5,9 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, ToolbarIconButton } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
+import { AskDialogContent, type AskDialogRequest, type AskDialogResponder, type AskDialogResponse } from "./AskDialogContent";
+import { AskDrawer } from "./AskDrawer";
+import { MarkdownBody } from "./MarkdownBody";
 import { FileViewer } from "./FileViewer";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { TerminalPanel } from "./TerminalPanel";
@@ -384,6 +387,76 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   // A terminal tab carries kind:"terminal" + terminalId (server-side id).
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const [askRequest, setAskRequest] = useState<AskDialogRequest | null>(null);
+  const [askDrawerOpen, setAskDrawerOpen] = useState(false);
+  const askRequestRef = useRef<AskDialogRequest | null>(null);
+  const askResponderRef = useRef<AskDialogResponder | null>(null);
+  // Keep a snapshot for every retained ask tab, not just the newest question.
+  const lastAskRef = useRef(new Map<string, {
+    request: AskDialogRequest;
+    status: "pending" | "answered" | "cancelled";
+  }>());
+  const handleAskDialogChange = useCallback((request: AskDialogRequest | null) => {
+    const previous = askRequestRef.current;
+    if (previous && previous.id !== request?.id) {
+      const receipt = lastAskRef.current.get(previous.id);
+      if (receipt?.status === "pending") receipt.status = "cancelled";
+    }
+    if (request) {
+      lastAskRef.current.set(request.id, { request, status: "pending" });
+    }
+    askRequestRef.current = request;
+    setAskRequest(request);
+  }, []);
+  const handleRespondAskDialog = useCallback((respond: AskDialogResponder | null) => {
+    askResponderRef.current = respond;
+  }, []);
+  const respondToAsk = useCallback((request: AskDialogRequest, response: AskDialogResponse) => {
+    // A retained tab must never send an answer through a new session's hook.
+    const respond = askResponderRef.current;
+    if (askRequestRef.current !== request || !respond) return;
+    const receipt = lastAskRef.current.get(request.id);
+    if (receipt) receipt.status = "cancelled" in response ? "cancelled" : "answered";
+    respond(request, response);
+    askRequestRef.current = null;
+    setAskRequest(null);
+    setAskDrawerOpen(false);
+  }, []);
+  const revealAskTab = useCallback((request: AskDialogRequest) => {
+    const tabId = `ask:${request.id}`;
+    const label = translate("chat.agentQuestion");
+    setFileTabs((current) => {
+      const existing = current.find((tab) => tab.id === tabId);
+      if (!existing) return [...current, { id: tabId, kind: "ask", label, askRequestId: request.id }];
+      return existing.label === label ? current : current.map((tab) => tab.id === tabId ? { ...tab, label } : tab);
+    });
+    setActiveFileTabId(tabId);
+    setRightPanelOpen(true);
+  }, [translate]);
+  useEffect(() => {
+    if (!askRequest) {
+      setAskDrawerOpen(false);
+      return;
+    }
+    if (isMobile) {
+      setAskDrawerOpen(true);
+      setSidebarOpen(false);
+      setRightPanelOpen(false);
+    } else {
+      revealAskTab(askRequest);
+    }
+  }, [askRequest, isMobile, revealAskTab]);
+  const handleRevealAsk = useCallback(() => {
+    const request = askRequestRef.current;
+    if (!request) return;
+    if (isMobile) {
+      setAskDrawerOpen(true);
+      setSidebarOpen(false);
+      setRightPanelOpen(false);
+    } else {
+      revealAskTab(request);
+    }
+  }, [isMobile, revealAskTab]);
   // Server-wide flag — fetched once; gates the "New Terminal" affordance.
   const [terminalsEnabled, setTerminalsEnabled] = useState(false);
 
@@ -612,6 +685,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     // one repo keep their open tabs. Mirror handleCloseFileTab and close the
     // now-empty right panel.
     setFileTabs([]);
+    lastAskRef.current.clear();
+    askRequestRef.current = null;
+    askResponderRef.current = null;
+    setAskRequest(null);
+    setAskDrawerOpen(false);
     setActiveFileTabId(null);
     setRightPanelOpen(false);
     // Restore the workspace we switched to: its last open session, matched
@@ -917,6 +995,12 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     // Unmounting TerminalPanel (navigation/reload) never deletes — that is
     // what lets a reload reattach to the live process.
     const closing = fileTabs.find((t) => t.id === tabId);
+    if (closing?.kind === "ask" && askRequest && closing.askRequestId === askRequest.id) {
+      respondToAsk(askRequest, { cancelled: true });
+    }
+    if (closing?.kind === "ask" && closing.askRequestId) {
+      lastAskRef.current.delete(closing.askRequestId);
+    }
     if (closing?.kind === "terminal" && closing.terminalId) {
       void fetch(apiPath(`/api/terminals/${encodeURIComponent(closing.terminalId)}`), { method: "DELETE" })
         .catch(() => {});
@@ -931,7 +1015,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-  }, [fileTabs]);
+  }, [fileTabs, askRequest, respondToAsk]);
 
   const handleNewTerminal = useCallback(() => {
     if (!activeCwd) return;
@@ -1036,6 +1120,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   }, [projectTrustBusy, projectTrustCwd]);
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
+  const activeAskReceipt = activeFileTab?.askRequestId ? lastAskRef.current.get(activeFileTab.askRequestId) : null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
 
   // The floating Files panel follows the active browsing cwd (worktree
@@ -2086,6 +2171,9 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               onContextUsageChange={handleContextUsageChange}
               onSubagentsChange={setSubagents}
               onOpenFile={handleOpenLinkedFile}
+              onAskDialogChange={handleAskDialogChange}
+              onRespondAskDialog={handleRespondAskDialog}
+              onRevealAsk={handleRevealAsk}
               soundEnabled={soundEnabled}
               onSoundToggle={onSoundToggle}
               playDoneSound={playDoneSound}
@@ -2211,8 +2299,33 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         </div>
 
         {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {activeFileTab?.kind === "terminal" && activeFileTab.terminalId ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
+          {activeFileTab?.kind === "ask" ? (
+            askRequest && activeFileTab.askRequestId === askRequest.id ? (
+              isMobile ? (
+                <button type="button" onClick={handleRevealAsk} style={{ margin: 16, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-panel)", color: "var(--accent)", cursor: "pointer" }}>
+                  {translate("chat.openQuestion")}
+                </button>
+              ) : (
+                <AskDialogContent key={askRequest.id} variant="panel" request={askRequest} onRespond={(response) => respondToAsk(askRequest, response)} />
+              )
+            ) : activeAskReceipt ? (
+              <div data-testid="ask-receipt" style={{ height: "100%", overflowY: "auto", padding: 16 }}>
+                <div role="status" style={{ marginBottom: 16, color: "var(--accent)", fontSize: 13, fontWeight: 600 }}>
+                  {translate(activeAskReceipt.status === "answered" ? "chat.answered" : "chat.questionCancelled")}
+                </div>
+                {activeAskReceipt.request.questions.map((question) => (
+                  <section key={question.id} style={{ marginBottom: 16 }}>
+                    <MarkdownBody>{question.question}</MarkdownBody>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
+                {translate("files.noneOpen")}
+              </div>
+            )
+          ) : activeFileTab?.kind === "terminal" && activeFileTab.terminalId ? (
             <TerminalPanel
               terminalId={activeFileTab.terminalId}
               onExit={() => handleTerminalExit(activeFileTab.terminalId!)}
@@ -2293,6 +2406,28 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         </svg>
       </button>
     </div>
+    {isMobile && askRequest && (
+      <>
+        <AskDrawer
+          key={askRequest.id}
+          request={askRequest}
+          open={askDrawerOpen}
+          onClose={() => setAskDrawerOpen(false)}
+          onRespond={(response) => respondToAsk(askRequest, response)}
+        />
+        {!askDrawerOpen && (
+          <button
+            type="button"
+            data-testid="ask-reopen-pill"
+            onClick={handleRevealAsk}
+            style={{ position: "fixed", bottom: "calc(env(safe-area-inset-bottom) + 12px)", left: "50%", transform: "translateX(-50%)", zIndex: 400, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 4px 18px rgba(0,0,0,0.2)", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+          >
+            <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontWeight: 750 }}>?</span>
+            {translate("chat.agentQuestion")}
+          </button>
+        )}
+      </>
+    )}
     {settingsConfigOpen && (
       <SettingsConfig
         cwd={projectTrustCwd}

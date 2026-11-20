@@ -1622,3 +1622,9 @@ span.linenumber {
     font-size: 16px !important;
   }
 }
+
+.chat-path-link {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}

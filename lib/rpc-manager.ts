@@ -614,6 +614,7 @@ export class AgentSessionWrapper {
       // host; the browser union has no cancel member, so drop the pending frame.
       const targetId = typeof frame.targetId === "string" ? frame.targetId : undefined;
       if (targetId) this.pendingUiRequests.delete(targetId);
+      this.emit({ type: "extension_ui_cancelled", requestId: targetId } as AgentEvent, frameEnd);
       return;
     }
     const id = typeof frame.id === "string" ? frame.id : undefined;

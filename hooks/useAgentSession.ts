@@ -2163,6 +2163,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (title && (!eventSessionId || eventSessionId === sessionIdRef.current)) onSessionRenamed?.(title);
         break;
       }
+      case "extension_ui_cancelled":
+        if (typeof event.requestId === "string") {
+          setExtensionDialog((cur) => cur?.id === event.requestId ? null : cur);
+        }
+        break;
       case "extension_error":
         addNotice({
           type: "error",

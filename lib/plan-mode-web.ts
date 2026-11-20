@@ -59,6 +59,18 @@ export type ModeChangeEntryLike = {
   data?: Record<string, unknown>;
 };
 
+/** Mirror the TUI startup default only for fresh sessions without an explicit mode. */
+export function shouldEnterPlanModeOnStartupWeb(
+  entries: readonly ModeChangeEntryLike[],
+  messageCount: number,
+  opts: { defaultOnStartup: boolean; enabled: boolean },
+): boolean {
+  return messageCount === 0
+    && !entries.some((entry) => entry?.type === "mode_change")
+    && opts.defaultOnStartup
+    && opts.enabled;
+}
+
 /**
  * Reconstruct plan-mode state from a session's journal entries — the last
  * `mode_change` entry wins. This is the same contract the TUI persists

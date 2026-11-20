@@ -1,11 +1,12 @@
 "use client";
 
 import { useMemo, type MouseEvent } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, type Options as ReactMarkdownOptions } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { apiPath } from "@/lib/api-path";
 import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { remarkPathLinks, resolveMarkdownPathCandidate } from "@/lib/markdown-path-links";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 
 interface MarkdownBodyProps {
@@ -18,6 +19,10 @@ interface MarkdownBodyProps {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const remarkPlugins = useMemo<ReactMarkdownOptions["remarkPlugins"]>(
+    () => [...(markdownRemarkPlugins ?? []), remarkPathLinks({ cwd })],
+    [cwd],
+  );
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
     code({ className, children, ...props }) {
@@ -29,6 +34,26 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
           return <MermaidBlock code={raw.replace(/\n$/, "")} isStreaming={isStreaming} />;
         }
         return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} isStreaming={isStreaming} />;
+      }
+      const resolved = onOpenFile ? resolveMarkdownPathCandidate(raw.trim(), cwd) : null;
+      if (resolved && onOpenFile) {
+        delete props.node;
+        return (
+          <code
+            {...props}
+            className="markdown-inline-code chat-path-link"
+            role="link"
+            tabIndex={0}
+            onClick={() => onOpenFile(resolved.filePath)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onOpenFile(resolved.filePath);
+            }}
+          >
+            {children}
+          </code>
+        );
       }
       return (
         <code
@@ -92,7 +117,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
-        remarkPlugins={markdownRemarkPlugins}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={markdownRehypePlugins}
         components={components}
       >

@@ -840,6 +840,94 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
 }
 
 
+function askPreviewText(input: unknown): string {
+  if (!isRecord(input) || !Array.isArray(input.questions)) return "";
+  const first = input.questions[0];
+  return isRecord(first) && typeof first.question === "string" ? first.question.slice(0, 120) : "";
+}
+
+function askAnswers(details: unknown): Record<string, unknown>[] | null {
+  if (!isRecord(details)) return null;
+  const answers = Array.isArray(details.results) ? details.results : [details];
+  if (answers.length === 0 || !answers.every((answer) =>
+    isRecord(answer)
+    && Array.isArray(answer.selectedOptions)
+    && answer.selectedOptions.every((label) => typeof label === "string")
+    && (answer.customInput === undefined || typeof answer.customInput === "string")
+  )) return null;
+  return answers as Record<string, unknown>[];
+}
+
+function AskToolCallView({ block, result }: { block: ToolCallContent; result?: ToolResultMessage }) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(true);
+  const questions = isRecord(block.input) && Array.isArray(block.input.questions)
+    ? block.input.questions.filter(isRecord)
+    : [];
+  const answers = askAnswers(result?.details);
+  const chatRedirect = isRecord(result?.details) && result.details.chatRedirect === true;
+  const resultText = result?.content.filter((item): item is TextContent => item.type === "text").map((item) => item.text).join("\n") ?? "";
+  const images = result?.content.filter((item): item is ImageContent => item.type === "image") ?? [];
+  const isError = result?.isError ?? false;
+
+  return (
+    <div style={{ border: `1px solid ${isError ? "rgba(248,113,113,0.45)" : "var(--border)"}`, borderRadius: 7, overflow: "hidden", fontSize: 12 }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "6px 10px", background: "var(--bg-subtle)", border: "none", color: "var(--text-muted)", textAlign: "left", cursor: "pointer", minWidth: 0 }}
+      >
+        <span aria-hidden="true" style={{ color: "var(--accent)", fontWeight: 700 }}>?</span>
+        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>ask</span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{askPreviewText(block.input)}</span>
+        <span aria-hidden="true">{expanded ? "⌃" : "⌄"}</span>
+      </button>
+      {expanded && (
+        <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {questions.map((question, index) => {
+            const answer = answers?.find((candidate) =>
+              typeof question.id === "string" && candidate.id === question.id
+            ) ?? answers?.find((candidate) =>
+              candidate.id === undefined && typeof question.question === "string" && candidate.question === question.question
+            ) ?? (questions.length === 1 && answers?.length === 1 && answers[0].id === undefined ? answers[0] : undefined);
+            const selected = !isError && !chatRedirect && Array.isArray(answer?.selectedOptions) ? answer.selectedOptions as string[] : [];
+            const options = Array.isArray(question.options) ? question.options.filter(isRecord) : [];
+            return (
+              <section key={typeof question.id === "string" ? question.id : index}>
+                {typeof question.header === "string" && <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{question.header}</div>}
+                {typeof question.question === "string" && <SafeMarkdownBody>{question.question}</SafeMarkdownBody>}
+                {options.map((option, optionIndex) => (
+                  <div key={optionIndex} style={{ marginTop: 6, paddingLeft: 10, borderLeft: "2px solid var(--border)" }}>
+                    <span style={{ color: selected.includes(String(option.label)) ? "var(--accent)" : "var(--text)" }}>
+                      {selected.includes(String(option.label)) && <span aria-label="Selected">✓ </span>}
+                      {typeof option.label === "string" ? option.label : ""}
+                    </span>
+                    {question.recommended === optionIndex && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--accent)" }}>{t("chat.recommended")}</span>}
+                    {typeof option.description === "string" && <div style={{ color: "var(--text-muted)" }}><SafeMarkdownBody>{option.description}</SafeMarkdownBody></div>}
+                  </div>
+                ))}
+                {selected.filter((label) => !options.some((option) => option.label === label)).map((label) => (
+                  <div key={label} style={{ marginTop: 6, color: "var(--accent)" }}>✓ {label}</div>
+                ))}
+                {!isError && !chatRedirect && typeof answer?.customInput === "string" && (
+                  <blockquote style={{ margin: "8px 0 0", paddingLeft: 10, borderLeft: "3px solid var(--accent)", whiteSpace: "pre-wrap" }}>{answer.customInput}</blockquote>
+                )}
+              </section>
+            );
+          })}
+          {!result && <div style={{ color: "var(--text-muted)" }}>{t("chat.agentQuestionHint")}</div>}
+          {result && !isError && (chatRedirect
+            ? <div style={{ color: "var(--accent)" }}>{t("chat.chatAboutThis")}</div>
+            : !answers && <SafeMarkdownBody>{resultText}</SafeMarkdownBody>)}
+        </div>
+      )}
+      {result && isError && <PairedResult text={resultText} isEmpty={!resultText.trim()} isError />}
+      <PairedResultImages images={images} isError={isError} />
+    </div>
+  );
+}
+
 function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
   const normalizedToolName = block.toolName.toLowerCase();
   const isEditTool = normalizedToolName === "edit" ||
@@ -849,6 +937,8 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
     normalizedToolName.includes("str_replace") ||
     normalizedToolName.includes("replace_editor");
   const [expanded, setExpanded] = useState(isEditTool);
+  if (normalizedToolName === "ask") return <AskToolCallView block={block} result={result} />;
+
   const inputStr = JSON.stringify(block.input, null, 2);
   const isTodoTool = normalizedToolName === "todo" || normalizedToolName.endsWith(".todo") || normalizedToolName.endsWith("_todo");
   const isBashTool = normalizedToolName === "bash" || normalizedToolName.startsWith("bash ") || normalizedToolName.endsWith(".bash") || normalizedToolName.endsWith("_bash");
