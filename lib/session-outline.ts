@@ -7,7 +7,8 @@ import type { JournalAnchor } from "./session-history";
 
 export interface SessionOutlineEntry {
   entryId: string;
-  role: "user" | "assistant" | "summary";
+  /** #109 adds ask tool answers without changing existing message ordinals. */
+  role: "user" | "assistant" | "summary" | "ask";
   /** Bounded deterministic plain text, incl tool names if no text. */
   preview: string;
   timestamp: string;

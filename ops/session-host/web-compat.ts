@@ -34,7 +34,9 @@ import { getOmpSetting } from "../../lib/omp-setting-access";
 import {
   applyWebPlanModeTransition,
   readPersistedPlanModeState,
+  shouldEnterPlanModeOnStartupWeb,
   webPlanModeInfo,
+  WEB_DEFAULT_PLAN_FILE_URL,
   type ModeChangeEntryLike,
   type WebPlanModeSession,
 } from "../../lib/plan-mode-web";
@@ -562,6 +564,26 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     }
     if (state?.enabled) {
       session.setPlanProposalHandler((title) => handlePlanProposal(title));
+    }
+    if (!session.getPlanModeState()?.enabled && shouldEnterPlanModeOnStartupWeb(
+      sessionManager.getEntries() as ModeChangeEntryLike[],
+      sessionManager.buildSessionContext().messages.length,
+      {
+        defaultOnStartup: getOmpSetting<boolean>(settings, "plan.defaultOnStartup"),
+        enabled: getOmpSetting<boolean>(settings, "plan.enabled"),
+      },
+    )) {
+      applyWebPlanModeTransition(
+        webPlanSession,
+        true,
+        (title) => handlePlanProposal(title),
+        getOmpSetting<boolean>(settings, "plan.enabled"),
+      );
+      transport.emitHostFrame({
+        type: "mode_change",
+        mode: "plan",
+        planFilePath: WEB_DEFAULT_PLAN_FILE_URL,
+      });
     }
   }
 

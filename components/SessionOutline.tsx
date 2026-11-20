@@ -37,6 +37,7 @@ function formatOutlineTime(timestamp: string): string | null {
 function roleLabel(role: SessionOutlineEntry["role"], t: (key: string, params?: Record<string, string | number>) => string): string {
   if (role === "user") return t("outline.roleUser");
   if (role === "summary") return t("outline.roleSummary");
+  if (role === "ask") return t("outline.roleAsk");
   return t("outline.roleAssistant");
 }
 
@@ -56,6 +57,9 @@ function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] }) {
         <path d="M2.5 2.5h7M2.5 6h7M2.5 9.5h4.5" />
       </svg>
     );
+  }
+  if (role === "ask") {
+    return <span aria-hidden="true" style={{ fontSize: 12, fontWeight: 700 }}>?</span>;
   }
   return (
     <svg {...common}>
@@ -139,7 +143,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                   aria-hidden="true"
                   className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md"
                   style={{
-                    color: entry.role === "user" ? "var(--accent)" : entry.role === "summary" ? "#d97706" : "var(--text-muted)",
+                    color: entry.role === "ask" ? "var(--accent)" : entry.role === "user" ? "var(--accent)" : entry.role === "summary" ? "#d97706" : "var(--text-muted)",
                     background: "color-mix(in srgb, var(--text-dim) 12%, transparent)",
                   }}
                 >

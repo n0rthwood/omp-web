@@ -194,6 +194,9 @@ interface JournalRecordMeta {
   contextPromptTokens?: number;
   hasImage?: boolean;
   preview?: string;
+  /** ask toolResult only: included as an answer in the outline. */
+  isAskResult?: boolean;
+  askError?: boolean;
   /** custom_message only. */
   customType?: string;
   /** custom_message only: content is string/array (renders) vs other (null). */
@@ -344,6 +347,32 @@ function toolNameLabels(content: unknown[]): string[] {
   return labels;
 }
 
+function askResultPreview(details: unknown): string | null {
+  if (!isPlainRecord(details)) return null;
+  if (details.chatRedirect === true) return "Chat about this";
+  const answers = Array.isArray(details.results) ? details.results : [details];
+  if (answers.length === 0 || !answers.every((answer) =>
+    isPlainRecord(answer)
+    && Array.isArray(answer.selectedOptions)
+    && answer.selectedOptions.every((label) => typeof label === "string")
+    && (answer.customInput === undefined || typeof answer.customInput === "string")
+  )) return null;
+  let preview = "";
+  for (const answer of answers) {
+    let answerPreview = "";
+    for (const label of answer.selectedOptions as string[]) {
+      answerPreview = appendPreview("", `${answerPreview}${answerPreview ? ", " : ""}${label}`);
+      if (answerPreview.length >= PREVIEW_CAP) break;
+    }
+    if (typeof answer.customInput === "string") {
+      answerPreview = appendPreview("", `${answerPreview}${answerPreview ? " " : ""}(custom: ${answer.customInput})`);
+    }
+    preview = appendPreview("", `${preview}${preview ? "; " : ""}${answerPreview}`);
+    if (preview.length >= PREVIEW_CAP) break;
+  }
+  return preview;
+}
+
 function metaFromEntry(entry: Record<string, unknown>, offset: number, end: number): JournalRecordMeta | null {
   const id = entry.id;
   const type = entry.type;
@@ -383,6 +412,11 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         if (block.type === "text") preview = appendPreview(preview, block.text);
         if (preview.length >= PREVIEW_CAP) break;
       }
+    }
+    if (message.role === "toolResult" && message.toolName === "ask") {
+      meta.isAskResult = true;
+      meta.askError = message.isError === true;
+      if (!meta.askError) preview = askResultPreview(message.details) ?? preview;
     }
     if (preview) meta.preview = preview;
   } else if (type === "custom_message") {
@@ -758,14 +792,15 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
 
 /**
  * Outline role for a rendered display record, or null when the record is a
- * rendered message that the outline does not list (toolResult/bashExecution/
- * custom_message). Such positions still count toward ordinals so outline
+ * rendered message that the outline does not list (non-ask toolResult/
+ * bashExecution/custom_message). Such positions still count toward ordinals so outline
  * ordinals match the window readers' rendered-message positions exactly.
  */
 function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | null {
   if (meta.type === "message") {
     if (meta.role === "user") return "user";
     if (meta.role === "assistant") return "assistant";
+    if (meta.role === "toolResult" && meta.isAskResult) return "ask";
     return null;
   }
   if (meta.type === "compaction") return "summary";

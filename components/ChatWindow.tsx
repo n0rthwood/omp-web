@@ -22,6 +22,7 @@ import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-fi
 import { MessageView } from "./MessageView";
 import { SessionOutline } from "./SessionOutline";
 import { MarkdownBody } from "./MarkdownBody";
+import type { AskDialogRequest, AskDialogResponder } from "./AskDialogContent";
 import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { OmpWordmark } from "./OmpWordmark";
@@ -46,6 +47,9 @@ interface Props {
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
+  onAskDialogChange?: (request: AskDialogRequest | null) => void;
+  onRespondAskDialog?: (respond: AskDialogResponder | null) => void;
+  onRevealAsk?: () => void;
   onSubagentsChange?: (subagents: SubagentSnapshot[]) => void;
   /** Completion sound state + controls, owned by AppShell so tasks finishing in
    *  a non-active workspace can still ring. */
@@ -195,7 +199,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, onAskDialogChange, onRespondAskDialog, onRevealAsk, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -244,6 +248,16 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
+
+  useEffect(() => {
+    onAskDialogChange?.(extensionDialog?.method === "ask" ? extensionDialog : null);
+    return () => onAskDialogChange?.(null);
+  }, [extensionDialog, onAskDialogChange]);
+
+  useEffect(() => {
+    onRespondAskDialog?.(respondToExtensionUi);
+    return () => onRespondAskDialog?.(null);
+  }, [respondToExtensionUi, onRespondAskDialog]);
   const sessionBusy = agentRunning || bashRunning;
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
@@ -717,7 +731,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
         </div>
       )}
 
-      {extensionDialog && (
+      {extensionDialog && extensionDialog.method !== "ask" && (
         <ExtensionDialog
           request={extensionDialog}
           onRespond={respondToExtensionUi}
@@ -990,12 +1004,16 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 // anchored (branch_summary converts to a user message in
                 // session-reader) — paired toolResult entries render null and
                 // would leave zero-height wrappers polluting measurement.
+                // Exception (#109): ask toolResults render inline under their
+                // call AND are outline-listed (role "ask"), so they need an
+                // anchor for the outline jump to seek.
                 // Split final-assistant renders pass anchor=false on the
                 // folded process half so the answer half (or the whole block
                 // for tool-only entries) is the unique outline/scroll target.
                 const entryId = entryIds[idx];
                 const anchorRole = msg.role === "user" || msg.role === "assistant"
-                  || (msg.role === "custom" && (msg as CustomMessage).customType === "compaction");
+                  || (msg.role === "custom" && (msg as CustomMessage).customType === "compaction")
+                  || (msg.role === "toolResult" && (msg as ToolResultMessage).toolName === "ask");
                 const anchor = options.anchor !== false && !!entryId && anchorRole;
                 // Empty/empty-thinking-only non-error assistants render null in
                 // MessageView but the outline still lists them — show a compact
@@ -1165,6 +1183,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     // by the outline but MessageView renders null for them —
                     // keep a compact anchored marker so seeks never exhaust.
                     addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process-empty" }), 0);
+                  } else if (processMessage.role === "toolResult" && (processMessage as ToolResultMessage).toolName === "ask" && entryIds[processIdx]) {
+                    // #109: ask answers render inside the paired toolCall view;
+                    // the outline still lists this toolResult (role "ask"), so
+                    // keep a zero-height anchor for the jump to seek.
+                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process-ask-anchor" }), 0);
                   }
                 }
                 if (finalProcessMessage) {
@@ -1255,6 +1278,26 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
+            )}
+
+            {extensionDialog?.method === "ask" && (
+              <div
+                data-testid="ask-inline-card"
+                style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, margin: "10px 0", padding: "9px 10px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", fontSize: 12 }}
+              >
+                <span aria-hidden="true" style={{ display: "grid", placeItems: "center", flexShrink: 0, width: 20, height: 20, borderRadius: 5, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontWeight: 750 }}>?</span>
+                <span style={{ flexShrink: 0, color: "var(--text)", fontWeight: 600 }}>{t("chat.agentQuestion")}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-muted)" }}>
+                  {extensionDialog.questions[0]?.question.slice(0, 120)}
+                </span>
+                <button
+                  type="button"
+                  onClick={onRevealAsk}
+                  style={{ flexShrink: 0, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--accent)", cursor: "pointer" }}
+                >
+                  {t("chat.openQuestion")}
+                </button>
+              </div>
             )}
 
 
@@ -1409,7 +1452,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
 
 type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" | "ask" | "plan_review" }
+  { method: "select" | "confirm" | "input" | "editor" | "plan_review" }
 >;
 
 export function ExtensionDialog({
@@ -1421,26 +1464,11 @@ export function ExtensionDialog({
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
-  const [selectedOptions, setSelectedOptions] = useState<Record<string, number[]>>({});
-  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({});
   const [planFeedback, setPlanFeedback] = useState("");
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
     setPlanFeedback("");
-    setCustomAnswers({});
-    if (request.method !== "ask") {
-      setSelectedOptions({});
-      return;
-    }
-    const recommended: Record<string, number[]> = {};
-    for (const question of request.questions) {
-      recommended[question.id] = question.recommended !== undefined
-        && question.options[question.recommended] !== undefined
-        ? [question.recommended]
-        : [];
-    }
-    setSelectedOptions(recommended);
   }, [request]);
 
   const submitValue = () => {
@@ -1450,269 +1478,6 @@ export function ExtensionDialog({
       onRespond(request, { value });
     }
   };
-  if (request.method === "ask") {
-    const canSubmit = request.questions.every((question) =>
-      (selectedOptions[question.id]?.length ?? 0) > 0
-      || (customAnswers[question.id]?.trim().length ?? 0) > 0);
-    const toggleOption = (questionId: string, optionIndex: number, multi: boolean) => {
-      setSelectedOptions((current) => {
-        const selected = current[questionId] ?? [];
-        const next = multi
-          ? selected.includes(optionIndex)
-            ? selected.filter((index) => index !== optionIndex)
-            : [...selected, optionIndex]
-          : [optionIndex];
-        return { ...current, [questionId]: next };
-      });
-    };
-    const submitAnswers = () => {
-      if (!canSubmit) return;
-      onRespond(request, {
-        value: JSON.stringify({
-          kind: "submit",
-          results: request.questions.map((question) => {
-            const customInput = customAnswers[question.id]?.trim();
-            return {
-              id: question.id,
-              question: question.question,
-              options: question.options.map((option) => option.label),
-              multi: question.multi ?? false,
-              selectedOptions: (selectedOptions[question.id] ?? [])
-                .map((index) => question.options[index]?.label)
-                .filter((option): option is string => option !== undefined),
-              ...(customInput ? { customInput } : {}),
-            };
-          }),
-        }),
-      });
-    };
-
-    return (
-      <div
-        onKeyDown={(event) => {
-          if (event.key === "Escape") onRespond(request, { cancelled: true });
-        }}
-        style={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 90,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 16,
-          background: "color-mix(in srgb, #000 26%, transparent)",
-          backdropFilter: "blur(2px)",
-        }}
-      >
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("chat.agentQuestion")}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            width: "min(720px, 100%)",
-            maxHeight: "min(780px, calc(100dvh - 32px))",
-            overflow: "hidden",
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            background: "var(--bg)",
-            boxShadow: "0 24px 80px rgba(0,0,0,0.32)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
-            <span
-              aria-hidden="true"
-              style={{
-                display: "grid",
-                placeItems: "center",
-                width: 24,
-                height: 24,
-                borderRadius: 6,
-                background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))",
-                color: "var(--accent)",
-                fontSize: 13,
-                fontWeight: 750,
-              }}
-            >
-              ?
-            </span>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 680 }}>{t("chat.agentQuestion")}</div>
-              <div style={{ marginTop: 2, color: "var(--text-dim)", fontSize: 11 }}>{t("chat.agentQuestionHint")}</div>
-            </div>
-          </div>
-
-          <div style={{ overflowY: "auto", padding: 16 }}>
-            <div style={{ display: "grid", gap: 14 }}>
-              {request.questions.map((question, questionIndex) => {
-                const selected = selectedOptions[question.id] ?? [];
-                return (
-                  <section
-                    key={question.id}
-                    style={{
-                      padding: 14,
-                      border: "1px solid var(--border)",
-                      borderRadius: 8,
-                      background: "var(--bg-panel)",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-                      {question.header && (
-                        <span style={{ color: "var(--accent)", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                          {question.header}
-                        </span>
-                      )}
-                      {request.questions.length > 1 && (
-                        <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>
-                          {questionIndex + 1}/{request.questions.length}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ marginBottom: 10, color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: 1.5 }}>
-                      {question.question}
-                    </div>
-                    <div
-                      role={question.multi ? "group" : "radiogroup"}
-                      aria-label={question.question}
-                      style={{ display: "grid", gap: 7 }}
-                    >
-                      {question.options.map((option, optionIndex) => {
-                        const checked = selected.includes(optionIndex);
-                        const recommended = question.recommended === optionIndex;
-                        return (
-                          <button
-                            key={`${question.id}:${optionIndex}`}
-                            type="button"
-                            role={question.multi ? "checkbox" : "radio"}
-                            aria-checked={checked}
-                            onClick={() => toggleOption(question.id, optionIndex, question.multi ?? false)}
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "18px minmax(0, 1fr) auto",
-                              alignItems: "start",
-                              gap: 9,
-                              width: "100%",
-                              padding: "9px 10px",
-                              border: `1px solid ${checked ? "color-mix(in srgb, var(--accent) 55%, var(--border))" : "var(--border)"}`,
-                              borderRadius: 7,
-                              background: checked ? "color-mix(in srgb, var(--accent) 8%, var(--bg))" : "var(--bg)",
-                              color: "var(--text)",
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <span
-                              aria-hidden="true"
-                              style={{
-                                display: "grid",
-                                placeItems: "center",
-                                width: 16,
-                                height: 16,
-                                marginTop: 1,
-                                border: `1px solid ${checked ? "var(--accent)" : "var(--text-dim)"}`,
-                                borderRadius: question.multi ? 4 : "50%",
-                                background: checked ? "var(--accent)" : "transparent",
-                                color: "#fff",
-                                fontSize: 10,
-                                lineHeight: 1,
-                              }}
-                            >
-                              {checked && (question.multi ? (
-                                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                  <polyline points="2 5.2 4.1 7.2 8 2.8" />
-                                </svg>
-                              ) : (
-                                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor" }} />
-                              ))}
-                            </span>
-                            <span style={{ minWidth: 0 }}>
-                              <span style={{ display: "block", fontSize: 12.5, fontWeight: checked ? 650 : 500 }}>{option.label}</span>
-                              {option.description && (
-                                <span style={{ display: "block", marginTop: 3, color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
-                                  {option.description}
-                                </span>
-                              )}
-                              {checked && option.preview && (
-                                <span style={{ display: "block", marginTop: 8, padding: "7px 8px", borderLeft: "2px solid var(--accent)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                                  {option.preview}
-                                </span>
-                              )}
-                            </span>
-                            {recommended && (
-                              <span style={{ color: "var(--accent)", fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-                                {t("chat.recommended")}
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <input
-                      value={customAnswers[question.id] ?? ""}
-                      onChange={(event) => setCustomAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
-                      onKeyDown={(event) => {
-                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitAnswers();
-                      }}
-                      placeholder={t("chat.customAnswer")}
-                      aria-label={t("chat.customAnswer")}
-                      style={{
-                        width: "100%",
-                        height: 34,
-                        marginTop: 9,
-                        padding: "0 10px",
-                        border: "1px solid var(--border)",
-                        borderRadius: 7,
-                        outline: "none",
-                        background: "var(--bg)",
-                        color: "var(--text)",
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 11,
-                      }}
-                    />
-                  </section>
-                );
-              })}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8, padding: "10px 16px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-            <button
-              type="button"
-              onClick={() => onRespond(request, { cancelled: true })}
-              style={{ padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer" }}
-            >
-              {t("chat.cancel")}
-            </button>
-            <button
-              type="button"
-              onClick={() => onRespond(request, { value: JSON.stringify({ kind: "chat" }) })}
-              style={{ padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text)", cursor: "pointer" }}
-            >
-              {t("chat.chatAboutThis")}
-            </button>
-            <button
-              type="button"
-              disabled={!canSubmit}
-              onClick={submitAnswers}
-              style={{
-                padding: "7px 12px",
-                border: "1px solid var(--accent)",
-                borderRadius: 6,
-                background: "var(--accent)",
-                color: "#fff",
-                cursor: canSubmit ? "pointer" : "not-allowed",
-                opacity: canSubmit ? 1 : 0.45,
-                fontWeight: 650,
-              }}
-            >
-              {t("chat.submitAnswer")}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   if (request.method === "plan_review") {
     return (

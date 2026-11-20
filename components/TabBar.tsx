@@ -7,11 +7,12 @@ import { useI18n } from "@/hooks/useI18n";
 export interface Tab {
   id: string;
   label: string;
-  filePath: string;
+  filePath?: string;
   sourceSessionId?: string | null;
   initialDisplayMode?: "source" | "preview" | "diff";
-  kind?: "file" | "terminal"; // default "file" when absent — every existing call site is unaffected
+  kind?: "file" | "terminal" | "ask"; // default "file" when absent
   terminalId?: string; // present when kind === "terminal"; the server-side terminal id
+  askRequestId?: string;
 }
 
 interface Props {
@@ -72,7 +73,9 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {tab.kind === "terminal" ? <TerminalIcon size={13} /> : getFileIcon(tab.label, 13)}
+              {tab.kind === "ask" ? (
+                <span aria-hidden="true" style={{ display: "grid", placeItems: "center", width: 13, height: 13, borderRadius: 3, background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", color: "var(--accent)", fontSize: 10, fontWeight: 750 }}>?</span>
+              ) : tab.kind === "terminal" ? <TerminalIcon size={13} /> : getFileIcon(tab.label, 13)}
             </span>
             <span
               style={{
