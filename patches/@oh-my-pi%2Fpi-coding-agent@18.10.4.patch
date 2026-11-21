@@ -1,6 +1,9 @@
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-2a0663fbed208091 b/.bun-tag-2a0663fbed208091
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-6f1c890149861eb6 b/.bun-tag-6f1c890149861eb6
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-ab25ef62432b0b63 b/.bun-tag-ab25ef62432b0b63
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -129,6 +132,49 @@ index 50465f8b9a7d8d82807e0f1087991b89c6d5d233..46924f28f4e681e00bb9ec65547a200f
  		});
  		const reminderMessage: Message = {
  			role: "developer",
+diff --git a/src/tools/ask.ts b/src/tools/ask.ts
+index 05fac6ec8e078e6c0c40efd7a95544e4773adec7..03649a057557c6998fe448a4335f0dcf84294369 100644
+--- a/src/tools/ask.ts
++++ b/src/tools/ask.ts
+@@ -787,14 +787,36 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 				}
+ 				if (richResult.kind === "chat") {
+ 					const questionText = params.questions.map(q => q.question).join("\n");
++					const discussion: NonNullable<AskToolDetails["discussion"]> = [];
++					if (Array.isArray(richResult.discussion)) {
++						for (const question of params.questions) {
++							for (const entry of richResult.discussion) {
++								if (entry?.id !== question.id || typeof entry.text !== "string") continue;
++								const text = entry.text.trim();
++								if (!text) continue;
++								discussion.push({ id: question.id, question: question.question, text });
++								break;
++							}
++						}
++					}
++					const discussionText =
++						discussion.length > 0
++							? `\n\nUser discussion (not an answer or approval of any option):\n${discussion
++									.map(entry => `Question [${entry.id}]: ${entry.question}\nUser discussion:\n${entry.text}`)
++									.join("\n\n")}`
++							: "";
+ 					return {
+ 						content: [
+ 							{
+ 								type: "text" as const,
+-								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
++								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}${discussionText}`,
+ 							},
+ 						],
+-						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
++						details: {
++							chatRedirect: true,
++							questions: params.questions.map(q => q.question),
++							...(discussion.length > 0 ? { discussion } : {}),
++						},
+ 					};
+ 				}
+ 				if (richResult.results.length !== params.questions.length) {
 diff --git a/src/tools/browser.ts b/src/tools/browser.ts
 index 5d09ccc3908dadac92687c4a1d8b7616f3e91846..bc40fed53dbda7629b1a8388c07c4a57bd906202 100644
 --- a/src/tools/browser.ts

@@ -349,7 +349,17 @@ function toolNameLabels(content: unknown[]): string[] {
 
 function askResultPreview(details: unknown): string | null {
   if (!isPlainRecord(details)) return null;
-  if (details.chatRedirect === true) return "Chat about this";
+  if (details.chatRedirect === true) {
+    let preview = "";
+    if (Array.isArray(details.discussion)) {
+      for (const item of details.discussion) {
+        if (!isPlainRecord(item) || typeof item.id !== "string" || typeof item.text !== "string" || !item.text.trim()) continue;
+        preview = appendPreview("", `${preview}${preview ? "; " : "Chat about this: "}${item.text}`);
+        if (preview.length >= PREVIEW_CAP) break;
+      }
+    }
+    return preview || "Chat about this";
+  }
   const answers = Array.isArray(details.results) ? details.results : [details];
   if (answers.length === 0 || !answers.every((answer) =>
     isPlainRecord(answer)

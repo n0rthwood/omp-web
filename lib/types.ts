@@ -163,7 +163,7 @@ export interface ExtensionAskDialogResultItem {
 
 export type ExtensionAskDialogResult =
   | { kind: "submit"; results: ExtensionAskDialogResultItem[] }
-  | { kind: "chat" };
+  | { kind: "chat"; discussion?: Array<{ id: string; text: string }> };
 
 export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 

@@ -94,6 +94,7 @@
     "typescript": "^5.9.3"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-coding-agent@18.10.4": "patches/@oh-my-pi%2Fpi-coding-agent@18.10.4.patch"
+    "@oh-my-pi/pi-coding-agent@18.10.4": "patches/@oh-my-pi%2Fpi-coding-agent@18.10.4.patch",
+    "@oh-my-pi/pi-tui@18.10.4": "patches/@oh-my-pi%2Fpi-tui@18.10.4.patch"
   }
 }
