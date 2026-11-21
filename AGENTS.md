@@ -569,6 +569,7 @@ lib/
   session-host-transport.ts host run dir/socket/unit names, connect, liveness probe, .info discovery
   terminals/terminal-service.ts  async UDS relay to the terminal daemon (auto-start, reconnect, replay)
   session-reader.ts    session listing + path cache + buildSessionContext adapter
+  journal-stats.ts     whole-journal message tally by `message.role` (the SDK's count is windowed) + stat-keyed memo
   session-title.ts     thin wrapper over omp's own title generator
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -645,6 +646,18 @@ release/systemd/
   uses — with a browser-backed `ExtensionUIContext` layered on top. Do not
   reimplement the action set; a mismatch shows up as extensions silently doing
   nothing.
+- **Ask "Chat about this" is not an answer.** `AskDialogContent` sends
+  `{kind:"chat",discussion:[{id,text}]}` for nonblank per-question custom text,
+  or exactly `{kind:"chat"}` when blank. The pinned coding-agent patch makes
+  the discussion model-visible in the ask tool result and persists it as
+  `details.discussion` with `chatRedirect:true`; `MessageView` and the session
+  outline render the persisted text. Never translate this action into
+  `kind:"submit"` or infer acceptance of a recommended option. The #114
+  plan-mode prose exemption lets the agent discuss the user's objection.
+  During rollout, an already-running session host still has its old SDK and
+  silently discards the new discussion field. Upgrade host code before
+  exposing the new UI, and let active hosts finish rather than terminating
+  their turns; a web-tier restart does not update hosts.
 - **Since #94 a browser session runs OUTSIDE the server, so restarting the
   server no longer kills the turn.** Hosts live in their own transient units
   (`systemd-run --user --collect`), outside `omp-web.service`'s cgroup;
@@ -720,6 +733,60 @@ chronological compaction point** — after the kept messages, before the
 post-compaction turns. It is not the LLM context, where the summary comes first.
 `entryIds` is a parallel array to `messages` and is walked locally because omp's
 `buildSessionContext` does not return entry ids.
+
+### Session counts come from role tags, never from the SDK's listing
+`SessionManager.listAll()` does **not** parse a journal. It reads a 4 KB head
+window plus a 32 KB tail and counts `"type":"message"` markers inside those byte
+slices (`session-listing.ts`, `SESSION_LIST_PREFIX_BYTES`). Every web journal
+opens with a 256-byte padded `title` slot, the header records and a **7.1–7.5 KB
+`plan-mode-context`** custom message (written when `plan.defaultOnStartup` is on,
+via `shouldEnterPlanModeOnStartupWeb` in `ops/session-host/web-compat.ts`), so
+the real first user message starts around byte 8000 — outside the window. The
+SDK then reports `messageCount: 0` / `firstMessage: "(no messages)"` for a
+session holding hundreds of messages (measured: 295 of 336 journals wrong, 47
+of them zero).
+
+`lib/journal-stats.ts` is the fix and the only reader of role tags:
+`readJournalMessageStats()` streams the whole file, gates parsing on the
+`{"type":"message"` line prefix the SDK always writes first, and tallies
+`message.role` into `messageCount` / `userMessages` / `assistantMessages` /
+`toolResultMessages` plus the first user text. `readJournalMessageStatsCached()`
+memoizes on `(mtimeMs, size)` — a **stat-first** contract, so a deleted journal
+returns `undefined` instead of resurrecting stats for a session that is gone.
+
+Never re-derive a count from `messageCount`. It is every message record of every
+role (store-wide: user 1375, assistant 25165, toolResult 26618), so
+`Math.round(messageCount / 2)` — the old Home turn estimate — is meaningless.
+Turns are `userMessages`. `SessionInfo` carries the three role counts as
+**optional** fields because a host from an older release emits `session_info`
+frames without them; `app/api/sessions/route.ts` fills them in from the journal
+for such rows, so remotes need not upgrade in lockstep.
+
+Two invariants that are easy to break:
+
+- **Bound the fan-out.** `loadAllSessions` reads one file per session; going
+  through `Promise.all` opens one descriptor per journal (350 on this fleet) and
+  crashes Bun outright. It uses `mapWithConcurrency(…, 8)`.
+- **A titled session stays visible.** The list hides rows that render as
+  "(no messages)" — no user message and no title — because those are abandoned
+  drafts and harness probes. A title is user intent, a `transient` row is a
+  conversation being typed into, and an unreadable journal keeps the row rather
+  than vanishing. Hiding is list-only: the detail route still serves a deep link
+  to a hidden shell, and nothing is ever deleted.
+
+### Test processes must never journal into the real store
+`bun test` runs in-process, so anything that calls `SessionManager.create()` /
+`ensureOnDisk()` writes to the **real** `~/.omp/agent/sessions` unless the agent
+dir is redirected. `lib/rpc-manager-history-boundary.test.mjs` therefore calls
+`setAgentDir(join(leaseBase, "agent"))` from `@oh-my-pi/pi-utils/dirs` **before**
+importing the SDK; without it every run left untitled `-tmp-omp99-run-*` shells
+in production. The same class of leak exists on the host side: session hosts are
+spawned with `systemd-run --user`, which does **not** inherit the caller's
+environment, so `spawnSessionHost` forwards `HOST_INHERITED_ENV` (`HOME`,
+`PI_CODING_AGENT_DIR`, `PI_PROFILE`, `OMP_PROFILE`, `OMP_WEB_USERS_FILE`, plus
+the socket run dir and idle override). An isolated instance launched with a fake
+`HOME` keeps its journals inside that HOME — verify with
+`tr '\0' '\n' < /proc/<host pid>/environ | grep '^HOME='`.
 
 ### ToolCall field normalization
 omp stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and `ChatWindow.handleAgentEvent()` (streaming).

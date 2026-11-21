@@ -931,7 +931,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
     setSelectedSession((prev) => ({
-      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
+      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, userMessages: 0, assistantMessages: 0, toolResultMessages: 0, firstMessage: "" }),
       id: newSessionId,
       transient: false,
     }));
@@ -1556,11 +1556,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
                  {!isMobile && <span>{translate("history.label")}</span>}
               </button>
               {(() => {
-                // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
-                const hasMessages = Boolean(
-                  selectedSession
-                  && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
-                );
+                const hasMessages = Boolean(selectedSession && (sessionStats?.userMessages ?? 0) > 0);
                 const disabled = !selectedSession || selectedSession.transient || !hasMessages || autoNameStatus.kind === "naming";
                 const isSuccess = autoNameStatus.kind === "success";
                 const isError = autoNameStatus.kind === "error";

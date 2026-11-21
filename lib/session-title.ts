@@ -155,6 +155,18 @@ export function prependIssueAnnotationPrefix(title: string, sourceText: string):
   return parts.length === 0 ? base : truncateTitle(`(${parts.join(" · ")}) ${base}`);
 }
 
+/** Deterministic last-resort title from the user's own words: first non-empty
+ *  line of the prompt, whitespace-collapsed, capped at 60 characters, issue
+ *  annotation prepended. Empty string when the source has no letters/numbers. */
+export function fallbackTitle(sourceText: string): string {
+  const line = sourceText.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+  const collapsed = line.replace(/\s+/g, " ").trim();
+  if (!/[\p{L}\p{N}]/u.test(collapsed)) return "";
+  const chars = Array.from(collapsed);
+  const capped = chars.length > 60 ? chars.slice(0, 60).join("").trimEnd() + "…" : collapsed;
+  return prependIssueAnnotationPrefix(capped, sourceText);
+}
+
 export function truncateTitle(value: string): string {
   const trimmed = value.replace(/\s+/g, " ").trim();
   const characters = Array.from(trimmed);

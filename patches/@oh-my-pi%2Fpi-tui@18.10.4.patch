@@ -1,0 +1,112 @@
+diff --git a/dist/types/overlays/ask-dialog.d.ts b/dist/types/overlays/ask-dialog.d.ts
+index 26d92b12c958bedce7e6607ad1177924e476a8c0..38a6ea61d31e84955f31cbebd51206d586299220 100644
+--- a/dist/types/overlays/ask-dialog.d.ts
++++ b/dist/types/overlays/ask-dialog.d.ts
+@@ -41,6 +41,8 @@ export interface ExtensionAskDialogSubmitResult {
+ /** Request to discuss the question instead of answering it. */
+ export interface ExtensionAskDialogChatResult {
+     kind: "chat";
++    /** Free-text discussion only; no option is selected or approved. */
++    discussion?: Array<{ id: string; text: string }>;
+ }
+ /** Completed dialog action, distinct from cancellation. */
+ export type ExtensionAskDialogResult = ExtensionAskDialogSubmitResult | ExtensionAskDialogChatResult;
+diff --git a/dist/types/tools/ask.d.ts b/dist/types/tools/ask.d.ts
+index ac3ee18c2110f19f30d3bd75615dde767d1fa591..73489040796acfe55e4cedff636de33e0f878b10 100644
+--- a/dist/types/tools/ask.d.ts
++++ b/dist/types/tools/ask.d.ts
+@@ -32,6 +32,8 @@ export interface AskToolDetails {
+     chatRedirect?: boolean;
+     /** Questions surfaced when chatRedirect is true. */
+     questions?: string[];
++    /** User discussion associated with the original questions, not selected answers. */
++    discussion?: Array<{ id: string; question: string; text: string }>;
+ }
+ interface AskRenderOption {
+     label: string;
+diff --git a/src/overlays/ask-dialog.ts b/src/overlays/ask-dialog.ts
+index 4d8e80d1e98ec981eb3e6bfc7975e1104fcd8f15..38e7409cabe3c5fc85a3bb209296c5331582a6da 100644
+--- a/src/overlays/ask-dialog.ts
++++ b/src/overlays/ask-dialog.ts
+@@ -63,6 +63,8 @@ export interface ExtensionAskDialogSubmitResult {
+ /** Request to discuss the question instead of answering it. */
+ export interface ExtensionAskDialogChatResult {
+ 	kind: "chat";
++	/** Free-text discussion only; no option is selected or approved. */
++	discussion?: Array<{ id: string; text: string }>;
+ }
+ 
+ /** Completed dialog action, distinct from cancellation. */
+diff --git a/src/tools/ask.ts b/src/tools/ask.ts
+index 77dfb3badf8d7458d8cad026673255d53d79231d..bb69b3c3d0e629eb03ddd79f8d58d9535f30fb21 100644
+--- a/src/tools/ask.ts
++++ b/src/tools/ask.ts
+@@ -57,6 +57,8 @@ export interface AskToolDetails {
+ 	chatRedirect?: boolean;
+ 	/** Questions surfaced when chatRedirect is true. */
+ 	questions?: string[];
++	/** User discussion associated with the original questions, not selected answers. */
++	discussion?: Array<{ id: string; question: string; text: string }>;
+ }
+ 
+ // =============================================================================
+@@ -121,6 +123,25 @@ function sanitizeAskResultDetails(details: AskToolDetails): AskToolDetails {
+ 		...(details.customInput !== undefined ? { customInput: sanitizeCarriageReturns(details.customInput) } : {}),
+ 		...(details.note !== undefined ? { note: sanitizeCarriageReturns(details.note) } : {}),
+ 		...(details.questions !== undefined ? { questions: details.questions.map(sanitizeCarriageReturns) } : {}),
++		...(details.discussion !== undefined
++			? {
++					discussion: Array.isArray(details.discussion)
++						? details.discussion
++								.filter(
++									entry =>
++										entry &&
++										typeof entry.id === "string" &&
++										typeof entry.question === "string" &&
++										typeof entry.text === "string",
++								)
++								.map(entry => ({
++									id: sanitizeCarriageReturns(entry.id),
++									question: sanitizeCarriageReturns(entry.question),
++									text: sanitizeCarriageReturns(entry.text),
++								}))
++						: [],
++				}
++			: {}),
+ 		...(details.results !== undefined
+ 			? {
+ 					results: details.results.map(entry => ({
+@@ -363,7 +384,17 @@ function describeAskResult(result: ToolRenderResult<AskToolDetails>, args: AskRe
+ 		return {
+ 			tool: askHead(details.questions?.[0] ?? argQuestion, "chat redirect"),
+ 			tone: "info",
+-			body: (details.questions ?? []).map(q => md(plainText(q))),
++			body: [
++				...(details.questions ?? []).map(q => md(plainText(q))),
++				...(details.discussion ?? []).map(entry =>
++					describeQuestionSection(`discussion-${entry.id}`, entry.question, [
++						text([span("Discussion: ", "muted"), span(plainText(entry.text), "toolOutput")], {
++							wrap: "word",
++							role: "omp.tool.context",
++						}),
++					]),
++				),
++			],
+ 		};
+ 	}
+ 
+@@ -529,7 +560,13 @@ export const askToolRenderer = {
+ 			const questions = details.questions ?? [];
+ 			return framedToolCard(uiTheme, ({ width }) => ({
+ 				header,
+-				sections: questions.length > 0 ? [{ content: questions.flatMap(q => md(q, width)) }] : [],
++				sections: [
++					...(questions.length > 0 ? [{ content: questions.flatMap(q => md(q, width)) }] : []),
++					...(details.discussion ?? []).map(entry => ({
++						label: uiTheme.fg("dim", `Discussion [${plainText(entry.id)}]`),
++						content: [...md(plainText(entry.question), width), ...md(plainText(entry.text), width)],
++					})),
++				],
+ 				phase: "warning",
+ 				borderColor: "borderMuted",
+ 			}));

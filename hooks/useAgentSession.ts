@@ -516,6 +516,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [historyLoading, setHistoryLoading] = useState(false);
   // --- #104 outline + historic around-view state ---
   const [outline, setOutline] = useState<SessionOutlineEntry[]>([]);
+  const [outlineUserMessages, setOutlineUserMessages] = useState(0);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [outlineError, setOutlineError] = useState<string | null>(null);
   // A finite historic around-window rendered ABOVE the live canonical state.
@@ -696,12 +697,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cost += u.cost?.total ?? 0;
     }
     tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
-    if (tokens.total === 0 && messages.length === 0) return null;
+    if (tokens.total === 0 && messages.length === 0 && outlineUserMessages === 0) return null;
     return {
       sessionFile: data?.filePath || undefined,
       sessionId: sessionIdRef.current ?? session?.id ?? "",
       sessionName: session?.name,
-      userMessages,
+      userMessages: Math.max(userMessages, outlineUserMessages),
       assistantMessages,
       toolCalls,
       toolResults,
@@ -711,7 +712,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       totalActiveMs: data?.totalActiveMs,
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, data?.totalActiveMs, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, outlineUserMessages, contextUsage, data?.filePath, data?.totalActiveMs, session?.id, session?.name]);
 
   const persistWindowCache = useCallback((sid: string) => {
     const windowState = windowRef.current;
@@ -815,6 +816,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       outlineAnchorRef.current = d.outline.anchor;
       outlineLeafRef.current = d.outline.leafId;
       setOutline(d.outline.entries);
+      setOutlineUserMessages(d.outline.entries.filter((e) => e.role === "user" || e.role === "summary").length);
     } catch (e) {
       // Non-destructive: keep the last good outline, expose a retryable error.
       if (sessionIdRef.current === sid && outlineGenRef.current === generation) {
@@ -1365,6 +1367,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
       messageCount,
+      userMessages: 0,
+      assistantMessages: 0,
+      toolResultMessages: 0,
       firstMessage,
       transient: true,
     });
@@ -3106,6 +3111,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     outlineGenRef.current += 1;
     clearHistoricView();
     setOutline([]);
+    setOutlineUserMessages(0);
     outlineAnchorRef.current = null;
     const generation = historyLoadGenRef.current;
     const current = () => sessionIdRef.current === sid && historyLoadGenRef.current === generation;

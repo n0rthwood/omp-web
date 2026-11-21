@@ -869,6 +869,10 @@ function AskToolCallView({ block, result }: { block: ToolCallContent; result?: T
   const resultText = result?.content.filter((item): item is TextContent => item.type === "text").map((item) => item.text).join("\n") ?? "";
   const images = result?.content.filter((item): item is ImageContent => item.type === "image") ?? [];
   const isError = result?.isError ?? false;
+  const discussion = !isError && chatRedirect && isRecord(result?.details) && Array.isArray(result.details.discussion)
+    ? result.details.discussion.filter((item): item is { id: string; text: string } =>
+      isRecord(item) && typeof item.id === "string" && typeof item.text === "string" && item.text.trim().length > 0)
+    : [];
 
   return (
     <div style={{ border: `1px solid ${isError ? "rgba(248,113,113,0.45)" : "var(--border)"}`, borderRadius: 7, overflow: "hidden", fontSize: 12 }}>
@@ -893,6 +897,9 @@ function AskToolCallView({ block, result }: { block: ToolCallContent; result?: T
             ) ?? (questions.length === 1 && answers?.length === 1 && answers[0].id === undefined ? answers[0] : undefined);
             const selected = !isError && !chatRedirect && Array.isArray(answer?.selectedOptions) ? answer.selectedOptions as string[] : [];
             const options = Array.isArray(question.options) ? question.options.filter(isRecord) : [];
+            const discussionText = typeof question.id === "string"
+              ? discussion.find((item) => item.id === question.id)?.text
+              : undefined;
             return (
               <section key={typeof question.id === "string" ? question.id : index}>
                 {typeof question.header === "string" && <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{question.header}</div>}
@@ -912,6 +919,9 @@ function AskToolCallView({ block, result }: { block: ToolCallContent; result?: T
                 ))}
                 {!isError && !chatRedirect && typeof answer?.customInput === "string" && (
                   <blockquote style={{ margin: "8px 0 0", paddingLeft: 10, borderLeft: "3px solid var(--accent)", whiteSpace: "pre-wrap" }}>{answer.customInput}</blockquote>
+                )}
+                {discussionText !== undefined && (
+                  <blockquote style={{ margin: "8px 0 0", paddingLeft: 10, borderLeft: "3px solid var(--accent)", whiteSpace: "pre-wrap" }}>{discussionText}</blockquote>
                 )}
               </section>
             );

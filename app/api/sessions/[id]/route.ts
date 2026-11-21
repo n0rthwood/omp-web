@@ -22,6 +22,7 @@ import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security"
 import { requireVisibleSession } from "@/lib/web-session-guard";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
+import { readJournalMessageStatsCached } from "@/lib/journal-stats";
 
 /** Pre-order depth-first walk of the spine tree (parents before children,
  *  siblings in array order — children are timestamp-sorted by the reader). */
@@ -167,6 +168,9 @@ export async function GET(
       const parentSessionId = header?.parentSession
         ? await resolveSessionIdByPath(header.parentSession)
         : undefined;
+      // Role counts: the live mirror carries them once its host is new enough;
+      // a dead session reads the journal directly (same reader the list uses).
+      const roleCounts = mirror ?? (filePath ? await readJournalMessageStatsCached(filePath) : undefined);
       const info = header || mirror ? {
         path: filePath,
         id: header?.id ?? mirror!.sessionId,
@@ -175,6 +179,9 @@ export async function GET(
         created: header?.timestamp ?? mirror!.created,
         modified,
         messageCount: mirror?.messageCount ?? page.anchor.entryCount,
+        ...(roleCounts?.userMessages !== undefined ? { userMessages: roleCounts.userMessages } : {}),
+        ...(roleCounts?.assistantMessages !== undefined ? { assistantMessages: roleCounts.assistantMessages } : {}),
+        ...(roleCounts?.toolResultMessages !== undefined ? { toolResultMessages: roleCounts.toolResultMessages } : {}),
         firstMessage: mirror?.firstMessage ?? (history?.tree ? firstUserMessageFromTree(history.tree) : "(no messages)"),
         parentSessionId,
         transient: mirror ? !mirror.persisted : !journalOnDisk,
@@ -218,6 +225,7 @@ export async function GET(
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
+    const roleCounts = mirror ?? (legacyFilePath ? await readJournalMessageStatsCached(legacyFilePath) : undefined);
     const info = header || mirror ? {
       path: legacyFilePath,
       id: header?.id ?? mirror!.sessionId,
@@ -226,6 +234,9 @@ export async function GET(
       created: header?.timestamp ?? mirror!.created,
       modified,
       messageCount: context.messages.length,
+      ...(roleCounts?.userMessages !== undefined ? { userMessages: roleCounts.userMessages } : {}),
+      ...(roleCounts?.assistantMessages !== undefined ? { assistantMessages: roleCounts.assistantMessages } : {}),
+      ...(roleCounts?.toolResultMessages !== undefined ? { toolResultMessages: roleCounts.toolResultMessages } : {}),
       firstMessage: context.messages.find((m) => m.role === "user")
         ? (() => {
           const msg = context.messages.find((m) => m.role === "user")!;

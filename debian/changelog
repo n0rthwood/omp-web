@@ -1,3 +1,41 @@
+omp-web (0.5.32) jammy; urgency=medium
+
+  * Allow progress updates and direct answers during planning and execution.
+    A substantive planning reply no longer forces another ask/propose call;
+    plan approval still requires xd://propose (#114).
+  * Generate session titles when the first prompt is admitted, with a
+    deterministic fallback; enable manual title generation whenever the full
+    transcript contains a real user message, including mid-turn (#115).
+  * Preserve custom text entered before "Chat about this" as discussion,
+    not a selected answer. Show it to the model and in the session transcript
+    and outline; empty discussions retain their previous behavior (#117).
+
+  * Fix sessions reporting "(no messages)" while holding hundreds of
+    messages. The SDK's session listing only reads a 4 KB head window, and
+    plan mode's ~7 KB context record pushes every real message past it, so
+    messageCount/firstMessage were wrong for 295 of 336 journals (47 of them
+    zero). A new lib/journal-stats.ts reads the whole journal and tallies the
+    explicit message.role tags; SessionInfo gains userMessages,
+    assistantMessages and toolResultMessages, carried over the host wire and
+    back-filled from the journal for rows from older hosts.
+  * Show real turns instead of an invented estimate: the sidebar drawer
+    column and the Home row use user messages (the old Math.round(count/2)
+    turned 2 prompts into "~337 turns"), and the row tooltip breaks the
+    count down by role.
+  * Hide rows that render as "(no messages)" — untitled sessions with no
+    user message, i.e. abandoned drafts and harness probes. Titles are kept
+    visible, hiding is list-only (deep links still open) and nothing is
+    deleted.
+  * Stop isolated instances from journaling into the real store: session
+    hosts are spawned with systemd-run, which does not inherit the caller's
+    environment, so HOME and the SDK agent-dir overrides are now forwarded,
+    and the host-bridge test redirects the agent dir instead of leaving
+    untitled -tmp-omp99-run-* shells in production.
+  * Bound the per-session journal fan-out (8 in flight): the cold scan had
+    one file descriptor open per session, which crashed Bun outright.
+
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 14:03:15 +0000
+
 omp-web (0.5.31) jammy; urgency=medium
 
   * Make configured providers visible and searchable in the model picker:

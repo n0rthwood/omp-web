@@ -163,7 +163,7 @@ export interface ExtensionAskDialogResultItem {
 
 export type ExtensionAskDialogResult =
   | { kind: "submit"; results: ExtensionAskDialogResultItem[] }
-  | { kind: "chat" };
+  | { kind: "chat"; discussion?: Array<{ id: string; text: string }> };
 
 export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 
@@ -435,8 +435,15 @@ export interface SessionInfo {
   name?: string;
   created: string;
   modified: string;
+  /** Every journal `type:"message"` record, all roles. */
   messageCount: number;
   firstMessage: string;
+  /** Messages whose journal `message.role` is "user" — the true turn count. */
+  userMessages?: number;
+  /** Messages whose journal `message.role` is "assistant". */
+  assistantMessages?: number;
+  /** Messages whose journal `message.role` is "toolResult". */
+  toolResultMessages?: number;
   parentSessionId?: string; // set if this session was forked from another
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient

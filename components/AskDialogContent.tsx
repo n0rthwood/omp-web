@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { PlanReviewRequest } from "./PlanReviewContent";
-import type { ExtensionUiRequest } from "@/lib/types";
+import type { ExtensionAskDialogResult, ExtensionUiRequest } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -21,6 +21,18 @@ function recommendedSelections(request: AskDialogRequest): Record<string, number
       : [];
   }
   return recommended;
+}
+
+export function buildAskDiscussion(
+  request: AskDialogRequest,
+  customAnswers: Record<string, string>,
+): Extract<ExtensionAskDialogResult, { kind: "chat" }> {
+  const discussion: Array<{ id: string; text: string }> = [];
+  for (const question of request.questions) {
+    const text = customAnswers[question.id]?.trim();
+    if (text) discussion.push({ id: question.id, text });
+  }
+  return discussion.length > 0 ? { kind: "chat", discussion } : { kind: "chat" };
 }
 
 export function AskDialogContent({ request, onRespond, variant, onClose }: {
@@ -269,7 +281,7 @@ export function AskDialogContent({ request, onRespond, variant, onClose }: {
         </button>
         <button
           type="button"
-          onClick={() => onRespond({ value: JSON.stringify({ kind: "chat" }) })}
+          onClick={() => onRespond({ value: JSON.stringify(buildAskDiscussion(request, customAnswers)) })}
           style={{ padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text)", cursor: "pointer" }}
         >
           {t("chat.chatAboutThis")}

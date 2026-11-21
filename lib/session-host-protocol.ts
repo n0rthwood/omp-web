@@ -36,6 +36,12 @@ export interface HostSessionInfoFrame {
 	/** Newest user/assistant message activity, ISO string. */
 	modified: string;
 	messageCount: number;
+	/** Messages with `message.role === "user"`; absent on pre-role-count hosts. */
+	userMessages?: number;
+	/** Messages with `message.role === "assistant"`; absent on pre-role-count hosts. */
+	assistantMessages?: number;
+	/** Messages with `message.role === "toolResult"`; absent on pre-role-count hosts. */
+	toolResultMessages?: number;
 	firstMessage: string;
 	/** False until the journal exists on disk (transient session). */
 	persisted: boolean;

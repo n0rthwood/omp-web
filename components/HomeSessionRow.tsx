@@ -67,7 +67,7 @@ export function HomeSessionRow(props: {
   const { locale, t } = useI18n();
   const isMobile = useIsMobile();
   const title = sessionDisplayTitle(entry.session);
-  const turns = Math.round(entry.session.messageCount / 2);
+  const turns = entry.session.userMessages ?? 0;
 
   return (
     <button
@@ -137,7 +137,7 @@ export function HomeSessionRow(props: {
         )}
         {/* Widest realistic turn label ("~9999 turns") plus the tag's own
             border-box padding; a fixed short string must never ellipsize. */}
-        <Tag title={t("home.messageCount", { count: String(entry.session.messageCount) })} maxWidth="14ch">
+        <Tag title={t("session.countBreakdown", { user: String(entry.session.userMessages ?? 0), assistant: String(entry.session.assistantMessages ?? 0), tools: String(entry.session.toolResultMessages ?? 0) })} maxWidth="14ch">
           {t("home.turnCount", { count: String(turns) })}
         </Tag>
       </span>

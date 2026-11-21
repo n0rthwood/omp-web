@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AskDialogContent } = await jiti.import("./AskDialogContent.tsx");
+const { AskDialogContent, buildAskDiscussion } = await jiti.import("./AskDialogContent.tsx");
 const { AskDrawer } = await jiti.import("./AskDrawer.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
@@ -107,4 +107,49 @@ test("the mobile drawer is bounded and non-modal, and hiding retains its content
   assert.match(html, /display:none/);
   assert.match(html, /<strong>carefully<\/strong>/);
   assert.doesNotMatch(html, /aria-modal="true"|backdrop-filter|inset:0/);
+});
+
+test("chat discussion preserves trimmed Chinese rejection text without selecting the recommendation", () => {
+  assert.deepEqual(buildAskDiscussion(request, {
+    q1: " \n我不同意这个推荐方案。\n请先解释为什么不能保留现有接口。 \t",
+  }), {
+    kind: "chat",
+    discussion: [{ id: "q1", text: "我不同意这个推荐方案。\n请先解释为什么不能保留现有接口。" }],
+  });
+});
+
+test("empty and whitespace-only chat discussion retain the exact legacy payload", () => {
+  for (const answers of [{}, { q1: "" }, { q1: " \t\r\n　" }, { unknown: "Do not send this" }]) {
+    assert.deepEqual(buildAskDiscussion(request, answers), { kind: "chat" });
+  }
+});
+
+test("chat discussion includes only the filled second question and ignores unknown ids", () => {
+  const twoQuestions = {
+    ...request,
+    questions: [...request.questions, { ...request.questions[0], id: "q2" }],
+  };
+  assert.deepEqual(buildAskDiscussion(twoQuestions, {
+    q1: " \n",
+    q2: "  先讨论第二个问题  ",
+    unknown: "Never include this answer",
+  }), {
+    kind: "chat",
+    discussion: [{ id: "q2", text: "先讨论第二个问题" }],
+  });
+});
+
+test("chat discussion follows question order rather than answer property order", () => {
+  const twoQuestions = {
+    ...request,
+    questions: [...request.questions, { ...request.questions[0], id: "q2" }],
+  };
+  assert.deepEqual(buildAskDiscussion(twoQuestions, {
+    q2: " second ",
+    unknown: "ignored",
+    q1: " first ",
+  }), {
+    kind: "chat",
+    discussion: [{ id: "q1", text: "first" }, { id: "q2", text: "second" }],
+  });
 });

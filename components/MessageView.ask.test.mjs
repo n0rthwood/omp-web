@@ -77,6 +77,82 @@ test("chat redirects show the chat-about-this status", () => {
   assert.doesNotMatch(html, /not the fallback/);
 });
 
+test("chat discussion maps to question ids rather than discussion entry order", () => {
+  const html = renderAsk({
+    input: { questions: [...questions, { id: "region", question: "Choose region", options: [{ label: "Europe" }] }] },
+    details: {
+      chatRedirect: true,
+      discussion: [
+        { id: "region", question: "Outdated region wording", text: "Discuss regional constraints" },
+        { id: "database", question: "Outdated storage wording", text: "Discuss storage tradeoffs" },
+        { id: "unknown", question: "Unknown question", text: "Never display unknown discussion" },
+      ],
+    },
+  });
+  const sections = html.match(/<section[\s\S]*?<\/section>/g);
+  assert.equal(sections.length, 2);
+  assert.match(sections[0], /Discuss storage tradeoffs/);
+  assert.doesNotMatch(sections[0], /Discuss regional constraints/);
+  assert.match(sections[1], /Discuss regional constraints/);
+  assert.doesNotMatch(sections[1], /Discuss storage tradeoffs/);
+  assert.match(html, /Chat about this/);
+  assert.doesNotMatch(html, /Outdated|Never display unknown discussion/);
+});
+
+test("chat discussion escapes text and preserves multiline rejection without selected answers", () => {
+  const html = renderAsk({
+    details: {
+      chatRedirect: true,
+      discussion: [{ id: "database", question: questions[0].question, text: '不同意 <script>alert("x")</script> & 推荐方案\n请保留 **原文**' }],
+      selectedOptions: ["Postgres"],
+      customInput: "Never show top-level custom answer",
+      results: [{ id: "database", selectedOptions: ["Postgres", "Unlisted selected answer"], customInput: "Never show nested custom answer" }],
+    },
+  });
+  assert.match(html, /不同意 &lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt; &amp; 推荐方案\n请保留 \*\*原文\*\*/);
+  assert.match(html, /white-space:pre-wrap/);
+  assert.match(html, /Chat about this/);
+  assert.doesNotMatch(html, /<script>|<strong>原文<\/strong>|✓|aria-label="Selected"|Never show|Unlisted selected answer/);
+});
+
+test("old and malformed chat discussion details remain safe and keep the legacy status", () => {
+  for (const discussion of [
+    undefined, null, "not an array", {},
+    [null, 7, "bad entry", [], {}, { id: 42, text: "Invalid id text" }, { id: "database", text: 42 }, { id: "database", text: " \n\t" }],
+  ]) {
+    const html = renderAsk({ details: { chatRedirect: true, discussion }, text: "Never show fallback" });
+    assert.match(html, /Chat about this/);
+    assert.doesNotMatch(html, /Invalid id text|Never show fallback|\[object Object\]|✓|aria-label="Selected"|<blockquote/);
+  }
+});
+
+test("valid chat discussion survives malformed neighboring entries", () => {
+  const html = renderAsk({
+    details: {
+      chatRedirect: true,
+      discussion: [null, { id: 42, text: "Invalid id text" }, { id: "database", text: "Valid discussion without stored question" }, { id: "database", text: null }],
+    },
+  });
+  assert.match(html, /Valid discussion without stored question/);
+  assert.match(html, /Chat about this/);
+  assert.doesNotMatch(html, /Invalid id text|\[object Object\]/);
+});
+
+test("error results never render discussion as a successful chat redirect", () => {
+  const html = renderAsk({
+    isError: true,
+    text: "Ask input was cancelled",
+    details: {
+      chatRedirect: true,
+      discussion: [{ id: "database", question: questions[0].question, text: "Never show successful discussion" }],
+      results: [{ id: "database", selectedOptions: ["Postgres"], customInput: "Never show custom answer" }],
+    },
+  });
+  assert.match(html, /color:#f87171/);
+  assert.match(html, /Ask input was cancelled/);
+  assert.doesNotMatch(html, /Chat about this|Never show|✓|aria-label="Selected"/);
+});
+
 test("pending ask displays questions and the waiting hint", () => {
   const html = renderAsk({ pending: true });
   assert.match(html, /<strong>storage<\/strong>/);
