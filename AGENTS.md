@@ -645,6 +645,18 @@ release/systemd/
   uses — with a browser-backed `ExtensionUIContext` layered on top. Do not
   reimplement the action set; a mismatch shows up as extensions silently doing
   nothing.
+- **Ask "Chat about this" is not an answer.** `AskDialogContent` sends
+  `{kind:"chat",discussion:[{id,text}]}` for nonblank per-question custom text,
+  or exactly `{kind:"chat"}` when blank. The pinned coding-agent patch makes
+  the discussion model-visible in the ask tool result and persists it as
+  `details.discussion` with `chatRedirect:true`; `MessageView` and the session
+  outline render the persisted text. Never translate this action into
+  `kind:"submit"` or infer acceptance of a recommended option. The #114
+  plan-mode prose exemption lets the agent discuss the user's objection.
+  During rollout, an already-running session host still has its old SDK and
+  silently discards the new discussion field. Upgrade host code before
+  exposing the new UI, and let active hosts finish rather than terminating
+  their turns; a web-tier restart does not update hosts.
 - **Since #94 a browser session runs OUTSIDE the server, so restarting the
   server no longer kills the turn.** Hosts live in their own transient units
   (`systemd-run --user --collect`), outside `omp-web.service`'s cgroup;
