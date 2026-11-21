@@ -99,6 +99,8 @@ interface Props {
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
   contextUsage?: ContextUsage | null;
+  /** Live generation throughput (TUI composer parity); null until measurable. */
+  tokensPerSecond?: number | null;
   onUploadFiles?: (files: File[]) => Promise<SessionUploadResult>;
 }
 
@@ -481,6 +483,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   draftKey,
   cwd,
   contextUsage,
+  tokensPerSecond,
   onUploadFiles,
 }: Props, ref) {
   const { t } = useI18n();
@@ -2401,10 +2404,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {isMobile && (
           <div style={{
             display: "flex",
+            alignItems: "center",
             justifyContent: "flex-end",
+            gap: 10,
             minWidth: 0,
             marginTop: 6,
           }}>
+            <TokenRateBadge tokensPerSecond={tokensPerSecond} t={t} />
             <ContextUsageMeter usage={contextUsage} t={t} />
           </div>
         )}
@@ -2737,8 +2743,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               flex: 1,
               minWidth: 0,
               display: "flex",
+              alignItems: "center",
               justifyContent: "center",
+              gap: 10,
+              overflow: "hidden",
             }}>
+              <TokenRateBadge tokensPerSecond={tokensPerSecond} t={t} />
               <ContextUsageMeter usage={contextUsage} t={t} />
             </div>
           )}
@@ -3163,6 +3173,45 @@ function getContextPercent(usage: ContextUsage): number | null {
     return (usage.tokens / usage.contextWindow) * 100;
   }
   return null;
+}
+
+/**
+ * Generation throughput, mirroring the TUI composer's `⚡ N.N tok/s`
+ * (interactive-mode.ts#tokenRateLabel). Renders nothing until the host's meter
+ * has produced a measurable rate — a `0.0` or an empty chip would read as a
+ * stall. The unit is not translated: the TUI uses `tok/s` in both locales.
+ */
+function TokenRateBadge({
+  tokensPerSecond,
+  t,
+}: {
+  tokensPerSecond?: number | null;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}) {
+  if (typeof tokensPerSecond !== "number" || !Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return null;
+  const label = `${tokensPerSecond.toFixed(1)} tok/s`;
+  return (
+    <span
+      data-token-rate={tokensPerSecond.toFixed(1)}
+      title={t("chat.tokenRateTitle")}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        minWidth: 0,
+        flexShrink: 0,
+        color: "var(--text-muted)",
+        fontSize: 11,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <polyline points="5.6 1 2.6 5.4 4.6 5.4 4.2 9 7.4 4.4 5.4 4.4 5.6 1" />
+      </svg>
+      {label}
+    </span>
+  );
 }
 
 function ContextUsageMeter({

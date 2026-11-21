@@ -113,6 +113,8 @@ interface LastAssistantTextResponse {
 
 type AgentStateResponse = {
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  /** Live generation throughput from the session host; absent on older hosts. */
+  tokensPerSecond?: number | null;
   systemPrompt?: string;
   thinkingLevel?: string;
   isStreaming?: boolean;
@@ -485,6 +487,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  // TUI parity: the host's meter keeps its last reading between turns, so this
+  // is only cleared by a session switch (this hook's lifetime), never on idle.
+  const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
@@ -989,6 +994,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const liveState = agentState.state;
         if (liveState) {
           if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
+          if (liveState.tokensPerSecond !== undefined) setTokensPerSecond(liveState.tokensPerSecond ?? null);
           if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
           if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
@@ -1981,6 +1987,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setIsCompacting(state?.isCompacting ?? false);
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
       if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+      if (state?.tokensPerSecond !== undefined) setTokensPerSecond(state.tokensPerSecond ?? null);
       setSubagents((current) => mergeSubagentSnapshots(current, state?.subagents ?? []));
       if (state?.planMode !== undefined) setPlanMode(state.planMode ?? null);
       const busy = data.running && state
@@ -2011,14 +2018,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       refreshErrorRef.current = null;
       setRefreshError(null);
       if (data.state?.contextUsage !== undefined) setContextUsage(data.state.contextUsage ?? null);
+      if (data.state?.tokensPerSecond !== undefined) setTokensPerSecond(data.state.tokensPerSecond ?? null);
     } catch {
       // The next refresh retries; state reconciliation owns error recovery.
     }
   }, []);
 
-  // Context usage changes after each model/tool turn, not only when the prompt
-  // settles. Poll the lightweight state endpoint while the session is active
-  // so the meter follows those changes even if an SSE event is missed.
+  // Context usage and generation throughput both change after each model/tool
+  // turn, not only when the prompt settles. Poll the lightweight state endpoint
+  // while the session is active so the context meter and the tok/s readout
+  // follow those changes even if an SSE event is missed.
   useEffect(() => {
     if (!agentRunning && !isCompacting) return;
     const refresh = () => {
@@ -2083,6 +2092,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
               if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
+              if (d.state?.tokensPerSecond !== undefined) setTokensPerSecond(d.state.tokensPerSecond ?? null);
               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
               if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
@@ -3124,6 +3134,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (state) {
         if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
         if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+        if (state.tokensPerSecond !== undefined) setTokensPerSecond(state.tokensPerSecond ?? null);
         if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
         if (state.thinkingLevel !== undefined) setThinkingLevel((state.thinkingLevel as ThinkingLevelOption) ?? "auto");
         if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
@@ -3283,7 +3294,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, refreshError, activeLeafId, messages: shownMessages, entryIds: shownEntryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, systemPrompt, forkingEntryId,
+    retryInfo, contextUsage, tokensPerSecond, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
