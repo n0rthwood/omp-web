@@ -71,6 +71,30 @@ or a wish → report. An issue number, an "implement #N", a "go ahead", a
 "continue", or a branch already in flight → execution. Genuinely ambiguous →
 ask once, then commit to a mode.
 
+**Classify once.** Decide the kind at the start of the conversation, state it
+in one line, and do not re-open the question on later turns.
+
+### Plan mode overrides the table
+
+If the harness has put you in **plan mode** (omp's `plan-mode-context`, Claude
+Code's plan mode), the deliverable is the **plan** the harness asks for — do
+not also try to decide whether this is a report or an execution session, and
+do not try to reconcile the two. Any GitHub issue the work needs becomes a
+step *in* the plan.
+
+### Talk while you work — in every mode
+
+Silence is a failure, whatever the mode. A user who sees a hundred tool calls
+and no words cannot tell progress from a loop (omp-web#114).
+
+- A user question, status request, or objection is answered **first, in
+  prose**, before any more exploration.
+- During investigation, write a short progress note after each meaningful
+  finding and at least every ~10 tool calls: confirmed facts with
+  `file:line`, what is still open, what you check next.
+- Approval gates (plan proposal, release tag) keep their own mechanism;
+  prose is for reporting, not for asking approval.
+
 ### A report session
 
 It ends when the issue accurately captures the problem, the scope, and the
