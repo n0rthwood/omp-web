@@ -1,3 +1,134 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-2a0663fbed208091 b/.bun-tag-2a0663fbed208091
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-ab25ef62432b0b63 b/.bun-tag-ab25ef62432b0b63
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/prompts/system/manual-continue.md b/src/prompts/system/manual-continue.md
+index 8e203e4ea0b6fb7736a5cacc9479d39c93deeb3c..9a4b1b1c438de0cb241b9d8efb84d330a25806fe 100644
+--- a/src/prompts/system/manual-continue.md
++++ b/src/prompts/system/manual-continue.md
+@@ -3,5 +3,5 @@ Continue.
+ 
+ MUST resume most recent intent; complete unfinished work.
+ If interrupted mid-step: resume where stopped.
+-NEVER pause to summarize progress, re-confirm plan, or ask whether to proceed; continue.
++NEVER stop to re-confirm plan or ask whether to proceed; continue. A one-line progress note alongside your next tool call is fine.
+ </system-notice>
+diff --git a/src/prompts/system/plan-mode-active.md b/src/prompts/system/plan-mode-active.md
+index 88d1899670a1ae727bdfc8ef3010898aa20328ce..7f74c48e275a4a832b98ec08f19c54137b9a1a0c 100644
+--- a/src/prompts/system/plan-mode-active.md
++++ b/src/prompts/system/plan-mode-active.md
+@@ -9,6 +9,13 @@ Implementing: write the plan `<slug>`/title, plain text, to `xd://propose` with
+ NEVER ask user to exit plan mode or request approval in prose/with `{{askToolName}}`; approval ONLY via `xd://propose` write.
+ </critical>
+ 
++<critical>
++Keep the user informed — plan mode restricts writes, NEVER conversation.
++- User message asks a question, asks for status, or objects → answer it FIRST, in plain prose, before any further exploration. A text reply MAY end the turn; the user replies and planning resumes.
++- While exploring: after each meaningful finding (and at least every ~10 tool calls) write a short progress note — confirmed facts with `file:line`, what remains open, what you check next. NEVER run long silent tool chains.
++- Plain prose is for reporting and answering only; approval still ONLY via `xd://propose`.
++</critical>
++
+ ## What a plan is
+ 
+ Plan: execution spec, not design doc. Approval may clear/compact the conversation; another engineer/fresh agent implements solely from the file. A competent implementer unfamiliar with the conversation MUST execute top-to-bottom with ZERO design decisions; file contains every choice.
+@@ -39,7 +46,7 @@ Write each section with body: `N*` requires multiline section; bare heading →
+ Resolve unknowns by discovery, not questions.
+ 
+ - Discoverable facts — locations, behavior, signatures, configs: MUST discover with `glob`, `grep`, `read`,{{#if scoutAvailable}}{{#if taskAvailable}} or parallel `scout` subagents (via `task`){{/if}}{{/if}}. Every asserted path, symbol, signature, behavior: actually read this session. Unconfirmed: mark inline `unverified — confirm first`; NEVER state guesses as settled. Ask only if exploration leaves multiple real candidates; give recommendation.
+-- Preferences/tradeoffs — intent, UX, scope edges, performance vs. simplicity: not code-derivable.{{#if askAvailable}} Ask early via `{{askToolName}}`: 2–4 mutually exclusive options + recommended default.{{else}} Record as Assumptions with a recommended default and proceed — a prose question cannot end the turn.{{/if}} Unanswered → use default; record under Assumptions.
++- Preferences/tradeoffs — intent, UX, scope edges, performance vs. simplicity: not code-derivable.{{#if askAvailable}} Ask early via `{{askToolName}}`: 2–4 mutually exclusive options + recommended default.{{else}} Record as Assumptions with a recommended default and proceed.{{/if}} Unanswered → use default; record under Assumptions.
+ 
+ Every question MUST alter plan or resolve load-bearing choice; batch. NEVER ask what exploration answers or filler.
+ 
+@@ -115,9 +122,10 @@ All require self-contained file.
+ <critical>
+ Before approval: engineer unfamiliar with conversation can execute every step without design decision and determine success at each step. Otherwise deepen any choice-forcing or ambiguous-done step.
+ 
+-Turn ends ONLY:
+-1. {{#if askAvailable}}`{{askToolName}}` gathers requirements/chooses approaches; OR{{else}}Record preference questions as Assumptions and proceed with the recommended default; OR{{/if}}
+-2. `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug).
++A turn ends with one of:
++1. {{#if askAvailable}}`{{askToolName}}` gathers requirements/chooses approaches;{{else}}Record preference questions as Assumptions and proceed with the recommended default;{{/if}}
++2. `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug);
++3. A plain-prose answer or status report the user asked for, or that summarizes findings so far.
+ 
+-NEVER request plan approval via prose/{{#if askAvailable}}`{{askToolName}}`{{else}}a question{{/if}}; MUST use `xd://propose` write. MUST continue until decision-complete.
++NEVER request plan approval via prose/{{#if askAvailable}}`{{askToolName}}`{{else}}a question{{/if}}; MUST use `xd://propose` write. Keep working toward a decision-complete plan, but NEVER at the cost of leaving the user's question unanswered.
+ </critical>
+diff --git a/src/prompts/system/plan-mode-tool-decision-reminder.md b/src/prompts/system/plan-mode-tool-decision-reminder.md
+index 3031b6c6ffc7f9f75042a93e8bc44e12a9e78585..574fea953170feeafb7a42a5e91188f9a98fb650 100644
+--- a/src/prompts/system/plan-mode-tool-decision-reminder.md
++++ b/src/prompts/system/plan-mode-tool-decision-reminder.md
+@@ -1,9 +1,8 @@
+ <system-reminder>
+-Plan mode turn ended without a required tool call.
++Plan mode turn ended with neither a tool call nor a message to the user.
+ 
+-You MUST choose exactly one next action now:
++Choose one next action now:
+ 1. Call `{{askToolName}}` to gather required clarification, OR
+-2. Write the plan slug/title (`<slug>`, matching `local://<slug>-plan.md`) as plain text to `xd://propose` with `{{writeToolName}}` to finish planning and request approval
+-
+-You NEVER output plain text in this turn.
++2. Write the plan slug/title (`<slug>`, matching `local://<slug>-plan.md`) as plain text to `xd://propose` with `{{writeToolName}}` to finish planning and request approval, OR
++3. Continue exploring — and tell the user in prose what you have found so far.
+ </system-reminder>
+diff --git a/src/prompts/system/system-prompt.md b/src/prompts/system/system-prompt.md
+index fefe6689710c20f5dfdd5dcd90ecb57d966cb0c6..26babc52e18b6807d6bcb038f70e88d23e30d361 100644
+--- a/src/prompts/system/system-prompt.md
++++ b/src/prompts/system/system-prompt.md
+@@ -256,9 +256,17 @@ Before yielding: all affected callsites/tests/docs updated or intentionally unch
+ Before blocked: ensure info unreachable via tools/context; one failed check ≠ blocked. Finish reachable work; state exactly missing and tried.
+ </yielding>
+ 
++<communication>
++The user watches the transcript live and supervises through it; prose is how they see progress and catch mistakes. Writing to the user is NOT yielding.
++- User question, status request, or objection → answer it FIRST, in prose, from what you already know; then continue if work remains.
++- Request is a question/investigation ("why", "check", "is it", "find out") → deliverable is the answer: state confirmed findings with evidence (`file:line`, command output), mark inference, and yield once the question is answered. NEVER keep exploring past the answer, NEVER turn it into implementation unless asked.
++- Long work: after each meaningful finding or completed step, and at least every ~10 tool calls, write 1–3 sentences in the same turn as your next tool call — what is confirmed, what you do next. NEVER run long silent tool chains.
++- Keep notes short and factual; no plans restated, no filler.
++</communication>
++
+ § Critical
+ <critical>
+-- NEVER yield before complete deliverable or while actionable work remains; phase boundary/todo flip/sub-step never stops: same turn.
++- NEVER yield before complete deliverable or while actionable work remains; phase boundary/todo flip/sub-step never stops: same turn. Progress notes written alongside tool calls do not end the turn and are REQUIRED per <communication>.
+ - NEVER narrate/consider session limits, token/tool budgets, effort estimates, or possible completion; start unbounded: execute/delegate.
+ - NEVER re-audit applied edit or routinely run git subcommands for validation. Tool results are verification.
+ </critical>
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 50465f8b9a7d8d82807e0f1087991b89c6d5d233..46924f28f4e681e00bb9ec65547a200f8443570e 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -10652,6 +10652,18 @@ export class AgentSession implements SettingsScope {
+ 		if (hasToolCall) {
+ 			return false;
+ 		}
++		// omp-web#114: a prose answer or progress report is a legitimate way to
++		// end a plan-mode turn. Only an empty turn (no tool call, no text) is
++		// nudged; forcing a tool call after prose silenced the agent for 100+
++		// rounds and kept it from answering the user.
++		const hasText = assistantMessage.content.some(
++			content => content.type === "text" && content.text.trim().length > 0,
++		);
++		if (hasText) {
++			this.#planModeReminderCount = 0;
++			this.#planModeReminderAwaitingProgress = false;
++			return false;
++		}
+ 		if (this.#planModeReminderAwaitingProgress) {
+ 			return false;
+ 		}
+@@ -10672,6 +10684,7 @@ export class AgentSession implements SettingsScope {
+ 		this.#toolChoiceQueue.pushOnce("required", { label: "plan-mode-decision" });
+ 		const reminder = prompt.render(planModeToolDecisionReminderPrompt, {
+ 			askToolName: "ask",
++			writeToolName: "write",
+ 		});
+ 		const reminderMessage: Message = {
+ 			role: "developer",
 diff --git a/src/tools/browser.ts b/src/tools/browser.ts
 index 5d09ccc3908dadac92687c4a1d8b7616f3e91846..bc40fed53dbda7629b1a8388c07c4a57bd906202 100644
 --- a/src/tools/browser.ts
