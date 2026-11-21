@@ -41,7 +41,13 @@ import {
   type WebPlanModeSession,
 } from "../../lib/plan-mode-web";
 import { PRESET_FULL } from "../../lib/tool-presets";
-import { generateSessionTitle, shouldAutoGenerateTitle } from "../../lib/session-title";
+import {
+  fallbackTitle,
+  findFirstTitleSource,
+  findFirstUserMessage,
+  generateSessionTitle,
+  shouldAutoGenerateTitle,
+} from "../../lib/session-title";
 import { sessionPathKey } from "../../lib/session-path";
 import { readSessionHeader } from "../../lib/session-reader";
 import type { AgentSessionLike, SlashCommandInfo, ToolInfo } from "../../lib/omp-types";
@@ -416,6 +422,7 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
   const subagents = new RpcSubagentRegistry(options.subagentEventBus ?? options.eventBus, () => {});
   const subagentHistory = new Map<string, SubagentSnapshot>();
   const promptMeta = new Map<string, PromptMeta>();
+  let autoTitleInFlight = false;
   let forceEmptySystemPrompt = false;
   let disposed = false;
   /** Latest in-flight assistant partial (#99), fed by the outbound tap. */
@@ -694,30 +701,40 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
   // -------------------------------------------------------------------------
 
   async function maybeAutoGenerateTitle(message: string): Promise<void> {
-    try {
-      const commandNames = new Set(
-        (session.extensionRunner?.getRegisteredCommands() ?? []).map((command) => command.name),
-      );
-      const eligible = shouldAutoGenerateTitle({
-        message,
-        hasSessionName: Boolean(sessionManager.getSessionName()),
-        piNoTitle: process.env.PI_NO_TITLE,
-        extensionCommandNames: commandNames,
-      });
-      if (!eligible) return;
+    const commandNames = new Set(
+      (session.extensionRunner?.getRegisteredCommands() ?? []).map((command) => command.name),
+    );
+    const eligible = shouldAutoGenerateTitle({
+      message,
+      hasSessionName: Boolean(sessionManager.getSessionName()),
+      piNoTitle: process.env.PI_NO_TITLE,
+      extensionCommandNames: commandNames,
+    });
+    if (!eligible) return;
+    if (autoTitleInFlight) return;
+    autoTitleInFlight = true;
 
-      const result = await generateSessionTitle(webSession, message);
-      if (!result || disposed) return;
+    try {
+      let title: string | undefined;
+      try {
+        title = (await generateSessionTitle(webSession, message))?.title;
+      } catch (error) {
+        console.error("[pi-web] auto title generation failed:", errorMessage(error));
+      }
+      title ||= fallbackTitle(message);
+      if (!title || disposed) return;
       // Re-check after generation: a concurrent manual "Generate title"
       // click may have already named the session while this was in flight.
       if (sessionManager.getSessionName()) return;
-      const applied = await sessionManager.setSessionName(result.title, "auto");
+      const applied = await sessionManager.setSessionName(title, "auto");
       if (!applied) return;
 
-      transport.emitHostFrame({ type: "session_renamed", title: result.title, sessionId: session.sessionId });
+      transport.emitHostFrame({ type: "session_renamed", title, sessionId: session.sessionId });
       emitSessionInfo();
     } catch (error) {
       console.error("[pi-web] auto title generation failed:", errorMessage(error));
+    } finally {
+      autoTitleInFlight = false;
     }
   }
 
@@ -1038,18 +1055,27 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
   }
 
   async function executeAutoName(): Promise<object> {
-    const result = await generateSessionTitle(webSession);
-    if (!result) return { title: null, skipped: true };
-    const written = await sessionManager.setSessionName(result.title, "user");
+    const source = findFirstTitleSource(sessionManager.buildSessionContext().messages)
+      ?? findFirstUserMessage(session.agent.state.messages);
+    if (!source) return { title: null, skipped: true };
+    let title: string | undefined;
+    try {
+      title = (await generateSessionTitle(webSession, source))?.title;
+    } catch (error) {
+      console.error("[pi-web] manual title generation failed:", errorMessage(error));
+    }
+    title ||= fallbackTitle(source);
+    if (!title) return { title: null, skipped: true };
+    const written = await sessionManager.setSessionName(title, "user");
     if (!written) {
       // A source-"user" write is only refused when the session was released
       // (or the cleaned title came back empty) — same 409 wording the old
       // auto-name route returned, so the web route can map it unchanged.
       throw new Error("The session was closed while its title was being generated. Please try again.");
     }
-    transport.emitHostFrame({ type: "session_renamed", title: result.title, sessionId: session.sessionId });
+    transport.emitHostFrame({ type: "session_renamed", title, sessionId: session.sessionId });
     emitSessionInfo();
-    return { title: result.title };
+    return { title };
   }
 
   async function getSubagentMessages(command: WireCommand): Promise<object> {
@@ -1410,11 +1436,6 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
           ...(meta.streamingBehavior ? { streamingBehavior: meta.streamingBehavior } : {}),
         });
       }
-      // The wrapper synthesizes prompt_done/prompt_error from this frame;
-      // the host only owns the auto-title trigger (first real user prompt).
-      if (meta && !meta.streamingBehavior && "status" in frame && frame.status === "completed") {
-        void maybeAutoGenerateTitle(meta.message);
-      }
       emitSessionInfo();
       return;
     }
@@ -1434,6 +1455,10 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
         if (response.success === true) {
           // Prompt admitted: surface the transient session in history now.
           emitSessionInfo();
+          const meta = promptMeta.get(promptId);
+          if (meta && !meta.streamingBehavior) {
+            void maybeAutoGenerateTitle(meta.message);
+          }
           // Local extension outcome (rpc-mode.ts:1875 agentInvoked:false) never
           // emits prompt_result — release the admission or the bash/idle guards
           // stay busy forever. Normal admissions carry no data; keep those open
