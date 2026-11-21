@@ -1,3 +1,15 @@
+omp-web (0.5.34) jammy; urgency=medium
+
+  * Clarify the optional Claude-inspired workflow preset: request visible
+    assistant progress before proposing an implementation plan and before
+    the first approved project edit, rather than relying on a final recap
+    (#118).
+  * Keep normal plan-mode answers and discussions unrestricted; these are
+    prompt instructions, with no SDK, tool-guard or runtime-policy change.
+    Saved profiles remain pinned until explicitly replaced for new chats.
+
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 19:55:00 +0000
+
 omp-web (0.5.33) jammy; urgency=medium
 
   * Add a centralized Settings > Prompts workspace with Markdown source,
