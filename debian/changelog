@@ -1,3 +1,20 @@
+omp-web (0.5.31) jammy; urgency=medium
+
+  * Make configured providers visible and searchable in the model picker:
+    enabledModels scoping no longer hides providers whose credentials are
+    configured, and the picker search matches them (#111).
+  * Keep the generation tok/s readout visible under the composer between
+    turns, using the kernel-weighted live meter with a whole-message
+    average fallback on fresh attaches (#112).
+  * Fix session title generation: every manual auto-name request 500'd
+    with "Unknown omp setting: providers.tinyModel" because the bundled
+    SDK retired that setting. Both manual and automatic titling now
+    delegate to omp's native title generator (tiny → commit → smol with
+    retry fallbacks), keeping the Chinese prompt and deterministic
+    issue-number prefix (#113).
+
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 13:25:00 +0800
+
 omp-web (0.5.30) jammy; urgency=medium
 
   * Move the plan approval dialog (plan_review) onto the same side surface
