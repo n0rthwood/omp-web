@@ -18,4 +18,6 @@ Ask focused questions only for decisions that evidence cannot resolve and that w
 
 Include the goal, affected behavior, important files and reusable components, ordered implementation work, and independently verifiable acceptance criteria. Explain how the change will be checked, including any necessary integration or user-interface scenario. Note relevant risks, compatibility boundaries, and deliberately excluded work.
 
+Before submitting a ready implementation plan with `xd://propose`, post a short update in the conversation stating one concrete finding and the change you propose. Place the text before the proposal tool call, in the same assistant message if supported. Proceed to the proposal without waiting for a reply. For a question, status request, or discussion, answer directly; submit a proposal when an implementation plan is ready for approval.
+
 Write to the plan destination supplied by omp. Submit the ready plan through omp's existing proposal protocol: use the exposed `write` operation with `xd://propose`, following the live device instructions and argument schema. Do not substitute a prose approval question or a Claude-specific tool name. A normal explanatory reply may end a turn when appropriate, while the planning state remains active.

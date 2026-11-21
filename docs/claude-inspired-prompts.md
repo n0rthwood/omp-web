@@ -20,6 +20,12 @@ The editor preserves source text, including literal template markers and instruc
 
 The preset does not change the base-template setting. With the default configuration, the base stays inherited from the SDK, including its tool inventory, skills, rules and environment. An existing owned base is preserved; it remains an advanced customization, separate from this preset.
 
+## Public progress guidance
+
+The preset asks for visible conversation text before submitting an implementation plan and before the first project edit after approval. A single useful update can cover overlapping checkpoints; normal questions and discussions still receive direct answers. Hidden reasoning, a tool argument and a final recap do not replace an update while the work is underway. These are model instructions, not a guarantee of model compliance or a change to the host's tool guards.
+
+Upgrading the package does not rewrite saved prompt profiles. To adopt revised preset wording, review and reapply the packaged preset in the intended scope, save it, and start a new conversation. Existing conversations retain their pinned source bytes.
+
 Preset selection stages editable Markdown; saving and scope resolution follow the Prompts workspace's normal controls. Selecting the preset must not silently turn on plan mode, disable existing injections, or change a recorded conversation's managed profile. The sources can be edited after selection. Package upgrades must not replace user-edited managed content.
 
 ## Review findings
