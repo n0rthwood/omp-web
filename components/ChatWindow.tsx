@@ -225,7 +225,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   const {
     loading, error, refreshError, data, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, forkingEntryId,
+    retryInfo, contextUsage, tokensPerSecond, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
@@ -650,6 +650,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       contextUsage={contextUsage}
+      tokensPerSecond={tokensPerSecond}
       inputHistory={inputHistory}
       onRecallQueue={handleRecallQueue}
       slashCommands={slashCommands}

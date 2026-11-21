@@ -859,7 +859,12 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       isSettled: isRpcSessionSettled(session),
       todoPhases: session.getTodoPhases(),
       fastModeEnabled: session.isFastModeEnabled(),
-      tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
+      // TUI composer parity (interactive-mode.ts#tokenRateLabel): the
+      // kernel-weighted live meter, which keeps its last reading between
+      // turns. The whole-message average covers a host that has not streamed
+      // a message in this process yet (fresh attach on a historical session).
+      tokensPerSecond: session.tokenRate.rate()
+        ?? calculateTokensPerSecond(session.messages, session.isStreaming),
       fastModeActive: session.isFastModeActive(),
       slowModeSupported: session.isSlowModeSupported(),
       slowModeEnabled: session.isSlowModeEnabled(),

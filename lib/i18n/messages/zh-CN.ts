@@ -203,6 +203,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.contextUsageTitle": "上下文窗口：已用 {used} / {limit} Token（{percent}）",
     "chat.contextUsageWarning": "上下文窗口正在接近上限",
     "chat.contextUsageCritical": "上下文窗口几乎已满",
+    "chat.tokenRateTitle": "生成速率：最近流式窗口内的每秒 Token 数",
     "chat.processDetails": "处理详情",
     "chat.message": "条消息",
     "chat.messages": "条消息",

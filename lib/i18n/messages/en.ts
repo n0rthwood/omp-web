@@ -203,6 +203,7 @@ export const enLocale: LocalePlugin = {
     "chat.contextUsageTitle": "Context window: {used} of {limit} tokens ({percent})",
     "chat.contextUsageWarning": "Context window is getting full",
     "chat.contextUsageCritical": "Context window is nearly full",
+    "chat.tokenRateTitle": "Generation rate: tokens per second over the recent stream window",
     "chat.processDetails": "Process details",
     "chat.message": "message",
     "chat.messages": "messages",

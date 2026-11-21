@@ -297,6 +297,65 @@ test("keeps the context indicator visible before usage is available", () => {
   assert.match(html, /\? \/ \?/);
 });
 
+test("shows the generation rate left of the context meter", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: true,
+        contextUsage: { tokens: 1_500, contextWindow: 128_000, percent: 1 },
+        tokensPerSecond: 42.7,
+      }),
+    ),
+  );
+
+  assert.match(html, /42\.7 tok\/s/);
+  assert.match(html, /data-token-rate="42\.7"/);
+  // Ordering is the requirement: the readout sits immediately left of Context.
+  assert.ok(html.indexOf("data-token-rate") < html.indexOf("data-context-level"));
+});
+
+test("renders no generation rate before the host reports one", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: false,
+        contextUsage: { tokens: 1_500, contextWindow: 128_000, percent: 1 },
+        tokensPerSecond: null,
+      }),
+    ),
+  );
+
+  assert.doesNotMatch(html, /data-token-rate/);
+  assert.doesNotMatch(html, /tok\/s/);
+});
+
+test("treats a zero generation rate as no reading", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: false,
+        contextUsage: { tokens: 1_500, contextWindow: 128_000, percent: 1 },
+        tokensPerSecond: 0,
+      }),
+    ),
+  );
+
+  assert.doesNotMatch(html, /data-token-rate/);
+  assert.doesNotMatch(html, /tok\/s/);
+});
+
 function t(locale) {
   const messages = { en: enLocale.messages, "zh-CN": zhCNLocale.messages };
   return (key, params) => translateMessage(locale, key, messages, params);
