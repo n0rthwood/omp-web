@@ -1,3 +1,19 @@
+omp-web (0.5.33) jammy; urgency=medium
+
+  * Add a centralized Settings > Prompts workspace with Markdown source,
+    preview, scope-aware save/reset and current-conversation inspection
+    (#118).
+  * Ship original Claude-inspired omp working, planning and approved-plan
+    workflow prompts as an opt-in editable preset, preserving omp's guards
+    and progress-reporting behavior without a new SDK patch (#118).
+  * Pin managed prompt profiles to conversations across host recreation and
+    forks; apply saved defaults to new conversations without a pool reset.
+  * Expose the shared native injection on/off controls in prompt settings,
+    using the same source mapping and API as the conversation controls
+    (#116, #118).
+
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 19:27:00 +0000
+
 omp-web (0.5.32) jammy; urgency=medium
 
   * Allow progress updates and direct answers during planning and execution.
