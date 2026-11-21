@@ -1367,6 +1367,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
       messageCount,
+      userMessages: 0,
+      assistantMessages: 0,
+      toolResultMessages: 0,
       firstMessage,
       transient: true,
     });

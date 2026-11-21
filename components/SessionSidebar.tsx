@@ -992,7 +992,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         · {formatRelativeTime(new Date(liveRowPopoverSession.created), locale)}
       </div>
       <div style={{ color: "var(--text-dim)", marginBottom: 2 }}>
-        {t("home.messageCount", { count: String(liveRowPopoverSession.messageCount) })}
+        {t("session.countBreakdown", { user: String(liveRowPopoverSession.userMessages ?? 0), assistant: String(liveRowPopoverSession.assistantMessages ?? 0), tools: String(liveRowPopoverSession.toolResultMessages ?? 0) })}
       </div>
       <div style={{ color: "var(--text-dim)", marginBottom: 8 }}>
         {t("sidebar.columnStatus")}: {t(`sidebar.status.${liveRowPopoverSession.status ?? "unknown"}`)}
@@ -2493,7 +2493,7 @@ function SessionItem({
                 {createdRelative}
               </div>
               <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.messages, textAlign: "right" }}>
-                {session.messageCount}
+                {session.userMessages ?? 0}
               </div>
               <div style={{ ...metaCellStyle, width: DRAWER_COLUMN_WIDTHS.status, textAlign: "center" }}>
                 {t(`sidebar.status.${status}`)}

@@ -930,7 +930,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
     setSelectedSession((prev) => ({
-      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
+      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, userMessages: 0, assistantMessages: 0, toolResultMessages: 0, firstMessage: "" }),
       id: newSessionId,
       transient: false,
     }));

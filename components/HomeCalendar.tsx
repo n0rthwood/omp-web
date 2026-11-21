@@ -340,7 +340,7 @@ export function HomeCalendar({ machineId, machineName, project, sessions }: {
         · {formatRelativeTime(new Date(popover.session.created), locale)}
       </div>
       <div style={{ color: "var(--text-dim)", marginBottom: 6 }}>
-        {t("home.messageCount", { count: String(popover.session.messageCount) })}
+        {t("session.countBreakdown", { user: String(popover.session.userMessages ?? 0), assistant: String(popover.session.assistantMessages ?? 0), tools: String(popover.session.toolResultMessages ?? 0) })}
       </div>
       <div style={{
         color: "var(--text-dim)",

@@ -1024,6 +1024,9 @@ export function getRpcSessionInfos(): SessionInfo[] {
       created: mirror.created,
       modified: mirror.modified,
       messageCount: mirror.messageCount,
+      ...(mirror.userMessages !== undefined ? { userMessages: mirror.userMessages } : {}),
+      ...(mirror.assistantMessages !== undefined ? { assistantMessages: mirror.assistantMessages } : {}),
+      ...(mirror.toolResultMessages !== undefined ? { toolResultMessages: mirror.toolResultMessages } : {}),
       firstMessage: mirror.firstMessage,
       transient: !mirror.persisted,
       status: running ? "pending" : mirror.status,
@@ -1048,6 +1051,9 @@ export function getRpcSessionInfos(): SessionInfo[] {
       created: mirror.created,
       modified: mirror.modified,
       messageCount: mirror.messageCount,
+      ...(mirror.userMessages !== undefined ? { userMessages: mirror.userMessages } : {}),
+      ...(mirror.assistantMessages !== undefined ? { assistantMessages: mirror.assistantMessages } : {}),
+      ...(mirror.toolResultMessages !== undefined ? { toolResultMessages: mirror.toolResultMessages } : {}),
       firstMessage: mirror.firstMessage,
       transient: !mirror.persisted,
       status: mirror.isRunning ? "pending" : mirror.status,
@@ -1176,6 +1182,33 @@ function hostSpawnArgs(start: HostStartOptions): string[] {
 }
 
 /**
+ * Env a host must inherit from the web tier. systemd-run does NOT inherit the
+ * caller's environment, so a key missing here silently makes the host disagree
+ * with the process that spawned it. HOME and the SDK's agent-dir overrides are
+ * the fatal ones: a test instance under a fake HOME would journal into the real
+ * ~/.omp/agent/sessions instead of its own.
+ */
+const HOST_INHERITED_ENV = [
+  "OMP_WEB_HOST_RUN_DIR",
+  "OMP_WEB_HOST_IDLE_MS",
+  "HOME",
+  "PI_CODING_AGENT_DIR",
+  "PI_PROFILE",
+  "OMP_PROFILE",
+  "OMP_WEB_USERS_FILE",
+] as const;
+
+/** `--setenv=K=V` for each listed key present in `env`; absent keys stay unset host-side. */
+export function hostSpawnSetenvArgs(env: Record<string, string | undefined>): string[] {
+  const args: string[] = [];
+  for (const key of HOST_INHERITED_ENV) {
+    const value = env[key];
+    if (value !== undefined) args.push(`--setenv=${key}=${value}`);
+  }
+  return args;
+}
+
+/**
  * Launch one host OUTSIDE this service's cgroup (contract §1): a transient
  * user unit survives omp-web restarts. systemd-run returns before the host
  * binds its socket; connectToHostWithRetry covers that race.
@@ -1185,14 +1218,12 @@ async function spawnSessionHost(start: HostStartOptions): Promise<void> {
     "systemd-run", "--user", "--collect", `--unit=${hostUnitName(start.sessionId)}`,
   ];
   // systemd-run does NOT inherit the caller's environment: the transient unit
-  // runs under the user manager's env block. Forward the isolation seams the
-  // host must agree with this process on — the socket run dir (web computes
-  // hostSocketPath from ITS env; a host binding the default dir would never be
-  // found) and the idle-reap override. Unset vars stay unset (host defaults).
-  for (const key of ["OMP_WEB_HOST_RUN_DIR", "OMP_WEB_HOST_IDLE_MS"]) {
-    const value = process.env[key];
-    if (value !== undefined) argv.push(`--setenv=${key}=${value}`);
-  }
+  // runs under the user manager's env block. Forward every key in
+  // HOST_INHERITED_ENV — the isolation seams the host must agree with this
+  // process on: the socket run dir (web computes hostSocketPath from ITS env;
+  // a host binding the default dir would never be found), the idle-reap
+  // override, and the agent-dir seams. Unset vars stay unset (host defaults).
+  argv.push(...hostSpawnSetenvArgs(process.env));
   argv.push(process.execPath, ...hostSpawnArgs(start));
   const proc = Bun.spawn(argv, { cwd: HOST_REPO_ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);

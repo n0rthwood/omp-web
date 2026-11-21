@@ -14,6 +14,7 @@ import type { SessionEntry as OmpSessionEntry, SessionInfo as OmpSessionInfo } f
 import { getOmpRuntime } from "./omp-runtime";
 import { normalizeToolCalls } from "./normalize";
 import { sessionPathKey } from "./session-path";
+import { readJournalMessageStatsCached } from "./journal-stats";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
 // 18.x replaced the standalone estimateTokens() helper with Tokenizer
@@ -56,8 +57,12 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
   const pathToId = new Map<string, string>();
   for (const s of ompSessions) pathToId.set(sessionPathKey(s.path), s.id);
 
-  const sessions = ompSessions.map((s) => {
+  const sessions = await mapWithConcurrency(ompSessions, JOURNAL_READ_CONCURRENCY, async (s) => {
     cacheSessionPath(s.id, s.path);
+    // The SDK reports counts from a 4 KB head window, which plan mode's ~7 KB
+    // head record pushes every real message out of. Read the whole journal by
+    // role tag instead (issue #116); unreadable files keep the SDK values.
+    const stats = await readJournalMessageStatsCached(s.path);
     return {
       path: s.path,
       id: s.id,
@@ -65,12 +70,19 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       name: s.title,
       created: s.created instanceof Date ? s.created.toISOString() : String(s.created),
       modified: s.modified instanceof Date ? s.modified.toISOString() : String(s.modified),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage || "(no messages)",
+      messageCount: stats?.messageCount ?? s.messageCount,
+      // A user message whose text is empty (a stripped attachment, an empty
+      // prompt) still counts as a turn; "(no messages)" must stay reserved for
+      // journals with no user message at all.
+      firstMessage: stats
+        ? stats.firstUserMessage
+          || (stats.userMessages > 0 ? "(empty message)" : "(no messages)")
+        : s.firstMessage || "(no messages)",
+      userMessages: stats?.userMessages,
+      assistantMessages: stats?.assistantMessages,
+      toolResultMessages: stats?.toolResultMessages,
       parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
       transient: false,
-      // Already computed by the SDK's file scan (session-listing.ts) — no
-      // extra I/O to surface these (issue #22).
       status: s.status,
       size: s.size,
     };
@@ -126,6 +138,29 @@ declare global {
   var __ompSessionListPromiseGeneration: number | undefined;
   var __ompSessionListGeneration: number | undefined;
   var __ompSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+}
+
+/**
+ * Journal reads open one file handle each. A store with hundreds of sessions
+ * must not open them all at once — that exhausts descriptors and, under Bun,
+ * crashes the process outright. Eight in flight keeps the cold scan fast
+ * (~0.8 s for 350 journals on this fleet) without the spike.
+ */
+const JOURNAL_READ_CONCURRENCY = 8;
+
+/** `fn` over `items` with at most `limit` calls in flight, results in input order. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;

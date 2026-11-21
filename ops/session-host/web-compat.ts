@@ -760,6 +760,14 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     >;
     const messages = entries.filter((entry): entry is SessionMessageEntry => entry.type === "message");
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
+    let userMessages = 0;
+    let assistantMessages = 0;
+    let toolResultMessages = 0;
+    for (const entry of messages) {
+      if (entry.message.role === "user") userMessages++;
+      else if (entry.message.role === "assistant") assistantMessages++;
+      else if (entry.message.role === "toolResult") toolResultMessages++;
+    }
     const sessionFile = sessionManager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
     const isRunning = hostIsRunning();
@@ -793,6 +801,9 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       created,
       modified: new Date(lastActivityMs).toISOString(),
       messageCount: messages.length,
+      userMessages,
+      assistantMessages,
+      toolResultMessages,
       firstMessage: firstUserMessage ? runtimeMessageText(firstUserMessage) || "(no messages)" : "(no messages)",
       persisted,
       status: runtimeSessionStatus(messages, isRunning),
