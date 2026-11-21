@@ -1,5 +1,15 @@
 omp-web (0.5.32) jammy; urgency=medium
 
+  * Allow progress updates and direct answers during planning and execution.
+    A substantive planning reply no longer forces another ask/propose call;
+    plan approval still requires xd://propose (#114).
+  * Generate session titles when the first prompt is admitted, with a
+    deterministic fallback; enable manual title generation whenever the full
+    transcript contains a real user message, including mid-turn (#115).
+  * Preserve custom text entered before "Chat about this" as discussion,
+    not a selected answer. Show it to the model and in the session transcript
+    and outline; empty discussions retain their previous behavior (#117).
+
   * Fix sessions reporting "(no messages)" while holding hundreds of
     messages. The SDK's session listing only reads a 4 KB head window, and
     plan mode's ~7 KB context record pushes every real message past it, so
@@ -24,7 +34,7 @@ omp-web (0.5.32) jammy; urgency=medium
   * Bound the per-session journal fan-out (8 in flight): the cold scan had
     one file descriptor open per session, which crashed Bun outright.
 
- -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 11:15:00 +0000
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 21 Nov 2026 14:03:15 +0000
 
 omp-web (0.5.31) jammy; urgency=medium
 
