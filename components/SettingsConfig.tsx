@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ModelsConfig } from "./ModelsConfig";
+import { PromptsConfig, type PromptsConfigHandle, type PromptWorkspaceView } from "./PromptsConfig";
+import { useI18n } from "@/hooks/useI18n";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { SearchableSelect } from "./SearchableSelect";
@@ -23,12 +25,13 @@ import type {
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
 
-type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | `settings:${string}`;
+type SettingsSection = "models" | "prompts" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | `settings:${string}`;
 
 interface SettingsConfigProps {
   cwd?: string | null;
   sessionId: string | null;
   initialSection?: SettingsSection;
+  initialPromptView?: PromptWorkspaceView;
   onClose: () => void;
   onModelsChanged?: () => void;
   onReloaded?: () => void;
@@ -36,6 +39,7 @@ interface SettingsConfigProps {
 
 const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean; requiresAdmin?: boolean }> = [
   { id: "models", label: "Models", icon: "model", requiresAdmin: true },
+  { id: "prompts", label: "Prompts", icon: "context", requiresAdmin: true },
   { id: "themes", label: "Themes", icon: "theme", requiresAdmin: true },
   { id: "skills", label: "Skills", icon: "skill", requiresCwd: true, requiresAdmin: true },
   { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
@@ -187,8 +191,10 @@ function ThemePreview({ palette }: { palette: WebThemePalette }) {
   );
 }
 
-export function SettingsConfig({ cwd, sessionId, initialSection = "models", onClose, onModelsChanged, onReloaded }: SettingsConfigProps) {
+export function SettingsConfig({ cwd, sessionId, initialSection = "models", initialPromptView = "defaults", onClose, onModelsChanged, onReloaded }: SettingsConfigProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const promptPanel = useRef<PromptsConfigHandle>(null);
+  const { t } = useI18n();
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -279,7 +285,11 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     }
     window.location.assign("/login");
   }, []);
-  const close = useCallback(() => { onModelsChanged?.(); onClose(); }, [onClose, onModelsChanged]);
+  const navigateSettings = useCallback((action: () => void) => {
+    if (section === "prompts" && promptPanel.current) promptPanel.current.requestLeave(action);
+    else action();
+  }, [section]);
+  const close = useCallback(() => navigateSettings(() => { onModelsChanged?.(); onClose(); }), [navigateSettings, onClose, onModelsChanged]);
   const reloadActiveSession = useCallback(async () => {
     if (!sessionId) return;
     setReloading(true);
@@ -322,6 +332,8 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
     );
   };
 
+  const promptSearchMatch = isAdminUser && /prompt|system|planning|execution|instruction|injection|append|提示|注入|规划|执行/i.test(query);
+  const openPrompts = () => navigateSettings(() => { setQuery(""); setSection("prompts"); });
   const renderGenericSettings = () => {
     if (loading) return <div className={styles.empty}>Loading omp settings…</div>;
     if (loadError || !settings) return <div className={styles.empty}>{loadError ?? "Settings unavailable"}</div>;
@@ -344,9 +356,10 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
           )}
         </header>
         <div className={styles.settingsBody}>
+          {(promptSearchMatch || filteredFields.some((field) => field.group === "Prompt")) && <button type="button" className={styles.closeButton} onClick={openPrompts}>{t("prompts.openWorkspace")}</button>}
           {filteredFields.length
             ? renderFields(filteredFields, selectedTab?.groups ?? [])
-            : <div className={styles.empty}>No settings match this search.</div>}
+            : promptSearchMatch ? null : <div className={styles.empty}>No settings match this search.</div>}
         </div>
       </div>
     );
@@ -357,13 +370,13 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
       <div className={styles.window} role="dialog" aria-modal="true" aria-label="Settings">
         <aside className={styles.sidebar}>
           <div className={styles.brand}><div className={styles.eyebrow}>omp /settings</div><h1 className={styles.title}>Settings</h1><code className={styles.context} title={cwd ?? "Global configuration"}>{cwd ?? "Global configuration"}</code></div>
-          {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => setQuery(event.target.value)} /></div>}
+          {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => { const value = event.target.value; navigateSettings(() => setQuery(value)); }} /></div>}
           <nav className={styles.nav}>
             <div className={styles.navLabel}>Configuration</div>
-            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => { setQuery(""); setSection(item.id); }}><SettingsIcon kind={item.icon}/><span>{item.label}</span></button>)}
+            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => navigateSettings(() => { setQuery(""); setSection(item.id); })}><SettingsIcon kind={item.icon}/><span>{item.id === "prompts" ? t("prompts.title") : item.label}</span></button>)}
             {isAdminUser && settings && (<>
               <div className={styles.navLabel}>OMP settings</div>
-              {settings.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => { setQuery(""); setSection(`settings:${tab.id}`); }}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
+              {settings.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => navigateSettings(() => { setQuery(""); setSection(`settings:${tab.id}`); })}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
             </>)}
           </nav>
           <div className={styles.closeRail}>
@@ -378,7 +391,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
         <main className={styles.content}>
           {visibleCoreSections.length === 0 ? (
             <div className={styles.empty}>No settings are available for this user.</div>
-          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
+          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
         </main>
       </div>
     </div>

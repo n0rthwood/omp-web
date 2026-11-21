@@ -25,6 +25,7 @@ export const ADMIN_ONLY_API_PREFIXES = [
   "/api/project-trust",
   "/api/service",
   "/api/settings",
+  "/api/prompts",
   "/api/updates",
   "/api/models-config",
   "/api/git",

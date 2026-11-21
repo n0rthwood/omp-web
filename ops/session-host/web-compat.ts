@@ -55,6 +55,8 @@ import type {
 import { boundActivePartial, type HostHistoryBoundary, type HostJournalAnchor, type HostSessionInfoFrame } from "../../lib/session-host-protocol";
 import type { SessionTransport } from "./transport";
 import type { WebUiDecoration } from "./ui-decoration";
+import { inheritPromptProfile, type ManagedPromptProfile } from "../../lib/prompt-store";
+import { afterPlanApprovalText } from "../../lib/prompt-runtime";
 
 const MAX_SUBAGENT_HISTORY = 128;
 
@@ -316,6 +318,7 @@ export interface WebCompatOptions {
   session: AgentSession;
   sessionManager: SessionManager;
   settings: Settings;
+  promptProfile?: ManagedPromptProfile | null;
   cwd: string;
   transport: SessionTransport;
   /** Decoration is installed by runRpcMode's setToolUIContext callback, which
@@ -634,7 +637,7 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       return {
         content: [{
           type: "text",
-          text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
+          text: afterPlanApprovalText(`Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`, options.promptProfile ?? null),
         }],
         details,
       };
@@ -663,7 +666,8 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
   // -------------------------------------------------------------------------
 
   function applyForcedEmptySystemPrompt(): void {
-    if (forceEmptySystemPrompt && session.agent.state) {
+    const ownsSystem = options.promptProfile?.values.baseTemplate !== undefined || !!options.promptProfile?.values.append;
+    if (forceEmptySystemPrompt && !ownsSystem && session.agent.state) {
       session.agent.state.systemPrompt = [];
     }
   }
@@ -889,24 +893,21 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     if (!entry) throw new Error("Invalid entry ID for forking");
 
     const sessionDir = sessionManager.getSessionDir();
-    let newSessionFile: string;
-
-    if (!entry.parentId) {
-      // Fork before the first message: create an empty session linked to this one
-      const newManager = SessionManagerClass.create(sessionManager.getCwd(), sessionDir);
-      await newManager.newSession({ parentSession: currentSessionFile });
-      await newManager.ensureOnDisk();
-      newSessionFile = newManager.getSessionFile() as string;
-    } else {
-      // Fork after some history: copy path up to (but not including) the fork point
-      const sourceManager = await SessionManagerClass.open(currentSessionFile, sessionDir);
-      const forkedPath = sourceManager.createBranchedSession(entry.parentId);
-      if (!forkedPath) throw new Error("Failed to create forked session");
-      newSessionFile = forkedPath;
+    // A branch writer owns the new child's lease. Reopening it through a
+    // second manager cannot release that first writer's ownership.
+    const forkManager = entry.parentId
+      ? await SessionManagerClass.open(currentSessionFile, sessionDir)
+      : SessionManagerClass.create(sessionManager.getCwd(), sessionDir);
+    try {
+      if (!entry.parentId) await forkManager.newSession({ parentSession: currentSessionFile });
+      else if (!forkManager.createBranchedSession(entry.parentId)) throw new Error("Failed to create forked session");
+      inheritPromptProfile(sessionManager, forkManager);
+      await forkManager.ensureOnDisk();
+      forkManager.flushSync();
+      return { cancelled: false, newSessionId: forkManager.getSessionId() };
+    } finally {
+      await forkManager.close();
     }
-
-    const newSessionId = (await SessionManagerClass.open(newSessionFile, sessionDir)).getSessionId();
-    return { cancelled: false, newSessionId };
   }
 
   /**
@@ -1086,6 +1087,11 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     const type = command.type;
     const id = command.id;
 
+    if (type === "new_session" || type === "open_session" || type === "switch_session" || type === "branch") {
+      respondError(id, type, "Open or create conversations through the web conversation routes; a session host cannot switch identity or reuse another conversation's prompt profile.");
+      return;
+    }
+
     // Host-owned wire commands never reach the SDK.
     if (type === "extension_ui_response") {
       const response = frame as unknown as ExtensionUiResponse;
@@ -1107,6 +1113,10 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     void (async () => {
       try {
         if (EXTENSION_GATED_TYPES[type] && !extensionsBound) await extensionsReady;
+        // Scoped/rotated Settings clones do not own the global file watcher.
+        // Re-read native injection settings at user prompt boundaries while
+        // keeping runtime model overrides and the managed prompt profile pinned.
+        if (type === "prompt" || type === "abort_and_prompt") await settings.reloadFromDisk();
         if (type === "prompt" || type === "steer" || type === "follow_up") {
           syncPlanModeFromSession();
           const imageError = validateAgentImages(command.images);
@@ -1114,6 +1124,12 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
         }
 
         switch (type) {
+          case "get_prompt_inspection":
+            respondSuccess(id, type, {
+              systemPromptBlocks: [...session.systemPrompt],
+              profile: options.promptProfile?.marker ?? null,
+            });
+            return;
           case "prompt": {
             if (session.isBashRunning) {
               throw new Error("Cannot send a prompt while a shell command is running");

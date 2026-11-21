@@ -141,7 +141,8 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
-  const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines">("models");
+  const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines" | "prompts">("models");
+  const [settingsPromptView, setSettingsPromptView] = useState<"defaults" | "current">("defaults");
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -1666,7 +1667,10 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               </button>
               <button
                 ref={systemBtnRef}
-                onClick={() => toggleTopPanel("system")}
+                onClick={() => {
+                  if (isAdminUser) { setActiveTopPanel(null); setSettingsInitialSection("prompts"); setSettingsPromptView("current"); setSettingsConfigOpen(true); }
+                  else toggleTopPanel("system");
+                }}
                  title={translate("system.prompt")}
                  aria-label={translate("system.prompt")}
                 aria-pressed={activeTopPanel === "system"}
@@ -2454,6 +2458,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         cwd={projectTrustCwd}
         sessionId={selectedSession?.id ?? null}
         initialSection={settingsInitialSection}
+        initialPromptView={settingsPromptView}
         onClose={() => setSettingsConfigOpen(false)}
         onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onReloaded={() => setSessionKey((key) => key + 1)}

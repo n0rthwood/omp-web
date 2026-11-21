@@ -45,6 +45,8 @@ import { decorateWebUiContext, type WebUiDecoration } from "./ui-decoration";
 import { createWebCompat, withExtensionTools } from "./web-compat";
 import { startIdleReaper } from "./idle";
 import { beginCrashMarker, restoreInterruptedWork } from "./restore";
+import { bindPromptProfile } from "../../lib/prompt-store";
+import { promptSessionOptions } from "../../lib/prompt-runtime";
 
 // Grace for the SDK's stdin-EOF teardown (rpc-mode.ts:2682-2697) after the host
 // closes its input controller. Bun can leave the SDK's stream reader parked after
@@ -262,6 +264,8 @@ async function main(): Promise<void> {
       discoverCustomToolPaths([], sessionCwd),
     ]);
     const untrusted = untrustedProjectSessionOptions(sessionCwd, agentDir, { extensionPaths, customToolPaths });
+    // Managed defaults bind once to a new conversation, not to each host incarnation.
+    const promptProfile = await bindPromptProfile(sessionManager, sessionCwd, !args.sessionFile, agentDir);
 
     const { modelRegistry } = runtime;
 
@@ -322,6 +326,7 @@ async function main(): Promise<void> {
       ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
       ...(toolsOption !== undefined ? { toolNames: toolsOption, restrictToolNames: true } : {}),
       ...(untrusted ?? {}),
+      ...promptSessionOptions(promptProfile, toolsOption !== undefined),
     });
 
     const persistedPreferences = await persistExplicitStartupPreferences(
@@ -395,6 +400,7 @@ async function main(): Promise<void> {
       session,
       sessionManager,
       settings,
+      promptProfile,
       cwd: sessionCwd,
       transport,
       getDecoration: () => decoration,
