@@ -7,6 +7,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-ab25ef62432b0b63 b/.bun-tag-ab25ef62432b0b63
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0636bcaf8484d3f b/.bun-tag-d0636bcaf8484d3f
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/src/prompts/system/manual-continue.md b/src/prompts/system/manual-continue.md
 index 8e203e4ea0b6fb7736a5cacc9479d39c93deeb3c..9a4b1b1c438de0cb241b9d8efb84d330a25806fe 100644
 --- a/src/prompts/system/manual-continue.md
@@ -175,6 +178,41 @@ index 05fac6ec8e078e6c0c40efd7a95544e4773adec7..03649a057557c6998fe448a4335f0dcf
  					};
  				}
  				if (richResult.results.length !== params.questions.length) {
+diff --git a/src/tools/bash.ts b/src/tools/bash.ts
+index 69cd2d8201c2545e746114958f037b1150b8c2ac..5711c900ca23cde7d4ac8f5cd2abfd9643ed704c 100644
+--- a/src/tools/bash.ts
++++ b/src/tools/bash.ts
+@@ -977,14 +977,27 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 		// for a plain command. Only `async: true` is an async request, a blank
+ 		// `name` is no service name, and service-only fields with nothing in
+ 		// them are not a service request.
+-		const name = blankToUndefined(rawName);
++		let name = blankToUndefined(rawName);
+ 		const ready = normalizeReady(rawReady);
+ 		const asyncRequested = rawAsync === true;
+ 		const pendingNotices: string[] = [];
+ 		if (name !== undefined) {
+ 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
+-			if (asyncRequested || rawTimeout !== undefined)
+-				throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
++			if (asyncRequested || rawTimeout !== undefined) {
++				// A readiness condition (log/port) is what makes `name` a service
++				// request; `host`/`timeout` alone are the documented defaults, so a
++				// materialized service template is not one. Without a condition the
++				// call is a one-shot command that copied the service shape: run it
++				// with its timeout/async semantics and teach the correct shape in
++				// the result instead of failing the call.
++				if (ready?.log !== undefined || ready?.port !== undefined) {
++					throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
++				}
++				pendingNotices.push(
++					`Ignored name ${JSON.stringify(name)}: no readiness condition (ready.log/port) was given, so this ran as a one-shot command. Use name + ready (log or port) for a service; ready.timeout is the service deadline.`,
++				);
++				name = undefined;
++			}
+ 		} else if (ready !== undefined) {
+ 			// Nothing can honour ready without a service to attach it to;
+ 			// running the command the caller did ask for beats failing the call.
 diff --git a/src/tools/browser.ts b/src/tools/browser.ts
 index 5d09ccc3908dadac92687c4a1d8b7616f3e91846..bc40fed53dbda7629b1a8388c07c4a57bd906202 100644
 --- a/src/tools/browser.ts
