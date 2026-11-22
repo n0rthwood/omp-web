@@ -17,7 +17,7 @@ import type {
 } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, findStoppedAnswerIndices, getAssistantErrorMessage, getDisplayableAssistantBlocks, hasFinalAnswerBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { getAssistantErrorMessage, getDisplayableAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { MessageView } from "./MessageView";
 import { SessionOutline } from "./SessionOutline";
@@ -80,17 +80,6 @@ export function projectBasename(path: string): string {
 
 const CHAT_COLUMN_PADDING = 16;
 
-function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    const candidate = messages[candidateIdx];
-    if (candidate.role === "assistant" && hasFinalAnswerBlocks(candidate)) return candidateIdx;
-  }
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
-  }
-  return -1;
-}
-
 function getUserInputText(message: AgentMessage): string | null {
   if (message.role !== "user") return null;
   if (typeof message.content === "string") {
@@ -105,97 +94,12 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function countToolCalls(messages: AgentMessage[], indices: number[]): number {
-  let count = 0;
-  for (const idx of indices) {
-    const msg = messages[idx];
-    if (msg?.role !== "assistant") continue;
-    count += countToolCallBlocks(getDisplayableAssistantBlocks(msg as AssistantMessage));
-  }
-  return count;
-}
-
-function hasDisplayableProcessMessage(message: AgentMessage): boolean {
-  if (message.role === "assistant") {
-    return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
-  }
-  return message.role === "custom";
-}
-
-// A user message normally anchors a turn (user prompt → process → final
-// answer), and the process messages in between get folded into a collapsed
-// ProcessDetailsGroup. When compaction fires mid-turn, omp drops the original
-// user prompt and inserts a compaction summary (role "custom", customType
-// "compaction") in its place; the agent then keeps producing tool calls and a
-// final answer with no user message left to anchor them. Treat a compaction
-// summary as an anchor too, otherwise every post-compaction message renders
-// standalone and never collapses.
+// Turn boundary marker: a user prompt, or the compaction summary omp inserts
+// in its place when compaction fires mid-turn (role "custom", customType
+// "compaction"). Turns render flat — every message keeps its own anchor.
 function isGroupAnchor(message: AgentMessage): boolean {
   if (message.role === "user") return true;
   return message.role === "custom" && (message as CustomMessage).customType === "compaction";
-}
-
-function withAssistantBlocks(
-  message: AssistantMessage,
-  content: AssistantContentBlock[],
-  options: { omitUsage?: boolean } = {},
-): AssistantMessage {
-  const next = { ...message, content };
-  if (options.omitUsage) next.usage = undefined;
-  return next;
-}
-
-function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, expandSignal = null, children, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; expandSignal?: { id: string; epoch: number } | null; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  // #104: an outline jump into a folded process group must reveal its target
-  // before the UI scrolls to it. The signal carries the RESOLVED target id +
-  // seek epoch and is only passed to the group actually containing that
-  // anchored entry — unrelated pending clicks never re-open old groups, while
-  // a same-id re-click after manual collapse bumps the epoch and re-expands.
-  const hasExpandSignal = expandSignal !== null;
-  const expandEpoch = expandSignal?.epoch ?? 0;
-  useEffect(() => {
-    if (hasExpandSignal) setExpanded(true);
-  }, [hasExpandSignal, expandEpoch]);
-  const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
-  if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
-
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          width: "auto",
-          minHeight: 24,
-          padding: "2px 0",
-          border: "none",
-          background: "transparent",
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 12,
-          textAlign: "left",
-        }}
-        title={expanded ? t("chat.collapseProcess") : t("chat.expandProcess")}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
-          <polyline points="4 2.5 7.5 6 4 9.5" />
-        </svg>
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {parts.join(" · ")}
-        </span>
-      </button>
-      {expanded && (
-        <div style={{ marginTop: 8 }}>
-          {children}
-        </div>
-      )}
-    </div>
-  );
 }
 
 export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
@@ -280,13 +184,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   const jumpSeqRef = useRef(0);
   const seekFrameRef = useRef<number | null>(null);
   // Re-clicking the same outline row (or retrying a failed jump) must still
-  // scroll: the hook's target id may not change, so bump a local epoch.
+  // scroll: the hook's target id may not change, so bump a local epoch that
+  // re-runs the seek effect.
   const [jumpEpoch, setJumpEpoch] = useState(0);
   const lastJumpRequestRef = useRef<string | null>(null);
-  // Expansion signal published only once a seek's target is resolved — never
-  // on an unrelated pending request.
-  const [groupExpand, setGroupExpand] = useState<{ id: string; epoch: number } | null>(null);
-
   const closeOutline = useCallback(() => setOutlineOpen(false), []);
   const handleOutlineRetry = useCallback(() => { void loadOutline(); }, [loadOutline]);
   const handleOutlineJump = useCallback((entryId: string) => {
@@ -304,7 +205,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   // not suppress seeks in the new session).
   useEffect(() => {
     lastJumpRequestRef.current = null;
-    setGroupExpand(null);
   }, [session?.id]);
   const handleOutlineTrigger = useCallback(() => {
     if (outlineRailSpace) setRailCollapsed((v) => !v);
@@ -395,7 +295,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   }, [loading, isEmptyNew, outlineRail, outlineOpen, entryIds, historyBrowsing, historyTargetEntryId, scrollContainerRef, scrollContentRef]);
 
   // Position the transcript at a resolved history target ONCE, instantly,
-  // after its block has mounted (folded process groups auto-expand first).
+  // after its block has mounted.
   // The stick-to-bottom library remains the only follow animator — no bespoke
   // seek tween. A short rAF retry covers React commit latency; latest click
   // wins, and pointer/wheel/touch/scroll-key intent cancels the pending seek
@@ -414,9 +314,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
     // publish the clicked id (the target-change run handles it then).
     if (lastJumpRequestRef.current !== null && lastJumpRequestRef.current !== target) return;
     const seq = ++jumpSeqRef.current;
-    // Target resolved: publish the expansion signal so ONLY the group whose
-    // anchored entries contain this id re-opens (epoch covers same-id re-click).
-    setGroupExpand({ id: target, epoch: jumpEpoch });
     const container = scrollContainerRef.current;
     if (!container) return;
     let attempts = 0;
@@ -971,20 +868,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             {(() => {
-              // Anchor for live-tail detection: the last user message, or a
-              // compaction summary when compaction has replaced it mid-turn.
-              let lastAnchorIdx = -1;
-              for (let i = messages.length - 1; i >= 0; i--) {
-                if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
-              }
-
-              const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; anchor?: boolean } = {}): ReactNode => {
-                const msg = options.messageOverride ?? messages[idx];
+              const renderMessage = (idx: number, options: { writtenFiles?: WrittenFile[] } = {}): ReactNode => {
+                const msg = messages[idx];
                 const prevAssistantEntryId =
                   msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
                     ? entryIds[idx - 1]
                     : undefined;
-                const keyPrefix = options.keyPrefix ?? "message";
                 let showTimestamp = false;
                 if (msg.role === "assistant") {
                   showTimestamp = true;
@@ -999,7 +888,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                     showTimestamp = false;
                   }
                 }
-                if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
                 // #104: exactly one meaningful block per outline-listed entry
                 // gets data-entry-id. Only user/assistant/compaction roles are
                 // anchored (branch_summary converts to a user message in
@@ -1008,14 +896,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 // Exception (#109): ask toolResults render inline under their
                 // call AND are outline-listed (role "ask"), so they need an
                 // anchor for the outline jump to seek.
-                // Split final-assistant renders pass anchor=false on the
-                // folded process half so the answer half (or the whole block
-                // for tool-only entries) is the unique outline/scroll target.
                 const entryId = entryIds[idx];
                 const anchorRole = msg.role === "user" || msg.role === "assistant"
                   || (msg.role === "custom" && (msg as CustomMessage).customType === "compaction")
                   || (msg.role === "toolResult" && (msg as ToolResultMessage).toolName === "ask");
-                const anchor = options.anchor !== false && !!entryId && anchorRole;
+                const anchor = !!entryId && anchorRole;
                 // Empty/empty-thinking-only non-error assistants render null in
                 // MessageView but the outline still lists them — show a compact
                 // marker inside the anchor so every outline entry has a target.
@@ -1024,7 +909,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   && !getAssistantErrorMessage(msg as AssistantMessage);
                 const view = emptyAssistant ? (
                   <div
-                    key={`${keyPrefix}-view-${idx}`}
+                    key={`message-view-${idx}`}
                     data-testid="empty-assistant-marker"
                     className="py-1 text-xs italic text-text-dim"
                   >
@@ -1032,7 +917,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                   </div>
                 ) : (
                   <MessageView
-                    key={`${keyPrefix}-view-${idx}`}
+                    key={`message-view-${idx}`}
                     message={msg}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
@@ -1053,7 +938,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 if (!anchor) return view;
                 return (
                   <div
-                    key={`${keyPrefix}-entry-${idx}`}
+                    key={`message-entry-${idx}`}
                     data-entry-id={entryId}
                     className={highlightedEntryId === entryId ? "entry-target-flash" : undefined}
                     style={{ minWidth: 0 }}
@@ -1064,168 +949,48 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
               };
 
               const rendered: ReactNode[] = [];
-              for (let idx = 0; idx < messages.length;) {
+              // Assistant messages render flat in message order: narration,
+              // thinking and tool calls are always visible, never folded into
+              // a process group (only toolResult output folds, inside each
+              // paired ToolCallBlock in MessageView). Every message keeps its
+              // own data-entry-id anchor so outline jumps resolve directly.
+              for (let idx = 0; idx < messages.length; idx++) {
                 const msg = messages[idx];
-                if (!isGroupAnchor(msg)) {
-                  rendered.push(renderMessage(idx));
-                  idx += 1;
-                  continue;
-                }
-
-                const userIdx = idx;
-                let endIdx = userIdx + 1;
-                while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-
-                const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
-
-                if (finalAssistantIdx === -1) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-                    rendered.push(renderMessage(renderIdx));
-                  }
-                  idx = endIdx;
-                  continue;
-                }
-
-                const isLiveTail = !historyBrowsing && (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
-                if (isLiveTail) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-                    rendered.push(renderMessage(renderIdx));
-                  }
-                  idx = endIdx;
-                  continue;
-                }
-
-                rendered.push(renderMessage(userIdx));
-
-                // fileMention messages are context injected directly after the
-                // prompt (SDK @-mention auto-read). They must stay visible
-                // beside the user message, not fold into the process group —
-                // hasDisplayableProcessMessage() excludes them, so without
-                // this they would never render on a loaded session.
-                for (let mentionIdx = userIdx + 1; mentionIdx < finalAssistantIdx; mentionIdx++) {
-                  if (messages[mentionIdx].role === "fileMention") {
-                    rendered.push(renderMessage(mentionIdx));
-                  }
-                }
-
-                const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-                const finalProcessMessage = finalSplit.processBlocks.length > 0
-                  ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
-                  : null;
-                const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant)
-                  ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-                  : null;
-
-                // Messages that already ended their model turn with an answer
-                // (stopReason "stop") stay visible even when the turn went on
-                // — e.g. omp's todo reminder re-woke the agent and its short
-                // recap became the "final" message. Only the process messages
-                // between them fold, one group per run.
-                const stoppedAnswers = new Set(findStoppedAnswerIndices(messages, userIdx, finalAssistantIdx));
-                let run: { start: number; nodes: ReactNode[]; count: number; toolCalls: number; entryIds: string[] } | null = null;
-                // anchored=false halves (stopped/final process splits whose
-                // answer renders outside) must NOT join group membership —
-                // otherwise seeking the outside answer force-opens the group.
-                const addToRun = (start: number, entryIdx: number, node: ReactNode, toolCalls: number, anchored = true) => {
-                  if (!run) run = { start, nodes: [], count: 0, toolCalls: 0, entryIds: [] };
-                  run.nodes.push(node);
-                  run.count += 1;
-                  run.toolCalls += toolCalls;
-                  const runEntryId = entryIds[entryIdx];
-                  if (anchored && runEntryId) run.entryIds.push(runEntryId);
-                };
-                const flushRun = (isLast: boolean) => {
-                  if (!run) return;
-                  const { start, nodes, count, toolCalls, entryIds: runEntryIds } = run;
-                  run = null;
-                  rendered.push(
-                    <div key={`process-group-${userIdx}-${isLast ? finalAssistantIdx : start}`}>
-                      <ProcessDetailsGroup
-                        messageCount={count}
-                        defaultExpanded={isLast && !finalAnswerMessage}
-                        t={t}
-                        toolCallCount={toolCalls}
-                        expandSignal={groupExpand !== null && runEntryIds.includes(groupExpand.id) ? groupExpand : null}
-                      >
-                        {nodes}
-                      </ProcessDetailsGroup>
-                    </div>,
-                  );
-                };
-
-                for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-                  const processMessage = messages[processIdx];
-                  if (stoppedAnswers.has(processIdx)) {
-                    const stoppedMessage = processMessage as AssistantMessage;
-                    const split = splitFinalAssistantBlocks(stoppedMessage);
-                    if (split.processBlocks.length > 0) {
-                      addToRun(
-                        processIdx,
-                        processIdx,
-                        renderMessage(processIdx, {
-                          keyPrefix: "process-stopped",
-                          messageOverride: withAssistantBlocks(stoppedMessage, split.processBlocks, { omitUsage: true }),
-                          showTimestamp: false,
-                          anchor: false,
-                        }),
-                        countToolCallBlocks(split.processBlocks),
-                        false,
-                      );
+                // The turn's written-files summary attaches to its last
+                // assistant message that carries answer blocks (or a provider
+                // error) — the same entry the outline lists as the conclusion.
+                let writtenFiles: WrittenFile[] | undefined;
+                if (msg.role === "assistant") {
+                  const assistant = msg as AssistantMessage;
+                  const displayable = getDisplayableAssistantBlocks(assistant);
+                  const hasAnswer = displayable.some((block) => block.type === "image" || (block.type === "text" && block.text.trim().length > 0));
+                  const isTurnConclusion = (hasAnswer || !!getAssistantErrorMessage(assistant))
+                    && !messages.slice(idx + 1).some((later) => {
+                      if (isGroupAnchor(later)) return true;
+                      if (later.role !== "assistant") return false;
+                      const laterBlocks = getDisplayableAssistantBlocks(later as AssistantMessage);
+                      return laterBlocks.some((block) => block.type === "image" || (block.type === "text" && block.text.trim().length > 0))
+                        || !!getAssistantErrorMessage(later as AssistantMessage);
+                    });
+                  if (isTurnConclusion) {
+                    // Each tool call is stored as its own assistant entry, so
+                    // the conclusion alone carries no record of what the turn
+                    // wrote. Gather the turn's assistant blocks back to the
+                    // turn anchor and derive the file list from write/edit calls.
+                    let startIdx = idx;
+                    while (startIdx > 0 && !isGroupAnchor(messages[startIdx - 1])) startIdx -= 1;
+                    const turnContent: AssistantContentBlock[] = [];
+                    for (let i = startIdx; i <= idx; i++) {
+                      const m = messages[i];
+                      if (m?.role === "assistant") {
+                        for (const b of (m as AssistantMessage).content ?? []) turnContent.push(b);
+                      }
                     }
-                    flushRun(false);
-                    rendered.push(renderMessage(processIdx, { messageOverride: withAssistantBlocks(stoppedMessage, split.answerBlocks) }));
-                    continue;
-                  }
-                  if (hasDisplayableProcessMessage(processMessage)) {
-                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process" }), countToolCalls(messages, [processIdx]));
-                  } else if (processMessage.role === "assistant" && entryIds[processIdx]) {
-                    // Empty/empty-thinking-only assistant entries are listed
-                    // by the outline but MessageView renders null for them —
-                    // keep a compact anchored marker so seeks never exhaust.
-                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process-empty" }), 0);
-                  } else if (processMessage.role === "toolResult" && (processMessage as ToolResultMessage).toolName === "ask" && entryIds[processIdx]) {
-                    // #109: ask answers render inside the paired toolCall view;
-                    // the outline still lists this toolResult (role "ask"), so
-                    // keep a zero-height anchor for the jump to seek.
-                    addToRun(processIdx, processIdx, renderMessage(processIdx, { keyPrefix: "process-ask-anchor" }), 0);
+                    const files = extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd);
+                    if (files.length > 0) writtenFiles = files;
                   }
                 }
-                if (finalProcessMessage) {
-                  addToRun(
-                    finalAssistantIdx,
-                    finalAssistantIdx,
-                    renderMessage(finalAssistantIdx, { keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false, anchor: !finalAnswerMessage }),
-                    countToolCallBlocks(finalSplit.processBlocks),
-                    !finalAnswerMessage,
-                  );
-                }
-                flushRun(true);
-
-                if (finalAnswerMessage) {
-                  // Each tool call is stored as its own assistant entry, so the
-                  // final answer alone carries no record of what the turn wrote.
-                  // Gather the turn's assistant blocks and derive the file list
-                  // from the write/edit calls among them.
-                  const turnContent: AssistantContentBlock[] = [];
-                  for (let i = userIdx + 1; i <= finalAssistantIdx; i++) {
-                    const m = messages[i];
-                    if (m?.role === "assistant") {
-                      for (const b of (m as AssistantMessage).content ?? []) turnContent.push(b);
-                    }
-                  }
-                  const writtenFiles = extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd);
-                  rendered.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage, writtenFiles }));
-                }
-                if (!finalProcessMessage && !finalAnswerMessage && entryIds[finalAssistantIdx]) {
-                  // Empty final assistant (no displayable blocks, no error):
-                  // outline lists it, so render a compact anchored marker.
-                  rendered.push(renderMessage(finalAssistantIdx, { keyPrefix: "empty-final" }));
-                }
-                for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
-                  rendered.push(renderMessage(renderIdx));
-                }
-                idx = endIdx;
+                rendered.push(renderMessage(idx, writtenFiles ? { writtenFiles } : {}));
               }
               // #99: the journal window IS the render list — no client-side
               // render slicing. Earlier history pages in only through the

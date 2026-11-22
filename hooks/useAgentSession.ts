@@ -2216,31 +2216,48 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
+          // already appended it optimistically. The optimistic bubble may sit
+          // anywhere in the LIVE TAIL — assistant/toolResult message_end
+          // events routinely land after it during a tool-heavy turn — so
+          // search the whole tail and replace it IN PLACE (never move it to
+          // the end). Only the optimistic bubble may be consumed this way and
+          // only once: later same-text queue deliveries must still append.
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
           setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
+            const durableCount = Math.min(windowRef.current?.entryIds.length ?? 0, prev.length);
+            if (optimisticKey) {
+              for (let index = prev.length - 1; index >= durableCount; index -= 1) {
+                const candidate = prev[index];
+                if (candidate.role !== "user" || userMessageKey(candidate) !== optimisticKey) continue;
+                if (optimisticKey === deliveredKey) return prev;
+                const next = [...prev];
+                next[index] = delivered;
+                return next;
+              }
             }
             // Splice race (#99): the entry may already sit in the DURABLE
-            // journal window — replace it in place. Only durable entries are
-            // searched: a repeat steer/queued delivery whose identical text
-            // sits in the live tail must still append (later same-text queue
-            // deliveries must render).
-            const durableCount = windowRef.current?.entryIds.length ?? 0;
-            const durableSlice = prev.slice(0, durableCount);
-            const upserted = upsertCompletedMessage(durableSlice, delivered);
-            if (upserted.length > durableSlice.length) {
-              return [...prev, delivered];
+            // journal window — replace that copy in place, never append.
+            // The journal stores the same SDK object the wire event emits,
+            // so the raced copy carries an IDENTICAL timestamp; a later
+            // same-text queued delivery (steer/follow-up set no optimistic
+            // key) has a fresh timestamp and must still append. Legacy
+            // deliveries without a timestamp fall back to the bounded
+            // last-5 search. Identity is the normalized user key (string vs
+            // array content forms match); only durable entries are searched.
+            const deliveredTs = delivered.timestamp;
+            const durableSearchFrom = deliveredTs != null ? 0 : Math.max(0, durableCount - 5);
+            for (let index = durableCount - 1; index >= durableSearchFrom; index -= 1) {
+              const candidate = prev[index];
+              if (candidate.role !== "user" || userMessageKey(candidate) !== deliveredKey) continue;
+              if (deliveredTs != null && candidate.timestamp !== deliveredTs) continue;
+              const next = [...prev];
+              next[index] = delivered;
+              return next;
             }
-            return [...upserted, ...prev.slice(durableCount)];
+            return [...prev, delivered];
           });
         } else if (completed) {
           const normalized = normalizeToolCalls(completed);
