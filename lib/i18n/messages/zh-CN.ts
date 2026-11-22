@@ -316,6 +316,8 @@ export const zhCNLocale: LocalePlugin = {
     "outline.roleAssistant": "助手",
     "outline.roleSummary": "摘要",
     "outline.roleAsk": "回答",
+    "outline.roleSubagent": "子代理",
+    "outline.roleTools": "工具调用",
     "outline.jumpLabel": "第 {index} 条消息：{preview}",
     "outline.followOn": "跟随中",
     "outline.followOff": "已暂停跟随",

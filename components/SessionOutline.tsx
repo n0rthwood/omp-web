@@ -23,6 +23,32 @@ export interface SessionOutlineProps {
   triggerRef?: React.RefObject<HTMLButtonElement | null>;
 }
 
+type OutlineRow =
+  | { kind: "entry"; entry: SessionOutlineEntry }
+  | { kind: "toolGroup"; entries: SessionOutlineEntry[] };
+
+/** Collapse only adjacent tool-only assistant entries; keep journal positions intact. */
+export function groupOutlineEntries(entries: SessionOutlineEntry[]): OutlineRow[] {
+  const rows: OutlineRow[] = [];
+  for (let index = 0; index < entries.length;) {
+    const entry = entries[index];
+    if (entry.role !== "assistant" || entry.toolOnly !== true) {
+      rows.push({ kind: "entry", entry });
+      index++;
+      continue;
+    }
+    let end = index + 1;
+    while (end < entries.length && entries[end].role === "assistant" && entries[end].toolOnly === true) {
+      end++;
+    }
+    rows.push(end - index >= 2
+      ? { kind: "toolGroup", entries: entries.slice(index, end) }
+      : { kind: "entry", entry });
+    index = end;
+  }
+  return rows;
+}
+
 function formatOutlineTime(timestamp: string): string | null {
   let ms = Date.parse(timestamp);
   if (Number.isNaN(ms)) {
@@ -38,10 +64,11 @@ function roleLabel(role: SessionOutlineEntry["role"], t: (key: string, params?: 
   if (role === "user") return t("outline.roleUser");
   if (role === "summary") return t("outline.roleSummary");
   if (role === "ask") return t("outline.roleAsk");
+  if (role === "subagent") return t("outline.roleSubagent");
   return t("outline.roleAssistant");
 }
 
-function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] }) {
+function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] | "tools" }) {
   const common = { width: 12, height: 12, viewBox: "0 0 12 12", fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (role === "user") {
     return (
@@ -60,6 +87,23 @@ function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] }) {
   }
   if (role === "ask") {
     return <span aria-hidden="true" style={{ fontSize: 12, fontWeight: 700 }}>?</span>;
+  }
+  if (role === "tools") {
+    return (
+      <svg {...common}>
+        <path d="M7 2a3 3 0 0 0-3.7 3.7L1.5 7.5a1.4 1.4 0 0 0 2 2l1.8-1.8A3 3 0 0 0 9 4L7.2 5 6 3.8 7 2Z" />
+      </svg>
+    );
+  }
+  if (role === "subagent") {
+    return (
+      <svg {...common}>
+        <circle cx="3" cy="2" r="1" />
+        <circle cx="3" cy="10" r="1" />
+        <circle cx="9" cy="7" r="1" />
+        <path d="M3 3v6M3 4h3a3 3 0 0 1 3 2" />
+      </svg>
+    );
   }
   return (
     <svg {...common}>
@@ -89,7 +133,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
     if (itemTop < viewTop || itemBottom > viewBottom) {
       list.scrollTop = Math.max(0, itemTop - Math.round(list.clientHeight / 3));
     }
-  }, [readingEntryId]);
+  }, [readingEntryId, targetEntryId]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -119,14 +163,20 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
         </div>
       )}
       <div ref={listRef} role="list" aria-label={t("outline.title")} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
-        {entries.map((entry) => {
-          const isReading = readingEntryId === entry.entryId;
-          const isTarget = targetEntryId === entry.entryId;
+        {groupOutlineEntries(entries).map((row) => {
+          const isToolGroup = row.kind === "toolGroup";
+          const entry = row.kind === "toolGroup" ? row.entries[0] : row.entry;
+          const isReading = row.kind === "toolGroup"
+            ? row.entries.some((member) => member.entryId === readingEntryId)
+            : readingEntryId === entry.entryId;
+          const isTarget = row.kind === "toolGroup"
+            ? row.entries.some((member) => member.entryId === targetEntryId)
+            : targetEntryId === entry.entryId;
           const time = formatOutlineTime(entry.timestamp);
           return (
             <div key={entry.entryId} role="listitem">
             <button
-              ref={isReading ? activeItemRef : undefined}
+              ref={isReading || (isToolGroup && isTarget) ? activeItemRef : undefined}
               type="button"
               data-outline-entry={entry.entryId}
               aria-current={isReading ? "location" : undefined}
@@ -143,11 +193,11 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                   aria-hidden="true"
                   className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md"
                   style={{
-                    color: entry.role === "ask" ? "var(--accent)" : entry.role === "user" ? "var(--accent)" : entry.role === "summary" ? "#d97706" : "var(--text-muted)",
+                    color: isToolGroup || entry.role === "ask" || entry.role === "user" ? "var(--accent)" : entry.role === "summary" ? "#d97706" : entry.role === "subagent" ? "#8b5cf6" : "var(--text-muted)",
                     background: "color-mix(in srgb, var(--text-dim) 12%, transparent)",
                   }}
                 >
-                  <RoleGlyph role={entry.role} />
+                  <RoleGlyph role={isToolGroup ? "tools" : entry.role} />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span
@@ -158,7 +208,15 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-dim">
                     <span className="flex-shrink-0 tabular-nums">#{entry.ordinal + 1}</span>
-                    <span className="flex-shrink-0">{roleLabel(entry.role, t)}</span>
+                    <span className="flex-shrink-0">{isToolGroup ? t("outline.roleTools") : roleLabel(entry.role, t)}</span>
+                    {row.kind === "toolGroup" && (
+                      <span
+                        className="flex-shrink-0 rounded-full px-1.5 py-0.5 tabular-nums"
+                        style={{ color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 12%, transparent)" }}
+                      >
+                        ×{row.entries.length}
+                      </span>
+                    )}
                     {time && <span className="flex-shrink-0 tabular-nums">{time}</span>}
                     {isTarget && navigating && (
                       <span className="inline-block h-2.5 w-2.5 flex-shrink-0 animate-[spin_1s_linear_infinite] rounded-full border border-border border-t-[var(--accent)]" aria-hidden="true" />
