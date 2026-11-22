@@ -194,6 +194,8 @@ interface JournalRecordMeta {
   contextPromptTokens?: number;
   hasImage?: boolean;
   preview?: string;
+  /** assistant only: preview falls back to toolCall labels, with no text. */
+  toolOnly?: boolean;
   /** ask toolResult only: included as an answer in the outline. */
   isAskResult?: boolean;
   askError?: boolean;
@@ -383,6 +385,36 @@ function askResultPreview(details: unknown): string | null {
   return preview;
 }
 
+/** Compact subagent delivery labels without exposing the surrounding notice. */
+function asyncResultPreview(content: unknown): string | null {
+  const length = typeof content === "string" ? 1 : Array.isArray(content) ? content.length : 0;
+  let firstAttributes: string | undefined;
+  let count = 0;
+  for (let i = 0; i < length; i++) {
+    const block = typeof content === "string" ? content : (content as unknown[])[i];
+    const text = typeof block === "string" ? block
+      : isPlainRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "";
+    for (const match of text.matchAll(/<task-result(?=[\s/>])([^<>]*)>/g)) {
+      firstAttributes ??= match[1];
+      count++;
+    }
+  }
+  if (firstAttributes === undefined) return null;
+  let id = "";
+  let status = "";
+  let duration = "";
+  for (const match of firstAttributes.matchAll(/(?:^|\s)(id|status|duration)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    const value = match[2] ?? match[3];
+    if (match[1] === "id") id = value;
+    else if (match[1] === "status") status = value;
+    else duration = value;
+  }
+  let label = id;
+  if (status) label += `${label ? " · " : ""}${status}`;
+  if (duration) label += `${label ? " · " : ""}${duration}`;
+  return label ? appendPreview("", `${label}${count > 1 ? ` +${count - 1}` : ""}`) : null;
+}
+
 function metaFromEntry(entry: Record<string, unknown>, offset: number, end: number): JournalRecordMeta | null {
   const id = entry.id;
   const type = entry.type;
@@ -422,6 +454,7 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         if (block.type === "text") preview = appendPreview(preview, block.text);
         if (preview.length >= PREVIEW_CAP) break;
       }
+      if (message.role === "assistant" && !preview && toolNames.length > 0) meta.toolOnly = true;
     }
     if (message.role === "toolResult" && message.toolName === "ask") {
       meta.isAskResult = true;
@@ -444,6 +477,7 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         if (preview.length >= PREVIEW_CAP) break;
       }
     }
+    if (meta.customType === "async-result") preview = asyncResultPreview(content) ?? preview;
     if (preview) meta.preview = preview;
   } else if (type === "branch_summary") {
     meta.hasSummary = typeof entry.summary === "string" && entry.summary.length > 0;
@@ -802,9 +836,9 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
 
 /**
  * Outline role for a rendered display record, or null when the record is a
- * rendered message that the outline does not list (non-ask toolResult/
- * bashExecution/custom_message). Such positions still count toward ordinals so outline
- * ordinals match the window readers' rendered-message positions exactly.
+ * rendered message that the outline does not list (non-ask toolResult,
+ * bashExecution, or custom_message other than async-result). Such positions
+ * still count toward ordinals to match the window readers exactly.
  */
 function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | null {
   if (meta.type === "message") {
@@ -815,6 +849,7 @@ function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | nul
   }
   if (meta.type === "compaction") return "summary";
   if (meta.type === "branch_summary") return "summary";
+  if (meta.type === "custom_message" && meta.customType === "async-result") return "subagent";
   return null;
 }
 
@@ -1385,7 +1420,7 @@ export async function readSessionOutline(
         if (!meta) continue;
         const role = outlineRole(meta);
         if (!role) continue;
-        entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal });
+        entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal, ...(meta.toolOnly ? { toolOnly: true } : {}) });
       }
       const leafId = resolvedLeaf === undefined ? resolveLeafFromMeta(legacy.metas, legacy.byId) : resolvedLeaf;
       return { anchor, leafId, entries };
@@ -1404,7 +1439,7 @@ export async function readSessionOutline(
       const meta = display[positions[ordinal]];
       const role = outlineRole(meta);
       if (!role) continue;
-      entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal });
+      entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal, ...(meta.toolOnly ? { toolOnly: true } : {}) });
     }
     return { anchor, leafId, entries };
   } finally {
