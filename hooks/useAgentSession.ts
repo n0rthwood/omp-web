@@ -221,7 +221,11 @@ const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const CONTEXT_USAGE_REFRESH_MS = 1000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
+// Must exceed the server-side host cold-start budget (connectToHostWithRetry,
+// lib/session-host-transport.ts:437, 15 s) plus margin for SSE route overhead.
+// A 5 s timeout fired before an idle-reaped host could respawn, causing the
+// first message after idle to fail with EventStreamConnectionError (#122).
+const EVENT_STREAM_CONNECT_TIMEOUT_MS = 20_000;
 // Pre-boundary SSE frames buffer until the journal window installs. The
 // buffer is bounded; on overflow the connection is torn down and re-spliced
 // (the journal holds every durable entry — nothing is silently dropped).
