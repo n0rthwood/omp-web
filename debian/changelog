@@ -1,3 +1,13 @@
+omp-web (0.5.37) jammy; urgency=medium
+
+  * SSE connect timeout (#122): increase client-side EVENT_STREAM_CONNECT_TIMEOUT_MS
+    from 5 s to 20 s so it exceeds the server-side host cold-start budget
+    (connectToHostWithRetry, 15 s). Previously, the first message sent after an
+    idle-reaped host timed out with "Timed out connecting to the agent event
+    stream" even though the host would have become ready a few seconds later.
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 23 Nov 2026 00:00:00 +0000
+
 omp-web (0.5.36) jammy; urgency=medium
 
   * Session outline (#121): consecutive tool-only assistant entries collapse
