@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { stripCustomEntriesFromExportHtml } = await import("./route.ts");
+const { stripCustomEntriesFromExportHtml } = await import("../../../../../lib/session-export-filter.ts");
 
 function embed(data) {
   const b64 = Buffer.from(JSON.stringify(data), "utf8").toString("base64");
