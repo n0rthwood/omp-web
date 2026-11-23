@@ -951,6 +951,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const previousTailEntryId = base.entryIds[base.entryIds.length - 1] ?? null;
         let afterCursor = base.entryIds.length >= 2 ? base.entryIds[base.entryIds.length - 2] : null;
         const deltaAnchor = page.anchor;
+        let firstPage = true;
         for (;;) {
           const deltaParams = new URLSearchParams({ deferThinking: "1", deferMedia: "1", limit: "100" });
           if (afterCursor) deltaParams.set("after", afterCursor);
@@ -972,8 +973,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           // Continuity (#124): an `after` cursor no longer on the fresh active
           // branch (navigate_tree / rewrite / compaction) makes the server
-          // answer with the TAIL window — require the one-entry overlap.
-          if (!deltaContinuesWindow(
+          // answer with the TAIL window — require the one-entry overlap on the
+          // FIRST page only; later pages continue from our own batch cursor.
+          if (firstPage && !deltaContinuesWindow(
             delta.context.messages,
             delta.context.entryIds ?? [],
             previousTailEntryId,
@@ -994,6 +996,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           deltaMessages.push(...delta.context.messages);
           deltaEntryIds.push(...(delta.context.entryIds ?? []));
           if (delta.context.messages.length < 100 || (delta.context.entryIds ?? []).length === 0) break;
+          firstPage = false;
           afterCursor = deltaEntryIds[deltaEntryIds.length - 1];
         }
         const merged = mergeDurableWindow(base.messages, base.entryIds, deltaMessages, deltaEntryIds);
