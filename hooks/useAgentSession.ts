@@ -30,11 +30,14 @@ import type { SessionOutline, SessionOutlineEntry } from "@/lib/session-outline"
 import {
   EARLIER_PAGE_SIZE,
   INITIAL_HISTORY_WINDOW,
+  agentEndContinues,
+  applyRefreshedWindow,
   clearHistoryCache,
   decideWindowRefresh,
+  deltaContinuesWindow,
   mergeDurableWindow,
   readHistoryCache,
-  reconcileLiveSuffix,
+  refreshMayInstall,
   sameAnchor,
   upsertCompletedMessage,
   writeHistoryCache,
@@ -99,6 +102,8 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
 
 interface AgentEvent {
   type: string;
+  /** SDK flags mid-prompt agent_end continuations (#124). */
+  willContinue?: boolean;
   [key: string]: unknown;
 }
 
@@ -473,8 +478,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Non-blocking background-refresh failure indicator (#100).
   const [refreshError, setRefreshError] = useState<RefreshErrorState | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>(cachedTail?.messages ?? []);
-  const [entryIds, setEntryIds] = useState<string[]>(cachedTail?.entryIds ?? []);
+  // Transcript state (#124): ONE state object — messages = durable journal
+  // window followed by the live not-yet-durable tail; entryIds is PARALLEL TO
+  // THE DURABLE PREFIX ONLY, so state alone distinguishes durable from live.
+  const [transcript, setTranscript] = useState<{ messages: AgentMessage[]; entryIds: string[] }>({
+    messages: cachedTail?.messages ?? [],
+    entryIds: cachedTail?.entryIds ?? [],
+  });
+  const { messages, entryIds } = transcript;
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
@@ -611,9 +622,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const hasRenderedContentRef = useRef(false);
   const refreshErrorRef = useRef<RefreshErrorState | null>(null);
   hasRenderedContentRef.current = data !== null || messages.length > 0 || streamState.isStreaming || agentRunning || bashRunning;
-  // Synchronous mirror of the rendered list for the prepend handler (#99).
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
+  // Single-flight latest-wins history refresh controller (#124): at most one
+  // background refresh in flight; triggers arriving meanwhile coalesce into
+  // exactly one trailing refresh. historyRefreshSeq counts requests;
+  // historyInstalledSeq tracks the newest response already installed, so an
+  // older late response can never overwrite a newer window.
+  const historyRefreshInFlightRef = useRef(false);
+  const historyRefreshPendingRef = useRef(false);
+  const historyRefreshSeqRef = useRef(0);
+  const historyInstalledSeqRef = useRef(0);
 
   // --- #104 follow controller: use-stick-to-bottom is the sole follow engine ---
   // ResizeObserver tracks ALL transcript growth (stream/media/tools); the
@@ -729,11 +746,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     );
   }, []);
 
+  // Explicit installs (bootstrap, branch navigation, compaction): the fresh
+  // durable window REPLACES the transcript — the old branch's live tail must
+  // never leak across a scope change. Background refreshes use
+  // applyRefreshedWindow instead (live tail reconciled by content key).
   const installDurableWindow = useCallback((sid: string, snapshot: HistoryWindowSnapshot) => {
     windowRef.current = snapshot;
     cacheBootedUserRef.current = null;
-    setMessages(snapshot.messages);
-    setEntryIds(snapshot.entryIds);
+    setTranscript({ messages: snapshot.messages, entryIds: snapshot.entryIds });
+    setHistoryHasEarlier(snapshot.hasEarlier);
+    persistWindowCache(sid);
+  }, [persistWindowCache]);
+
+  // Background refresh install (#124): pure content-keyed merge inside ONE
+  // functional update over the CURRENT state — durable part = the installed
+  // window, live part = previously-live messages not now durable anywhere in
+  // it, always after all durable ones. windowRef is recomputed from the same
+  // current state so concurrent live appends can never desynchronize it.
+  const applyWindowRefresh = useCallback((sid: string, snapshot: HistoryWindowSnapshot) => {
+    cacheBootedUserRef.current = null;
+    setTranscript((prev) => {
+      const next = applyRefreshedWindow(prev.messages, prev.entryIds.length, snapshot.messages, snapshot.entryIds);
+      windowRef.current = { ...snapshot, messages: next.messages.slice(0, next.entryIds.length), entryIds: next.entryIds };
+      return next;
+    });
     setHistoryHasEarlier(snapshot.hasEarlier);
     persistWindowCache(sid);
   }, [persistWindowCache]);
@@ -758,8 +794,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const hasEarlier = snapshot.hasEarlier || snapshot.anchor.entryCount > tailIds.length;
     windowRef.current = { ...snapshot, messages: tailMessages, entryIds: tailIds, hasEarlier, headEntryId: tailIds[0] ?? snapshot.headEntryId };
     cacheBootedUserRef.current = webUsername;
-    setMessages(tailMessages);
-    setEntryIds(tailIds);
+    setTranscript({ messages: tailMessages, entryIds: tailIds });
     setHistoryHasEarlier(hasEarlier);
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -840,19 +875,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  // Bounded journal refresh (#99): always `tail=5`, never a full-history GET.
-  // `boundaryAnchor` is the FRESH atomic splice anchor from the connected SSE
-  // frame — passed to bound the initial read. Background refreshes pass none:
-  // the server captures a fresh boundary (live) or derives the file anchor
-  // (dead), and reuse/delta/replace is decided against the window on screen.
+  // Bounded journal refresh (#99/#124): always `tail=5`, never a full-history
+  // GET. `boundaryAnchor` is the FRESH atomic splice anchor from the connected
+  // SSE frame — passed to bound the initial read. Background refreshes pass
+  // none: the server captures a fresh boundary (live) or derives the file
+  // anchor (dead); reuse/delta/replace is decided against the window on screen
+  // and the merge is idempotent and order-independent (entry-id keyed).
+  // Returns the agent state when includeState, else true on install/reuse and
+  // false on failure/stale discard (callers gate settlement on truthiness).
   const loadSession = useCallback(async (
     sid: string,
     showLoading = false,
     includeState = false,
     boundaryAnchor: JournalAnchor | null = null,
     allowRetry = true,
-  ) => {
+  ): Promise<{ running: boolean; state?: AgentStateResponse } | boolean | null> => {
     const generation = historyLoadGenRef.current;
+    const requestSeq = ++historyRefreshSeqRef.current;
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
@@ -863,8 +902,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (showLoading) {
           setData(null);
           setActiveLeafId(null);
-          setMessages([]);
-          setEntryIds([]);
+          setTranscript({ messages: [], entryIds: [] });
           setHistoryHasEarlier(false);
           windowRef.current = null;
           clearHistoryCache(typeof localStorage === "undefined" ? null : localStorage, webUsernameRef.current, sid);
@@ -874,7 +912,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           clearHistoricView();
           setOutline([]);
           outlineAnchorRef.current = null;
-          return null;
+          return false;
         }
         // A background refresh hitting a vanished session is still a failed
         // load (#100): route it through the same non-blocking indicator.
@@ -882,7 +920,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return null;
+      if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return false;
+      // Latest-wins (#124): discard a response superseded by a newer install,
+      // or one whose anchor is older than the installed window. No state is
+      // touched — a failed/stale refresh keeps the rendered chat intact (#100).
+      const page = d.historyPage;
+      if (page && !refreshMayInstall(windowRef.current?.anchor ?? null, page.anchor, requestSeq, historyInstalledSeqRef.current)) {
+        return false;
+      }
       setData(d);
       setContextUsage(d.contextUsage ?? null);
       setPlanMode(d.planMode ?? null);
@@ -895,7 +940,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
       }
 
-      const page = d.historyPage;
+      // (page was read above, before the latest-wins guard.)
       const base = windowRef.current;
       const decision = decideWindowRefresh(base?.anchor ?? null, base?.entryIds.length ?? 0, page);
       if (decision === "reuse" && base) {
@@ -918,12 +963,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             context: { messages: AgentMessage[]; entryIds: string[] };
             historyPage: HistoryPage;
           };
-          if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return null;
+          if (sessionIdRef.current !== sid || historyLoadGenRef.current !== generation) return false;
           if (!delta.historyPage || !sameAnchor(delta.historyPage.anchor, deltaAnchor)) {
             // The journal moved under the walk (rewrite/branch): start over
             // with a fresh bounded tail — at most once, so a persistently
             // rewriting journal cannot livelock into unbounded re-entry.
             if (!allowRetry) throw new Error("Session journal changed during history refresh");
+            windowRef.current = null;
+            return loadSession(sid, showLoading, includeState, null, false);
+          }
+          // Continuity (#124): an `after` cursor no longer on the fresh active
+          // branch (navigate_tree / rewrite / compaction) makes the server
+          // answer with the TAIL window — never append a wrong-branch delta.
+          if (!deltaContinuesWindow(
+            delta.context.messages,
+            delta.context.entryIds ?? [],
+            afterCursor ?? "",
+            base.entryIds[base.entryIds.length - 1] ?? null,
+          )) {
+            if (!allowRetry) throw new Error("Session branch changed during history refresh");
             windowRef.current = null;
             return loadSession(sid, showLoading, includeState, null, false);
           }
@@ -936,10 +994,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             windowRef.current = null;
             return loadSession(sid, showLoading, includeState, null, false);
           }
-          deltaMessages.push(...batchMessages);
-          deltaEntryIds.push(...batchIds);
-          if (batchMessages.length < 100 || batchIds.length === 0) break;
-          afterCursor = batchIds[batchIds.length - 1];
+          deltaMessages.push(...delta.context.messages);
+          deltaEntryIds.push(...(delta.context.entryIds ?? []));
+          if (delta.context.messages.length < 100 || (delta.context.entryIds ?? []).length === 0) break;
+          afterCursor = deltaEntryIds[deltaEntryIds.length - 1];
         }
         const merged = mergeDurableWindow(base.messages, base.entryIds, deltaMessages, deltaEntryIds);
         if (!merged) {
@@ -947,28 +1005,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           windowRef.current = null;
           return loadSession(sid, showLoading, includeState, null, false);
         }
-        // Messages that just became durable leave the live tail (no
-        // duplicates); identical older messages survive untouched.
-        setMessages((prev) => [
-          ...merged.messages,
-          ...reconcileLiveSuffix(prev.slice(base.messages.length), deltaMessages),
-        ]);
-        setEntryIds(merged.entryIds);
-        setHistoryHasEarlier(base.hasEarlier);
-        windowRef.current = {
+        // Entry-id keyed merge: durable window = base + unseen delta entries;
+        // the live tail is reconciled by content key inside the functional
+        // update — never a length slice of a render-synced ref.
+        historyInstalledSeqRef.current = requestSeq;
+        applyWindowRefresh(sid, {
           messages: merged.messages,
           entryIds: merged.entryIds,
           anchor: deltaAnchor,
           hasEarlier: base.hasEarlier,
           headEntryId: base.headEntryId,
           leafId: deltaAnchor.leafId,
-        };
-        persistWindowCache(sid);
+        });
       } else if (page) {
-        // Replace (cold/rewrite/branch): keep the streamed-but-not-yet-durable
-        // live tail so a mid-turn refresh never drops in-flight messages.
-        const liveSuffix = base ? messagesRef.current.slice(base.messages.length) : [];
-        installDurableWindow(sid, {
+        // Replace (cold/rewrite/branch): install the fresh tail; the pure
+        // merge keeps streamed-but-not-yet-durable live messages whose key is
+        // not now durable anywhere in the window.
+        historyInstalledSeqRef.current = requestSeq;
+        applyWindowRefresh(sid, {
           messages: d.context.messages,
           entryIds: d.context.entryIds ?? [],
           anchor: page.anchor,
@@ -976,10 +1030,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           headEntryId: page.headEntryId,
           leafId: page.anchor.leafId,
         });
-        if (liveSuffix.length > 0) {
-          const kept = reconcileLiveSuffix(liveSuffix, d.context.messages);
-          if (kept.length > 0) setMessages((prev) => [...prev, ...kept]);
-        }
       } else {
         // No historyPage: the remote predates journal pagination. Rendering
         // its full context would violate the bounded window — keep the
@@ -991,13 +1041,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Durable window changed: refresh the outline (deduped, never per token).
       void loadOutline();
       if (showLoading) setLoading(false);
-      if (!includeState) return null;
+      if (!includeState) return true;
 
       try {
         const stateRes = await fetch(apiPath(`/api/sessions/${encodeURIComponent(sid)}/state`));
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) return null;
+        if (sessionIdRef.current !== sid) return true;
 
         const liveState = agentState.state;
         if (liveState) {
@@ -1016,12 +1066,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return agentState;
       } catch (e) {
         console.error("Failed to load agent state:", e);
-        return null;
+        return true;
       }
     } catch (e) {
       // A late rejection for a session we already navigated away from must
       // not touch the new view (same guard as the success path).
-      if (sessionIdRef.current !== sid) return null;
+      if (sessionIdRef.current !== sid) return false;
       const message = String(e);
       // #100: a failed refresh is fatal only while nothing is rendered. Once
       // messages/streaming are on screen it becomes a non-blocking count that
@@ -1034,11 +1084,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         refreshErrorRef.current = next;
         setRefreshError(next);
       }
-      return null;
+      return false;
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [installDurableWindow, persistWindowCache, loadOutline, clearHistoricView]);
+  }, [applyWindowRefresh, loadOutline, clearHistoricView]);
+
+  // Single-flight background refresh (#124): completion triggers (agent_end
+  // final / agent_settled / prompt_done / poll fallback) collapse into one
+  // refresh; triggers arriving while one is in flight coalesce into exactly
+  // one trailing refresh. Explicit loads (bootstrap, branch navigation, Load
+  // earlier, compaction) keep calling loadSession directly and invalidate
+  // through historyLoadGenRef.
+  const requestHistoryRefresh = useCallback(async (sid: string) => {
+    if (historyRefreshInFlightRef.current) {
+      historyRefreshPendingRef.current = true;
+      return;
+    }
+    historyRefreshInFlightRef.current = true;
+    try {
+      do {
+        historyRefreshPendingRef.current = false;
+        if (sessionIdRef.current !== sid) break;
+        await loadSession(sid);
+      } while (historyRefreshPendingRef.current && sessionIdRef.current === sid);
+    } finally {
+      historyRefreshInFlightRef.current = false;
+      historyRefreshPendingRef.current = false;
+    }
+  }, [loadSession]);
 
   // Branch navigation: bounded tail of the selected leaf (never full history).
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
@@ -1068,8 +1142,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           leafId: leafId ?? d.historyPage.anchor.leafId,
         });
       } else {
-        setMessages(d.context.messages);
-        setEntryIds(d.context.entryIds ?? []);
+        setTranscript({ messages: d.context.messages, entryIds: d.context.entryIds ?? [] });
       }
     } catch (e) {
       console.error("Failed to load context:", e);
@@ -1141,19 +1214,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setHistoryHasEarlier(false);
         return;
       }
-      const next: HistoryWindowSnapshot = {
-        messages: [...pageMessages, ...current.messages],
-        entryIds: [...pageEntryIds, ...current.entryIds],
-        anchor: current.anchor,
-        hasEarlier: d.historyPage.hasEarlier,
-        headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
-        leafId: current.leafId,
-      };
       capturePrependAnchor();
-      windowRef.current = next;
-      setMessages((prev) => [...pageMessages, ...prev]);
-      setEntryIds((prev) => [...pageEntryIds, ...prev]);
-      setHistoryHasEarlier(next.hasEarlier);
+      // Prepend the earlier page INSIDE the durable prefix of the current
+      // state; the live tail keeps its position after all durable entries.
+      setTranscript((prev) => {
+        const next = {
+          messages: [...pageMessages, ...prev.messages],
+          entryIds: [...pageEntryIds, ...prev.entryIds],
+        };
+        const durableCount = Math.min(next.entryIds.length, next.messages.length);
+        windowRef.current = {
+          messages: next.messages.slice(0, durableCount),
+          entryIds: next.entryIds,
+          anchor: current.anchor,
+          hasEarlier: d.historyPage.hasEarlier,
+          headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
+          leafId: current.leafId,
+        };
+        return next;
+      });
+      setHistoryHasEarlier(d.historyPage.hasEarlier);
       persistWindowCache(sid);
       refreshErrorRef.current = null;
       setRefreshError(null);
@@ -1712,7 +1792,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       display: true,
       timestamp: Date.now(),
     };
-    setMessages((previous) => [...previous, message]);
+    setTranscript((prev) => ({ messages: [...prev.messages, message], entryIds: prev.entryIds }));
   }, []);
 
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
@@ -1903,8 +1983,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
     if (promptRunIdRef.current !== runId) return;
+    let refreshed = false;
     try {
-      if (sid) await loadSession(sid);
+      if (sid) refreshed = Boolean(await loadSession(sid));
     } finally {
       if (promptRunIdRef.current !== runId) return;
       const promptWasPending = rpcPromptPendingRef.current;
@@ -1912,7 +1993,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       rpcPromptPendingRef.current = false;
       sdkAgentActiveRef.current = false;
       optimisticUserMessageKeyRef.current = null;
-      const wasRunning = settleUiStage();
+      // The streaming bubble is cleared only once the refresh has merged the
+      // final message_end into the journal window (#124); on a failed refresh
+      // keep it — the next successful refresh/reconcile settles the stage.
+      const wasRunning = refreshed ? settleUiStage() : agentRunningRef.current;
       if (promptWasPending) {
         notifyPromptStage(runId);
       } else if (agentWasActive && wasRunning) {
@@ -1961,8 +2045,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const data = await res.json() as { state?: AgentStateResponse };
         if (data.state?.isBashRunning) continue;
 
-        await loadSession(sid);
-        if (bashRecoveryIdRef.current !== recoveryId || sessionIdRef.current !== sid) return;
+        const refreshed = await loadSession(sid);
+        if (bashRecoveryIdRef.current !== recoveryId || sessionIdRef.current !== sid || !refreshed) return;
         bashRunningRef.current = false;
         setBashRunning(false);
         setPendingBash(null);
@@ -2090,15 +2174,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end":
-        // One logical prompt can emit multiple agent_end events before retrying,
-        // compacting, or continuing messages queued by extension handlers.
-        // Keep the stream open until prompt_done/agent_settled and the idle grace.
-        if (!agentRunningRef.current) break;
+        // Mid-prompt agent_end (retry/recovery/compaction continuation carries
+        // willContinue:true, #124): neither settle the streaming stage nor
+        // refresh — the final settlement performs the single coalesced
+        // completion refresh. The stream stays open until prompt_done /
+        // agent_settled and the idle grace.
+        if (!agentRunningRef.current || agentEndContinues(event)) break;
         setAgentPhase(null);
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
+          void requestHistoryRefresh(sessionIdRef.current);
           fetch(apiPath(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`))
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
@@ -2125,7 +2211,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const wasRunning = settleUiStage();
         setIsCompacting(false);
         if (sid) {
-          void loadSession(sid);
+          void requestHistoryRefresh(sid);
           scheduleEventStreamClose(sid);
         }
         if (wasRunning) onAgentEnd?.();
@@ -2152,7 +2238,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!promptWasPending && !firstNotification) break;
 
           const sid = sessionIdRef.current;
-          if (sid) void loadSession(sid);
+          if (sid) void requestHistoryRefresh(sid);
           // An extension-injected agent may already have started before the
           // command's prompt_done. Keep that active stage visible and let its
           // agent_settled event perform the next completion transition.
@@ -2212,10 +2298,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
+        // Late-event handling (#124): message_end is accepted even after the
+        // run settled (frames can arrive after settlement) — the durable
+        // in-place upsert makes a journaled copy idempotent instead of a
+        // duplicate. Streaming start/update stay guarded below so buffered
+        // frames never resurrect a ghost streaming bubble.
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
@@ -2230,16 +2317,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
-          setMessages((prev) => {
-            const durableCount = Math.min(windowRef.current?.entryIds.length ?? 0, prev.length);
+          setTranscript((prev) => {
+            const prevMessages = prev.messages;
+            const durableCount = Math.min(prev.entryIds.length, prevMessages.length);
+            const commit = (messages: AgentMessage[]) => ({ messages, entryIds: prev.entryIds });
             if (optimisticKey) {
-              for (let index = prev.length - 1; index >= durableCount; index -= 1) {
-                const candidate = prev[index];
+              for (let index = prevMessages.length - 1; index >= durableCount; index -= 1) {
+                const candidate = prevMessages[index];
                 if (candidate.role !== "user" || userMessageKey(candidate) !== optimisticKey) continue;
                 if (optimisticKey === deliveredKey) return prev;
-                const next = [...prev];
+                const next = [...prevMessages];
                 next[index] = delivered;
-                return next;
+                return commit(next);
               }
             }
             // Splice race (#99): the entry may already sit in the DURABLE
@@ -2254,18 +2343,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const deliveredTs = delivered.timestamp;
             const durableSearchFrom = deliveredTs != null ? 0 : Math.max(0, durableCount - 5);
             for (let index = durableCount - 1; index >= durableSearchFrom; index -= 1) {
-              const candidate = prev[index];
+              const candidate = prevMessages[index];
               if (candidate.role !== "user" || userMessageKey(candidate) !== deliveredKey) continue;
               if (deliveredTs != null && candidate.timestamp !== deliveredTs) continue;
-              const next = [...prev];
+              const next = [...prevMessages];
               next[index] = delivered;
-              return next;
+              return commit(next);
             }
-            return [...prev, delivered];
+            return commit([...prevMessages, delivered]);
           });
         } else if (completed) {
           const normalized = normalizeToolCalls(completed);
-          setMessages((prev) => upsertCompletedMessage(prev, normalized));
+          setTranscript((prev) => {
+            const nextMessages = upsertCompletedMessage(prev.messages, prev.entryIds.length, normalized);
+            return nextMessages === prev.messages ? prev : { messages: nextMessages, entryIds: prev.entryIds };
+          });
         }
         const sid = sessionIdRef.current;
         if (sid) void refreshContextUsage(sid);
@@ -2411,7 +2503,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // away — drop the overlay and reload the post-compaction tail.
             windowRef.current = null;
             clearHistoricView();
-            void loadSession(sid);
+            void requestHistoryRefresh(sid);
             void refreshContextUsage(sid);
           }
         }
@@ -2420,7 +2512,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, clearHistoricView, confirmPrompt, handleExtensionUiRequest, loadOutline, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, cancelEventStreamGrace, clearHistoricView, confirmPrompt, handleExtensionUiRequest, loadOutline, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, requestHistoryRefresh, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   // A send path that failed before the server accepted the submission must
@@ -2492,7 +2584,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    setTranscript((prev) => ({ messages: [...prev.messages, userMsg], entryIds: prev.entryIds }));
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
@@ -2564,10 +2656,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       closeEvents();
       const optimisticKey = optimisticUserMessageKeyRef.current;
       if (optimisticKey) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
+        setTranscript((prev) => {
+          const last = prev.messages[prev.messages.length - 1];
           return last?.role === "user" && userMessageKey(last) === optimisticKey
-            ? prev.slice(0, -1)
+            ? { messages: prev.messages.slice(0, -1), entryIds: prev.entryIds }
             : prev;
         });
       }
@@ -3203,8 +3295,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       const loaded = await loadSession(sid, windowRef.current === null, true);
       if (!current()) return;
-      applyAgentState(loaded);
-      if (loaded?.running) {
+      const loadedState = loaded && typeof loaded === "object" ? loaded : null;
+      applyAgentState(loadedState);
+      if (loadedState?.running) {
         const connection = await connectEvents(sid);
         if (!current()) return;
         releaseLiveBuffer();
@@ -3345,7 +3438,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand, handleSetPlanMode,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData,
     uploadSessionFiles,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
