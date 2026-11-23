@@ -1,3 +1,20 @@
+omp-web (0.5.39) jammy; urgency=medium
+
+  * Session outline (#125): injected system reminders (eager-task-prelude)
+    appear as a System row with a teal gear icon and a one-line preview of
+    the reminder. Outline icons are unified (user, assistant, tools,
+    subagent, system, summary), tool groups are visually subdued, and the
+    active row gets an accent frame.
+  * Conversation (#125): the system prelude marker now shows in the default
+    conversation window of long sessions instead of being cut off by the
+    bounded tail.
+  * Session export (#125): out-of-band custom entries (tool_execution_start,
+    system-prompt-digest, prompt-profile markers) are filtered from the
+    exported HTML, so it no longer shows rows of empty "custom" messages;
+    the conversation tree stays intact (parents relinked, leaf remapped).
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 23 Nov 2026 00:00:00 +0000
+
 omp-web (0.5.38) jammy; urgency=medium
 
   * Live transcript (#124): the final assistant answer no longer jumps away
