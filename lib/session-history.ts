@@ -1321,6 +1321,26 @@ export async function readSessionHistory(
       entryIds.push(meta.id);
     }
 
+    // Injected system preludes (eager-task-prelude) carry the session's
+    // system-reminder context. The bounded DEFAULT window must surface the
+    // prelude even when it sits far up the chain, so prepend it as its own
+    // message without pulling in the intervening history. Explicit
+    // navigation (around/after/before) stays body-bounded.
+    if (options.around === undefined && options.after === undefined && options.before === undefined && start > 0) {
+      for (let i = 0; i < start; i++) {
+        const meta = display[renderPositions[i]];
+        if (meta.type !== "custom_message" || meta.customType !== "eager-task-prelude") continue;
+        const body = bodyAt(fd, index, meta);
+        if (!body) break;
+        const message = entryToUiMessage(body, deferOptions);
+        if (message) {
+          messages.unshift(message);
+          entryIds.unshift(meta.id);
+        }
+        break; // the chain-head prelude is the only one to surface
+      }
+    }
+
     // Frozen contract: an around window MUST include its target. A body that
     // cannot be read/converted inside the slice is a structured failure, not
     // a silently relocated page.
