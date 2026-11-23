@@ -2,8 +2,8 @@
 //
 // Pure client-side logic for the windowed history UI: the localStorage cache
 // (machine/user/session scoped, anchor-versioned, byte-bounded), the
-// journal/live splice reconciliation (content/position upserts — wire
-// messageIds are process-scoped, never journal entry ids), and the
+// journal/live reconciliation keyed by entry id / content (wire messageIds
+// are process-scoped, never journal entry ids), and the
 // reuse/delta/replace refresh decision. No React, no fs: the hook composes
 // these with the bounded tail/before/after routes.
 
@@ -184,20 +184,28 @@ export function sameAnchor(left: JournalAnchor | null | undefined, right: Journa
     && left.mtimeMs === right.mtimeMs;
 }
 
-/** True when `fresh` is a pure append past `cached` on the same branch. */
+/**
+ * True when `fresh` could be a pure append past `cached` (#124): the journal
+ * grew (entryCount and sizeBytes non-decreasing, not identical). The active
+ * leafId advances on EVERY append, so it is NOT a branch-identity signal —
+ * continuity is validated by the delta walk, which falls back to replace
+ * when the cached cursor no longer sits on the fresh active branch.
+ */
 export function anchorIsAppend(cached: JournalAnchor, fresh: JournalAnchor): boolean {
-  return cached.leafId === fresh.leafId
-    && fresh.entryCount >= cached.entryCount
-    && fresh.sizeBytes >= cached.sizeBytes;
+  if (cached.entryCount === 0 || cached.lastEntryId === null) return false;
+  return fresh.entryCount >= cached.entryCount
+    && fresh.sizeBytes >= cached.sizeBytes
+    && !sameAnchor(cached, fresh);
 }
 
 export type WindowRefreshDecision = "reuse" | "delta" | "replace";
 
 /**
  * How a bounded tail response relates to the window already on screen:
- * unchanged anchor → keep every cached page; pure append → fetch only the
- * delta after the cached last durable entry; anything else (cold start,
- * rewrite, branch switch, shrink) → replace with the fresh tail.
+ * unchanged anchor → keep every cached page; grown journal → fetch only the
+ * delta after the cached last durable entry (the walk validates branch
+ * continuity); anything else (cold start, rewrite, shrink) → replace with
+ * the fresh tail.
  */
 export function decideWindowRefresh(
   cachedAnchor: JournalAnchor | null,
@@ -267,39 +275,112 @@ export function mergeDurableWindow(
 }
 
 /**
- * The live suffix (messages past the durable window) after a refresh:
- * entries the delta just made durable leave the suffix (no duplicates),
- * and local-only command output bubbles drop as a full reload always did.
+ * Continuity gate for a delta walk (#124). readSessionHistory answers an
+ * unknown `after` cursor — rewritten away, off the fresh active branch, or a
+ * non-rendering journal record — with the TAIL window, not the strict-after
+ * slice. The walk therefore starts ONE RENDERED ENTRY BEFORE the window tail
+ * and requires exactly that one entry of overlap: the batch must begin with
+ * the old tail id. Anything else means the walk relocated and the caller must
+ * replace, never append a wrong-branch delta. The overlapping entry is
+ * already durable, so mergeDurableWindow skips it (idempotent).
  */
-export function reconcileLiveSuffix(suffix: AgentMessage[], deltaMessages: AgentMessage[]): AgentMessage[] {
-  const promotedCounts = new Map<string, number>();
-  for (const delta of deltaMessages) {
-    const key = messageContentKey(delta);
-    promotedCounts.set(key, (promotedCounts.get(key) ?? 0) + 1);
-  }
-  return suffix.filter((message) => {
-    const localCommand = message.role === "custom" && message.customType === "command";
-    if (localCommand) return false;
-    const key = messageContentKey(message);
-    const count = promotedCounts.get(key) ?? 0;
-    if (count > 0) {
-      promotedCounts.set(key, count - 1);
-      return false;
-    }
-    return true;
-  });
+export function deltaContinuesWindow(
+  batchMessages: AgentMessage[],
+  batchEntryIds: string[],
+  previousTailEntryId: string | null,
+): boolean {
+  if (batchMessages.length !== batchEntryIds.length) return false;
+  if (previousTailEntryId === null) return true;
+  return batchEntryIds[0] === previousTailEntryId;
 }
 
 /**
- * Idempotent live upsert (#99 splice race): a message_end whose entry is
- * already inside the journal window replaces it in place instead of
- * appending a duplicate. Only the window tail is searched — the raced entry
- * is the newest durable one, and identical older messages must survive.
+ * Transcript model (#124): `messages` is the durable journal window followed
+ * by the live not-yet-durable tail. Durable identity lives in the PARALLEL
+ * entryIds state (parallel to the durable PREFIX, never to live messages),
+ * so state alone distinguishes durable from live without per-message tags.
+ *
+ * A refresh installs the durable window wholesale. Only entries that became
+ * durable in THIS refresh (window ids not already in prevEntryIds) retire
+ * live copies — an identical older durable entry must never delete a fresh
+ * repeated prompt. Live messages are chronological: everything up to and
+ * including the LAST promoted live message is now covered by the journal
+ * window (even when the bounded tail no longer shows those entries), so the
+ * kept live tail is the suffix after it; local command bubbles always drop.
  */
-export function upsertCompletedMessage(messages: AgentMessage[], completed: AgentMessage): AgentMessage[] {
+export function applyRefreshedWindow(
+  prevMessages: AgentMessage[],
+  prevEntryIds: string[],
+  windowMessages: AgentMessage[],
+  windowEntryIds: string[],
+): { messages: AgentMessage[]; entryIds: string[] } {
+  const durableCount = Math.min(prevEntryIds.length, prevMessages.length);
+  const live = prevMessages.slice(durableCount);
+  const known = new Set(prevEntryIds);
+  // Multiplicity-aware promotion by NEWLY durable entries only: one new
+  // durable copy retires exactly one live copy.
+  const promotedCounts = new Map<string, number>();
+  for (let index = 0; index < windowMessages.length; index += 1) {
+    const id = windowEntryIds[index];
+    if (typeof id !== "string" || known.has(id)) continue;
+    const key = messageContentKey(windowMessages[index]);
+    promotedCounts.set(key, (promotedCounts.get(key) ?? 0) + 1);
+  }
+  let cut = -1;
+  for (let index = 0; index < live.length; index += 1) {
+    const key = messageContentKey(live[index]);
+    const count = promotedCounts.get(key) ?? 0;
+    if (count > 0) {
+      promotedCounts.set(key, count - 1);
+      cut = index;
+    }
+  }
+  const kept = live.slice(cut + 1).filter(
+    (message) => !(message.role === "custom" && message.customType === "command"),
+  );
+  return { messages: [...windowMessages, ...kept], entryIds: [...windowEntryIds] };
+}
+
+/** Latest-wins guard (#124): true when a refresh response may install. */
+export function refreshMayInstall(
+  installedAnchor: JournalAnchor | null | undefined,
+  responseAnchor: JournalAnchor | null | undefined,
+  responseSeq: number,
+  installedSeq: number,
+): boolean {
+  if (!responseAnchor) return false;
+  // A newer response already installed: this one is superseded.
+  if (responseSeq < installedSeq) return false;
+  // An older journal position must never overwrite a newer installed window
+  // (concurrent unordered responses; entryCount only grows on append).
+  if (installedAnchor && responseAnchor.entryCount < installedAnchor.entryCount) return false;
+  return true;
+}
+
+/**
+ * One logical prompt can emit multiple agent_end events mid-turn (retry,
+ * recovery, compaction continuation — the SDK flags them willContinue:true).
+ * Only a terminal agent_end settles the streaming stage and triggers the
+ * coalesced completion refresh (#124). Exported decision seam for tests.
+ */
+export function agentEndContinues(event: { willContinue?: unknown }): boolean {
+  return event.willContinue === true;
+}
+
+/**
+ * Idempotent live upsert (#99 splice race, #124): a message_end whose entry
+ * is already durable ANYWHERE in the window replaces the newest durable copy
+ * in place instead of appending a duplicate. Live (not-yet-durable) messages
+ * are never replaced — an identical older live copy is a distinct message.
+ */
+export function upsertCompletedMessage(
+  messages: AgentMessage[],
+  durableCount: number,
+  completed: AgentMessage,
+): AgentMessage[] {
   const key = messageContentKey(completed);
-  const searchFrom = Math.max(0, messages.length - 5);
-  for (let index = messages.length - 1; index >= searchFrom; index -= 1) {
+  const searchTo = Math.min(durableCount, messages.length);
+  for (let index = searchTo - 1; index >= 0; index -= 1) {
     if (messageContentKey(messages[index]) === key) {
       if (messages[index] === completed) return messages;
       const next = [...messages];
@@ -308,4 +389,44 @@ export function upsertCompletedMessage(messages: AgentMessage[], completed: Agen
     }
   }
   return [...messages, completed];
+}
+
+/** Per-session single-flight refresh controller contract (#124). */
+export interface RefreshCoalescer {
+  /** Trigger a refresh; coalesces into one trailing run while in flight. */
+  request: (sid: string) => Promise<void>;
+}
+
+/**
+ * Single-flight, latest-wins refresh coalescer (#124), keyed PER SESSION:
+ * at most one run per session id in flight; triggers arriving meanwhile
+ * coalesce into exactly ONE trailing run, started after the in-flight run
+ * settles (success or failure). Sessions are independent — a trigger for B
+ * while A is in flight runs for B, never lost behind A's loop.
+ */
+export function createRefreshCoalescer(run: (sid: string) => Promise<unknown>): RefreshCoalescer {
+  const inFlight = new Set<string>();
+  const pending = new Set<string>();
+  const request = async (sid: string): Promise<void> => {
+    if (inFlight.has(sid)) {
+      pending.add(sid);
+      return;
+    }
+    inFlight.add(sid);
+    try {
+      do {
+        pending.delete(sid);
+        try {
+          await run(sid);
+        } catch {
+          // The runner owns failure routing (#100); a failed run still
+          // releases the flight and honors a coalesced trailing trigger.
+        }
+      } while (pending.has(sid));
+    } finally {
+      inFlight.delete(sid);
+      pending.delete(sid);
+    }
+  };
+  return { request };
 }

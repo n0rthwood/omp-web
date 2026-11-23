@@ -359,8 +359,9 @@ export interface WebCompat {
   handleOutboundFrame(frame: unknown): void;
   emitSessionInfo(): void;
   hasLiveSubagents(): boolean;
-  /** Atomic durable journal/live boundary (#99), captured synchronously. */
-  captureHistoryBoundary(): HostHistoryBoundary;
+  /** Atomic durable journal/live boundary (#99/#124); awaits in-flight
+   *  message persistence, then snapshots flush + seq synchronously. */
+  captureHistoryBoundary(): Promise<HostHistoryBoundary>;
   /**
    * Admitted prompts still awaiting prompt_result that carry a client draft
    * identity (#88). Journal-mode attach (#99) skips ring replay, so the host
@@ -374,8 +375,7 @@ export interface WebCompat {
 }
 
 /**
- * Durable journal anchor + atomic wire splice (#99), captured synchronously in
- * ONE callback (journal-mode attach handshake / get_history_anchor control):
+ * Durable journal anchor + atomic wire splice (#99), captured synchronously:
  *   1. flushSync makes every appended entry durable (append-only fast path;
  *      pending rewrites are materialized synchronously by the SDK);
  *   2. stat + cheap SDK accessors snapshot the durable position — no entry
@@ -384,6 +384,10 @@ export interface WebCompat {
  *      emitted at seq ≤ boundary.seq; live frames after it are post-boundary.
  * A transient (unpersisted) session yields the empty anchor; nothing durable
  * exists, so the whole conversation is live-stream territory.
+ * Synchronous CORE only: callers that must cover already-emitted message_end
+ * frames use captureDurableJournalBoundary, which settles the SDK's queued
+ * persistence first (#124 — flushSync cannot flush an entry the persistence
+ * microtask has not appended yet).
  */
 export function captureJournalBoundary(sessionManager: SessionManager, currentSeq: () => number): HostHistoryBoundary {
   const anchor: HostJournalAnchor = {
@@ -407,6 +411,43 @@ export function captureJournalBoundary(sessionManager: SessionManager, currentSe
     anchor.leafId = sessionManager.getLeafId();
   }
   return { seq: currentSeq(), journal: anchor };
+}
+
+/** Bounded settle passes: a quiet wire converges in one; continuous streaming
+ *  keeps queueing new persistence, so the loop stops at the cap (see below). */
+const MAX_PERSISTENCE_SETTLE_PASSES = 20;
+
+/**
+ * Durable variant of captureJournalBoundary (#124). The SDK queues
+ * message_end persistence BEFORE emitting the frame, so every message_end
+ * already on the wire (seq ≤ s0) is registered in the SDK's pending set at
+ * call time and is awaited by settleInFlightMessagePersistence. Frames
+ * emitted DURING the await queue new persistence and advance the wire seq;
+ * re-settle until the wire is quiet, then snapshot synchronously (no await
+ * between flush/stat/entries/seq) so the anchor covers every emitted
+ * message_end.
+ * Bound hit (continuous streaming): capture anyway. seq is still the true
+ * wire position, but a message_end emitted during the final pass may lack
+ * its journal entry — the guarantee holds only for frames emitted before
+ * the last settle began. The completion-time refresh runs after settlement
+ * (prompt_done/agent_settled), when the wire is quiet and the loop converges,
+ * so the boundary the client finally merges against is fully durable.
+ */
+export async function captureDurableJournalBoundary(
+  session: Pick<AgentSession, "settleInFlightMessagePersistence">,
+  sessionManager: SessionManager,
+  currentSeq: () => number,
+): Promise<HostHistoryBoundary> {
+  for (let pass = 0; pass < MAX_PERSISTENCE_SETTLE_PASSES; pass++) {
+    const seqBefore = currentSeq();
+    try {
+      await session.settleInFlightMessagePersistence();
+    } catch {
+      // allSettled internally, so this should not reject; capture anyway.
+    }
+    if (currentSeq() === seqBefore) break;
+  }
+  return captureJournalBoundary(sessionManager, currentSeq);
 }
 
 export function createWebCompat(options: WebCompatOptions): WebCompat {
@@ -1198,9 +1239,10 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
 
           case "get_history_anchor":
             // #99: fresh atomic boundary for EACH browser subscription.
-            // Host-owned control: durable flush + seq snapshot synchronously,
+            // Host-owned control: settle in-flight message persistence
+            // (#124), then durable flush + seq snapshot synchronously;
             // never forwarded to the SDK, never a historical dump.
-            respondSuccess(id, type, captureJournalBoundary(sessionManager, () => transport.currentSeq()));
+            respondSuccess(id, type, await captureDurableJournalBoundary(session, sessionManager, () => transport.currentSeq()));
             return;
           case "get_state":
             respondSuccess(id, type, buildWebState());
@@ -1516,7 +1558,7 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
     handleOutboundFrame,
     emitSessionInfo,
     hasLiveSubagents: () => subagents.getSubagents().length > 0,
-    captureHistoryBoundary: () => captureJournalBoundary(sessionManager, () => transport.currentSeq()),
+    captureHistoryBoundary: () => captureDurableJournalBoundary(session, sessionManager, () => transport.currentSeq()),
     pendingPromptIdentities: () => [...promptMeta.entries()]
       .filter((entry): entry is [string, PromptMeta & { promptId: string }] => typeof entry[1].promptId === "string" && entry[1].promptId.length > 0)
       .map(([id, meta]) => ({

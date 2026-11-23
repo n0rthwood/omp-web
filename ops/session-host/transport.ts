@@ -177,11 +177,12 @@ export interface SessionTransportOptions {
   /** A client finished its attach handshake — emit the session_info mirror. */
   onAttach?: () => void;
   /**
-   * Fresh journal-mode attach (#99): capture the atomic journal/live boundary
-   * SYNCHRONOUSLY inside the attach handshake (durable flush + seq snapshot in
-   * one callback). No historical replay follows; the ack carries the boundary.
+   * Fresh journal-mode attach (#99/#124): capture the atomic journal/live
+   * boundary — may settle in-flight message persistence asynchronously
+   * before the synchronous flush + seq snapshot. No historical replay
+   * follows; the ack carries the boundary (or boundaryError on failure).
    */
-  onJournalAttach?: () => HostHistoryBoundary;
+  onJournalAttach?: () => HostHistoryBoundary | Promise<HostHistoryBoundary>;
   /** Activity-whitelist tap hit (agent/prompt/subagent lifecycle). */
   onActivity?: (frameType: string) => void;
   /** Tap a parsed SDK outbound frame AFTER it was queued (response overlays). */
@@ -572,28 +573,19 @@ export async function createSessionTransport(options: SessionTransportOptions): 
   function handleAttach(client: ClientState, frame: Record<string, unknown>): void {
     // Handshake: host_hello first (raw, unsequenced), then the attach ack.
     // Legacy attach replays the client's gap from its last-seen seq BEFORE the
-    // ack; journal-mode attach (#99) NEVER replays history — the boundary is
-    // captured synchronously here (durable flush + seq in one callback) so the
-    // journal view and the live stream splice with no gap and no duplication.
-    // Everything is enqueued synchronously inside the socket data callback,
-    // so no live frame can interleave ahead of the handshake.
+    // ack; journal-mode attach (#99) NEVER replays history — the boundary
+    // splices the journal view and the live stream with no gap and no
+    // duplication. Hello/ready enqueue synchronously inside the socket data
+    // callback; the journal boundary may settle in-flight persistence first
+    // (#124), so its ack lands when the capture resolves. Live frames emitted
+    // meanwhile enqueue ahead of the ack — safe: boundary.seq is snapshotted
+    // atomically with the journal flush AFTER settlement, so every such frame
+    // is post-boundary and the wrapper (pre-ack dedupe, lastSeenSeq from the
+    // ack) keeps the stream consistent.
     const hostInfo: OutboundFrameInfo = { seqStart: true, bulk: false };
     enqueue(client, helloBytes, hostInfo);
     if (readyBytes) enqueue(client, readyBytes, hostInfo);
     const journalMode = frame.historyMode === "journal";
-    let boundary: HostHistoryBoundary | undefined;
-    let boundaryError: string | undefined;
-    if (journalMode) {
-      // Capture can throw (latched disk failure, mid-rewrite atomic batch).
-      // An exception escaping the socket data callback would kill the host
-      // and strand the live session — surface it on the ack instead.
-      try {
-        boundary = options.onJournalAttach?.();
-      } catch (error) {
-        boundaryError = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`[omp-web-host] journal attach boundary capture failed: ${boundaryError}\n`);
-      }
-    }
     if (!journalMode) {
       const lastSeen = typeof frame.lastSeenSeq === "number" && frame.lastSeenSeq >= 0 ? frame.lastSeenSeq : 0;
       // Legacy gap replay is must-deliver; the bulk drop policy applies to
@@ -601,7 +593,42 @@ export async function createSessionTransport(options: SessionTransportOptions): 
       // fails: the ack carries boundaryError and the client's next
       // get_history_anchor rejects retryably (#100 preserves the view).
       for (const chunk of replayFrom(lastSeen)) enqueue(client, chunk, hostInfo);
+      enqueueAttachAck(client, hostInfo, undefined, undefined);
+      return;
     }
+    // Capture can throw (latched disk failure, mid-rewrite atomic batch).
+    // An exception escaping the socket data callback would kill the host
+    // and strand the live session — surface it on the ack instead.
+    let capture: HostHistoryBoundary | Promise<HostHistoryBoundary>;
+    try {
+      const result = options.onJournalAttach?.();
+      if (result === undefined) {
+        enqueueAttachAck(client, hostInfo, undefined, undefined);
+        return;
+      }
+      capture = result;
+    } catch (error) {
+      ackBoundaryFailure(client, hostInfo, error);
+      return;
+    }
+    void Promise.resolve(capture).then(
+      (boundary) => enqueueAttachAck(client, hostInfo, boundary, undefined),
+      (error) => ackBoundaryFailure(client, hostInfo, error),
+    );
+  }
+
+  function ackBoundaryFailure(client: ClientState, hostInfo: OutboundFrameInfo, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[omp-web-host] journal attach boundary capture failed: ${message}\n`);
+    enqueueAttachAck(client, hostInfo, undefined, message);
+  }
+
+  function enqueueAttachAck(
+    client: ClientState,
+    hostInfo: OutboundFrameInfo,
+    boundary: HostHistoryBoundary | undefined,
+    boundaryError: string | undefined,
+  ): void {
     enqueue(client, TEXT_ENCODER.encode(`${JSON.stringify({
       type: "host_attach",
       seq,

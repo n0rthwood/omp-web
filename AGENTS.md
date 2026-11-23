@@ -788,6 +788,43 @@ the socket run dir and idle override). An isolated instance launched with a fake
 `HOME` keeps its journals inside that HOME — verify with
 `tr '\0' '\n' < /proc/<host pid>/environ | grep '^HOME='`.
 
+### Live transcript refresh must stay idempotent (#124)
+Before the host split, `loadSession` replaced `messages` with the live
+session's FULL in-memory context — every refresh was a complete snapshot, so
+concurrent or out-of-order refreshes were harmless. The bounded window (#99)
+made refresh a stateful merge, and it silently broke that property: the final
+answer jumped from the tail to index 4 on every completed turn. The rules that
+keep it correct (`lib/history-window.ts`, `hooks/useAgentSession.ts`):
+
+- **`leafId` is not a branch identity.** The active leaf advances on every
+  appended entry, so `anchorIsAppend` gates on journal growth only; branch
+  continuity is proven by the delta walk, which starts one rendered entry
+  before the window tail and requires that overlap on the first page
+  (`deltaContinuesWindow`). The server answers an unknown `after` cursor with
+  the tail window, so a missing overlap means replace, never append.
+- **Transcript = durable prefix + live tail.** `entryIds` is parallel to the
+  durable prefix only; live (SSE `message_end`, no entry id) messages always
+  follow every durable one. `applyRefreshedWindow` retires live copies only
+  against entries that became durable in that refresh, inside a functional
+  `setTranscript` update — never slice a render-synced ref by length.
+- **One refresh at a time per session, latest wins.** Completion events
+  (`agent_end`, `agent_settled`, `prompt_done`, poll fallback) go through
+  `createRefreshCoalescer`; a response older than the installed window is
+  dropped. `agent_end` with `willContinue: true` is mid-prompt (retry,
+  recovery, compaction continuation) — it neither clears the streaming
+  bubble nor refreshes.
+- **A boundary covers persistence, not just flush.** The SDK emits
+  `message_end` before its queued persistence runs; `flushSync()` cannot
+  write an entry not yet appended. The host's `captureDurableJournalBoundary`
+  awaits `settleInFlightMessagePersistence()` until the wire seq is quiet,
+  then snapshots flush + seq synchronously.
+
+Diagnosing a live-render bug: capture host UDS frames, a `curl -N` SSE tap,
+browser EventSource frames, and React `messages` state (fiber on
+`.chat-session-scroll`, requiring message `content` plus a state queue — a
+generic role-array scan picks the outline array) to separate transport loss
+from client merge.
+
 ### ToolCall field normalization
 omp stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and `ChatWindow.handleAgentEvent()` (streaming).
 

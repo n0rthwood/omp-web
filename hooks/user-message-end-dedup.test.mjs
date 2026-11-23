@@ -9,8 +9,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const { upsertCompletedMessage, messageContentKey } = await import("../lib/history-window.ts");
-
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 const toJs = (src) => transpiler.transformSync(src);
 
@@ -27,32 +25,32 @@ function sliceBetween(source, startMarker, endMarker) {
 // Real identity helpers (string vs array content normalization, image
 // signatures) — extracted verbatim from the hook.
 const helperSource = sliceBetween(hookSource, "function extractMessageText(", "function readCompactResult(");
-const extractMessageText = new Function(`${toJs(helperSource)}\nreturn extractMessageText;`)();
 const userMessageKey = new Function(`${toJs(helperSource)}\nreturn userMessageKey;`)();
 
-// Real message_end user-branch reducer body (everything inside setMessages).
-const reducerStart = "setMessages((prev) => {";
+// Real message_end user-branch reducer body (everything inside setTranscript).
+// The prevMessages line disambiguates it from applyWindowRefresh's updater.
+const reducerStart = "setTranscript((prev) => {\n            const prevMessages = prev.messages;";
 const reducerBodyStart = hookSource.indexOf(reducerStart);
 assert.ok(reducerBodyStart >= 0);
 const reducerBodyEnd = hookSource.indexOf("});\n        } else if (completed)", reducerBodyStart);
 assert.ok(reducerBodyEnd > reducerBodyStart);
 const reducerSource = hookSource.slice(reducerBodyStart + reducerStart.length, reducerBodyEnd);
 
-// Reducer factory: binds the real upsert/messageContentKey plus per-test state.
+// Reducer factory: binds the real identity helpers plus per-test state. The
+// hook's transcript state is {messages, entryIds} with entryIds parallel to
+// the durable prefix (#124); windowSize is that durable count.
 const makeReducer = new Function(
-  "upsertCompletedMessage",
   "userMessageKey",
-  "messageContentKey",
-  `return (prev, delivered, optimisticKey, windowSize) => {
+  `return (prevMessages, delivered, optimisticKey, windowSize) => {
      const deliveredKey = userMessageKey(delivered);
-     const windowRef = { current: windowSize > 0 ? { entryIds: { length: windowSize } } : null };
+     const prev = { messages: prevMessages, entryIds: Array.from({ length: windowSize }, (_, i) => \`e\${i}\`) };
      ${toJs(reducerSource)}
    };`,
 );
 
 function runReducer(prev, delivered, optimisticKey, windowSize = 0) {
-  const reduce = makeReducer(upsertCompletedMessage, userMessageKey, messageContentKey);
-  return reduce(prev, delivered, optimisticKey, windowSize);
+  const reduce = makeReducer(userMessageKey);
+  return reduce(prev, delivered, optimisticKey, windowSize).messages;
 }
 
 const user = (text, timestamp = 100) => ({ role: "user", content: text, timestamp });
