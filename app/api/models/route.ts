@@ -49,7 +49,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     thinkingLevels[key] = [...getSupportedEfforts(m)];
   }
 
-  const defaultRole = readDefaultModelRole(settings);
+  const defaultRole = readDefaultModelRole(settings, visible);
   const initial = selectInitialModelScope(scope, {
     ...(defaultRole ? { defaultModel: defaultRole } : {}),
   });

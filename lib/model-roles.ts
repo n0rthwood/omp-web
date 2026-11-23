@@ -67,17 +67,22 @@ function toModelRef(model: Model<Api>, thinkingLevel?: string): ModelRoleModelRe
  * The `default` role as a plain model reference.
  *
  * Session startup uses this the way pi-web used `settings.defaultModel`: as the
- * preferred model when the browser did not pick one explicitly.
+ * preferred model when the browser did not pick one explicitly. Resolution goes
+ * through omp's own selector parser against `availableModels`, so ids that
+ * contain colons (`openrouter/…:free`) match literally and only a trailing
+ * thinking level is stripped — startup applies thinking separately. Returns
+ * `undefined` when no selector is configured or it matches nothing, leaving
+ * startup's first-in-scope fallback in charge.
  */
-export function readDefaultModelRole(settings: Settings): { provider: string; modelId: string } | undefined {
+export function readDefaultModelRole(
+  settings: Settings,
+  availableModels: readonly Model<Api>[],
+): { provider: string; modelId: string } | undefined {
   const selector = settings.getModelRole("default");
   if (!selector) return undefined;
-  const slash = selector.indexOf("/");
-  if (slash <= 0) return undefined;
-  // Strip a `:thinkingLevel` suffix; startup applies thinking separately.
-  const modelId = selector.slice(slash + 1).split(":")[0];
-  if (!modelId) return undefined;
-  return { provider: selector.slice(0, slash), modelId };
+  const resolution = resolveModelRoleValue(selector, [...availableModels], { settings });
+  if (!resolution.model) return undefined;
+  return { provider: resolution.model.provider, modelId: resolution.model.id };
 }
 
 /**
