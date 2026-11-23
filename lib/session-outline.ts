@@ -8,8 +8,9 @@ import type { JournalAnchor } from "./session-history";
 export interface SessionOutlineEntry {
   entryId: string;
   /** #109 adds ask tool answers without changing existing message ordinals.
-   * #121 adds subagent async-result deliveries as their own category. */
-  role: "user" | "assistant" | "summary" | "ask" | "subagent";
+   * #121 adds subagent async-result deliveries as their own category.
+   * #121b adds injected system context (eager-task-prelude reminders). */
+  role: "user" | "assistant" | "summary" | "ask" | "subagent" | "system";
   /** Bounded deterministic plain text, incl tool names if no text. */
   preview: string;
   timestamp: string;

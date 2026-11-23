@@ -415,6 +415,25 @@ function asyncResultPreview(content: unknown): string | null {
   return label ? appendPreview("", `${label}${count > 1 ? ` +${count - 1}` : ""}`) : null;
 }
 
+/** Compact injected-reminder label: first non-empty line inside the
+ * <system-reminder> wrapper, tags stripped; null falls back to raw preview
+ * when the wrapper is absent or the reminder text is empty. */
+function systemReminderPreview(content: unknown): string | null {
+  const length = typeof content === "string" ? 1 : Array.isArray(content) ? content.length : 0;
+  for (let i = 0; i < length; i++) {
+    const block = typeof content === "string" ? content : (content as unknown[])[i];
+    const text = typeof block === "string" ? block
+      : isPlainRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "";
+    const match = /<system-reminder(?:\s[^<>]*)?>([\s\S]*?)<\/system-reminder>/.exec(text);
+    if (!match) continue;
+    for (const line of match[1].split("\n")) {
+      const cleaned = line.replace(/<\/?system-reminder(?:\s[^<>]*)?>/g, "").trim();
+      if (cleaned) return appendPreview("", cleaned);
+    }
+  }
+  return null;
+}
+
 function metaFromEntry(entry: Record<string, unknown>, offset: number, end: number): JournalRecordMeta | null {
   const id = entry.id;
   const type = entry.type;
@@ -478,6 +497,7 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
       }
     }
     if (meta.customType === "async-result") preview = asyncResultPreview(content) ?? preview;
+    if (meta.customType === "eager-task-prelude") preview = systemReminderPreview(content) ?? preview;
     if (preview) meta.preview = preview;
   } else if (type === "branch_summary") {
     meta.hasSummary = typeof entry.summary === "string" && entry.summary.length > 0;
@@ -837,8 +857,9 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
 /**
  * Outline role for a rendered display record, or null when the record is a
  * rendered message that the outline does not list (non-ask toolResult,
- * bashExecution, or custom_message other than async-result). Such positions
- * still count toward ordinals to match the window readers exactly.
+ * bashExecution, or custom_message other than async-result and
+ * eager-task-prelude). Such positions still count toward ordinals to match
+ * the window readers exactly.
  */
 function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | null {
   if (meta.type === "message") {
@@ -850,6 +871,7 @@ function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | nul
   if (meta.type === "compaction") return "summary";
   if (meta.type === "branch_summary") return "summary";
   if (meta.type === "custom_message" && meta.customType === "async-result") return "subagent";
+  if (meta.type === "custom_message" && meta.customType === "eager-task-prelude") return "system";
   return null;
 }
 
