@@ -65,6 +65,7 @@ function roleLabel(role: SessionOutlineEntry["role"], t: (key: string, params?: 
   if (role === "summary") return t("outline.roleSummary");
   if (role === "ask") return t("outline.roleAsk");
   if (role === "subagent") return t("outline.roleSubagent");
+  if (role === "system") return t("outline.roleSystem");
   return t("outline.roleAssistant");
 }
 
@@ -105,10 +106,22 @@ function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] | "tools" }) {
       </svg>
     );
   }
+  if (role === "system") {
+    // 6-tooth cog: outer tooth ring + inner hub circle.
+    return (
+      <svg {...common}>
+        <path d="M5.1 1.2h1.8l.3 1.4a3.5 3.5 0 0 1 1.2.7l1.4-.5.9 1.6-1.1 1a3.5 3.5 0 0 1 0 1.4l1.1 1-.9 1.6-1.4-.5a3.5 3.5 0 0 1-1.2.7l-.3 1.4H5.1l-.3-1.4a3.5 3.5 0 0 1-1.2-.7l-1.4.5-.9-1.6 1.1-1a3.5 3.5 0 0 1 0-1.4l-1.1-1 .9-1.6 1.4.5a3.5 3.5 0 0 1 1.2-.7l.3-1.4Z" />
+        <circle cx="6" cy="6" r="1.6" />
+      </svg>
+    );
+  }
+  // assistant: robot head with antenna + two eyes.
   return (
     <svg {...common}>
-      <rect x="2" y="3" width="8" height="6.5" rx="1.6" />
-      <path d="M4.4 6h.01M7.6 6h.01" strokeWidth="1.8" />
+      <rect x="2.5" y="4" width="7" height="6" rx="1.6" />
+      <path d="M6 4V2.2" />
+      <circle cx="6" cy="1.6" r="0.6" />
+      <path d="M4.5 7h.01M7.5 7h.01" strokeWidth="1.8" />
     </svg>
   );
 }
@@ -166,6 +179,8 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
         {groupOutlineEntries(entries).map((row) => {
           const isToolGroup = row.kind === "toolGroup";
           const entry = row.kind === "toolGroup" ? row.entries[0] : row.entry;
+          // Tools are de-emphasized: dim glyph, no accent, slightly faded row.
+          const subdued = isToolGroup || (entry.role === "assistant" && entry.toolOnly === true);
           const isReading = row.kind === "toolGroup"
             ? row.entries.some((member) => member.entryId === readingEntryId)
             : readingEntryId === entry.entryId;
@@ -179,13 +194,15 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
               ref={isReading || (isToolGroup && isTarget) ? activeItemRef : undefined}
               type="button"
               data-outline-entry={entry.entryId}
+              data-outline-subdued={subdued ? "true" : undefined}
               aria-current={isReading ? "location" : undefined}
               aria-label={t("outline.jumpLabel", { index: entry.ordinal + 1, preview: entry.preview })}
               onClick={() => onJump(entry.entryId)}
               className="mb-1 block w-full min-w-0 rounded-lg border px-2 py-1.5 text-left transition-colors"
               style={{
-                borderColor: isTarget ? "var(--accent)" : isReading ? "color-mix(in srgb, var(--accent) 45%, var(--border))" : "transparent",
-                background: isReading ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "transparent",
+                borderColor: isTarget || isReading ? "var(--accent)" : "transparent",
+                background: isReading ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent",
+                opacity: subdued ? 0.75 : undefined,
               }}
             >
               <span className="flex min-w-0 items-start gap-2">
@@ -193,7 +210,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                   aria-hidden="true"
                   className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md"
                   style={{
-                    color: isToolGroup || entry.role === "ask" || entry.role === "user" ? "var(--accent)" : entry.role === "summary" ? "#d97706" : entry.role === "subagent" ? "#8b5cf6" : "var(--text-muted)",
+                    color: subdued ? "var(--text-dim)" : entry.role === "ask" || entry.role === "user" ? "var(--accent)" : entry.role === "assistant" ? "var(--success)" : entry.role === "summary" ? "#d97706" : entry.role === "subagent" ? "#8b5cf6" : entry.role === "system" ? "#0d9488" : "var(--text-muted)",
                     background: "color-mix(in srgb, var(--text-dim) 12%, transparent)",
                   }}
                 >
@@ -212,7 +229,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                     {row.kind === "toolGroup" && (
                       <span
                         className="flex-shrink-0 rounded-full px-1.5 py-0.5 tabular-nums"
-                        style={{ color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 12%, transparent)" }}
+                        style={{ color: "var(--text-dim)", background: "color-mix(in srgb, var(--text-dim) 15%, transparent)" }}
                       >
                         ×{row.entries.length}
                       </span>

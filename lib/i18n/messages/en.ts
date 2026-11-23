@@ -317,6 +317,7 @@ export const enLocale: LocalePlugin = {
     "outline.roleSummary": "Summary",
     "outline.roleAsk": "Answer",
     "outline.roleSubagent": "Subagent",
+    "outline.roleSystem": "System",
     "outline.roleTools": "Tools",
     "outline.jumpLabel": "Message {index}: {preview}",
     "outline.followOn": "Following",

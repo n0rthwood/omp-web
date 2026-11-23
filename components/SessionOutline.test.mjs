@@ -52,6 +52,17 @@ test("a lone tool-only assistant entry remains a normal entry row", () => {
   assert.deepEqual(groupOutlineEntries([only]), [{ kind: "entry", entry: only }]);
 });
 
+test("system entries break tool runs like other visible roles", () => {
+  const before = [entry(0), entry(1)];
+  const breaker = entry(2, { role: "system", toolOnly: undefined, preview: "<system-reminder>" });
+  const after = [entry(3), entry(4)];
+  assert.deepEqual(groupOutlineEntries([...before, breaker, ...after]), [
+    { kind: "toolGroup", entries: before },
+    { kind: "entry", entry: breaker },
+    { kind: "toolGroup", entries: after },
+  ]);
+});
+
 for (const role of ["user", "assistant", "ask", "summary", "subagent"]) {
   test(`${role === "assistant" ? "text-assistant" : role} entries break tool runs`, () => {
     const before = [entry(0), entry(1)];
@@ -146,11 +157,70 @@ for (const variant of ["rail", "drawer"]) {
     assert.match(html, /aria-label="Message 9: Worker finished"/);
     assert.doesNotMatch(html, /×\d/);
   });
+
+  test(`${variant} tool rows are subdued: dim glyph, faded row, no accent color`, () => {
+    const groupHtml = renderOutline([entry(0), entry(1)], { variant });
+    const groupRow = groupHtml.match(/<button[^>]*data-outline-entry="entry-0"[^>]*>/)[0];
+    assert.match(groupRow, /data-outline-subdued="true"/);
+    assert.match(groupRow, /opacity:0\.75/);
+    assert.doesNotMatch(groupHtml, /color:var\(--accent\)/, "no accent-colored glyph or badge in tool groups");
+    assert.match(groupHtml, /color:var\(--text-dim\)/);
+    assert.match(groupHtml, /M7 2a3 3 0 0 0/);
+
+    const loneHtml = renderOutline([entry(2)], { variant });
+    const loneRow = loneHtml.match(/<button[^>]*data-outline-entry="entry-2"[^>]*>/)[0];
+    assert.match(loneRow, /data-outline-subdued="true"/);
+    assert.match(loneRow, /opacity:0\.75/);
+    assert.match(loneHtml, /color:var\(--text-dim\)/);
+    assert.doesNotMatch(loneHtml, /color:var\(--accent\)/);
+  });
+
+  test(`${variant} reading rows get a solid accent frame and accent-tinted background`, () => {
+    const item = entry(3, { role: "user", toolOnly: undefined, preview: "hello" });
+    const html = renderOutline([item], { variant, readingEntryId: item.entryId });
+    const row = html.match(/<button[^>]*data-outline-entry="entry-3"[^>]*>/)[0];
+    assert.match(row, /aria-current="location"/);
+    assert.match(row, /border-color:var\(--accent\)/);
+    assert.match(row, /background:color-mix\(in srgb, var\(--accent\) 12%, transparent\)/);
+    assert.doesNotMatch(row, /data-outline-subdued/);
+    const idle = renderOutline([item], { variant });
+    const idleRow = idle.match(/<button[^>]*data-outline-entry="entry-3"[^>]*>/)[0];
+    assert.match(idleRow, /border-color:transparent/);
+    assert.match(idleRow, /background:transparent/);
+  });
+
+  test(`${variant} assistant rows use the success-colored robot glyph`, () => {
+    const html = renderOutline([entry(1, { toolOnly: undefined, preview: "Answer text" })], { variant });
+    assert.match(html, />Assistant<\/span>/);
+    assert.match(html, /color:var\(--success\)/);
+    assert.match(html, /<rect x="2\.5" y="4" width="7" height="6" rx="1\.6"/);
+    assert.match(html, /M6 4V2\.2/, "antenna");
+    assert.match(html, /M4\.5 7h\.01M7\.5 7h\.01/, "two eyes");
+    assert.doesNotMatch(html, /data-outline-subdued/);
+  });
+
+  test(`${variant} system rows use the teal gear glyph and System label`, () => {
+    const html = renderOutline([entry(1, { role: "system", toolOnly: undefined, preview: "Injected context" })], { variant });
+    assert.match(html, />System<\/span>/);
+    assert.match(html, /color:#0d9488/);
+    assert.match(html, /M5\.1 1\.2h1\.8/, "cog outline");
+    assert.match(html, /<circle cx="6" cy="6" r="1\.6"/, "cog hub");
+    assert.doesNotMatch(html, /color:var\(--warning\)/, "system teal stays distinct from summary amber");
+    assert.doesNotMatch(html, /data-outline-subdued/);
+  });
+
+  test(`${variant} user rows keep the accent person glyph`, () => {
+    const html = renderOutline([entry(1, { role: "user", toolOnly: undefined, preview: "hi" })], { variant });
+    assert.match(html, /color:var\(--accent\)/);
+    assert.match(html, /<circle cx="6" cy="4" r="2\.2"/);
+  });
 }
 
 test("all built-in locales translate the new outline labels", () => {
   assert.equal(enLocale.messages["outline.roleSubagent"], "Subagent");
   assert.equal(enLocale.messages["outline.roleTools"], "Tools");
+  assert.equal(enLocale.messages["outline.roleSystem"], "System");
   assert.equal(zhCNLocale.messages["outline.roleSubagent"], "子代理");
   assert.equal(zhCNLocale.messages["outline.roleTools"], "工具调用");
+  assert.equal(zhCNLocale.messages["outline.roleSystem"], "系统");
 });
