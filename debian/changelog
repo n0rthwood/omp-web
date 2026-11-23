@@ -1,3 +1,16 @@
+omp-web (0.5.36) jammy; urgency=medium
+
+  * Session outline (#121): consecutive tool-only assistant entries collapse
+    into a single row with a numeric count badge (Tools ×N); clicking the
+    group jumps to the first member. Lone tool-only entries stay ungrouped.
+  * Subagent async-result deliveries (custom_message customType
+    "async-result") now appear in the outline as a dedicated Subagent
+    category with a cleaned "id · status · duration" preview, separate from
+    tool-call rows; previously they were invisible in the outline.
+  * Outline ordinals and jump targets unchanged; en + zh-CN labels added.
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 23 Nov 2026 00:00:00 +0000
+
 omp-web (0.5.35) jammy; urgency=medium
 
   * Fix two transcript rendering defects reported from the browser.
