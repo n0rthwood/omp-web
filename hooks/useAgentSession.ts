@@ -33,6 +33,7 @@ import {
   agentEndContinues,
   applyRefreshedWindow,
   clearHistoryCache,
+  createRefreshCoalescer,
   decideWindowRefresh,
   deltaContinuesWindow,
   mergeDurableWindow,
@@ -42,6 +43,7 @@ import {
   upsertCompletedMessage,
   writeHistoryCache,
   type HistoryWindowSnapshot,
+  type RefreshCoalescer,
 } from "@/lib/history-window";
 
 export interface SessionData {
@@ -622,13 +624,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const hasRenderedContentRef = useRef(false);
   const refreshErrorRef = useRef<RefreshErrorState | null>(null);
   hasRenderedContentRef.current = data !== null || messages.length > 0 || streamState.isStreaming || agentRunning || bashRunning;
-  // Single-flight latest-wins history refresh controller (#124): at most one
-  // background refresh in flight; triggers arriving meanwhile coalesce into
-  // exactly one trailing refresh. historyRefreshSeq counts requests;
-  // historyInstalledSeq tracks the newest response already installed, so an
-  // older late response can never overwrite a newer window.
-  const historyRefreshInFlightRef = useRef(false);
-  const historyRefreshPendingRef = useRef(false);
+  // Latest-wins history refresh bookkeeping (#124): historyRefreshSeq counts
+  // requests; historyInstalledSeq tracks the newest response already
+  // installed, so an older late response can never overwrite a newer window.
+  // Single-flight coalescing lives in the per-session coalescer below.
   const historyRefreshSeqRef = useRef(0);
   const historyInstalledSeqRef = useRef(0);
 
@@ -758,18 +757,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     persistWindowCache(sid);
   }, [persistWindowCache]);
 
-  // Background refresh install (#124): pure content-keyed merge inside ONE
-  // functional update over the CURRENT state — durable part = the installed
-  // window, live part = previously-live messages not now durable anywhere in
-  // it, always after all durable ones. windowRef is recomputed from the same
-  // current state so concurrent live appends can never desynchronize it.
+  // Background refresh install (#124): the durable part is exactly the
+  // snapshot, so windowRef/cache update synchronously; the functional
+  // setTranscript updater stays PURE (StrictMode-safe) and reconciles the
+  // live tail against the current state via applyRefreshedWindow.
   const applyWindowRefresh = useCallback((sid: string, snapshot: HistoryWindowSnapshot) => {
+    windowRef.current = snapshot;
     cacheBootedUserRef.current = null;
-    setTranscript((prev) => {
-      const next = applyRefreshedWindow(prev.messages, prev.entryIds.length, snapshot.messages, snapshot.entryIds);
-      windowRef.current = { ...snapshot, messages: next.messages.slice(0, next.entryIds.length), entryIds: next.entryIds };
-      return next;
-    });
+    setTranscript((prev) => applyRefreshedWindow(prev.messages, prev.entryIds, snapshot.messages, snapshot.entryIds));
     setHistoryHasEarlier(snapshot.hasEarlier);
     persistWindowCache(sid);
   }, [persistWindowCache]);
@@ -947,11 +942,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setHistoryHasEarlier(base.hasEarlier);
       } else if (decision === "delta" && base && page) {
         // Warm refresh: fetch EVERY entry appended past the cached window in
-        // bounded pages (limit 100), walking the after-cursor — never advance
-        // the anchor past unfetched messages.
+        // bounded pages (limit 100). The cursor is the last RENDERED entry id
+        // (anchor.lastEntryId may be a non-rendering record the after-cursor
+        // cannot match); start one entry of overlap before the window tail so
+        // deltaContinuesWindow can detect the server's silent tail fallback.
         const deltaMessages: AgentMessage[] = [];
         const deltaEntryIds: string[] = [];
-        let afterCursor = base.anchor.lastEntryId;
+        const previousTailEntryId = base.entryIds[base.entryIds.length - 1] ?? null;
+        let afterCursor = base.entryIds.length >= 2 ? base.entryIds[base.entryIds.length - 2] : null;
         const deltaAnchor = page.anchor;
         for (;;) {
           const deltaParams = new URLSearchParams({ deferThinking: "1", deferMedia: "1", limit: "100" });
@@ -974,12 +972,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           // Continuity (#124): an `after` cursor no longer on the fresh active
           // branch (navigate_tree / rewrite / compaction) makes the server
-          // answer with the TAIL window — never append a wrong-branch delta.
+          // answer with the TAIL window — require the one-entry overlap.
           if (!deltaContinuesWindow(
             delta.context.messages,
             delta.context.entryIds ?? [],
-            afterCursor ?? "",
-            base.entryIds[base.entryIds.length - 1] ?? null,
+            previousTailEntryId,
           )) {
             if (!allowRetry) throw new Error("Session branch changed during history refresh");
             windowRef.current = null;
@@ -1092,27 +1089,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Single-flight background refresh (#124): completion triggers (agent_end
   // final / agent_settled / prompt_done / poll fallback) collapse into one
-  // refresh; triggers arriving while one is in flight coalesce into exactly
-  // one trailing refresh. Explicit loads (bootstrap, branch navigation, Load
-  // earlier, compaction) keep calling loadSession directly and invalidate
-  // through historyLoadGenRef.
-  const requestHistoryRefresh = useCallback(async (sid: string) => {
-    if (historyRefreshInFlightRef.current) {
-      historyRefreshPendingRef.current = true;
-      return;
-    }
-    historyRefreshInFlightRef.current = true;
-    try {
-      do {
-        historyRefreshPendingRef.current = false;
-        if (sessionIdRef.current !== sid) break;
-        await loadSession(sid);
-      } while (historyRefreshPendingRef.current && sessionIdRef.current === sid);
-    } finally {
-      historyRefreshInFlightRef.current = false;
-      historyRefreshPendingRef.current = false;
-    }
-  }, [loadSession]);
+  // refresh per session; triggers arriving while one is in flight coalesce
+  // into exactly one trailing refresh. Sessions are independent. Explicit
+  // loads (bootstrap, branch navigation, Load earlier, compaction) keep
+  // calling loadSession directly and invalidate through historyLoadGenRef.
+  const refreshCoalescerRef = useRef<RefreshCoalescer | null>(null);
+  if (!refreshCoalescerRef.current) {
+    refreshCoalescerRef.current = createRefreshCoalescer(async (sid) => {
+      if (sessionIdRef.current === sid) await loadSession(sid);
+    });
+  }
+  const requestHistoryRefresh = useCallback((sid: string) => refreshCoalescerRef.current!.request(sid), []);
 
   // Branch navigation: bounded tail of the selected leaf (never full history).
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
@@ -1217,22 +1204,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       capturePrependAnchor();
       // Prepend the earlier page INSIDE the durable prefix of the current
       // state; the live tail keeps its position after all durable entries.
-      setTranscript((prev) => {
-        const next = {
-          messages: [...pageMessages, ...prev.messages],
-          entryIds: [...pageEntryIds, ...prev.entryIds],
-        };
-        const durableCount = Math.min(next.entryIds.length, next.messages.length);
-        windowRef.current = {
-          messages: next.messages.slice(0, durableCount),
-          entryIds: next.entryIds,
-          anchor: current.anchor,
-          hasEarlier: d.historyPage.hasEarlier,
-          headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
-          leafId: current.leafId,
-        };
-        return next;
-      });
+      // windowRef/cache are derived from the pre-fetch window (the prepend
+      // only adds entries BEFORE its head), assigned outside the updater so
+      // the functional update stays pure.
+      const prepended: HistoryWindowSnapshot = {
+        messages: [...pageMessages, ...current.messages],
+        entryIds: [...pageEntryIds, ...current.entryIds],
+        anchor: current.anchor,
+        hasEarlier: d.historyPage.hasEarlier,
+        headEntryId: d.historyPage.headEntryId ?? pageEntryIds[0] ?? current.headEntryId,
+        leafId: current.leafId,
+      };
+      windowRef.current = prepended;
+      setTranscript((prev) => ({
+        messages: [...pageMessages, ...prev.messages],
+        entryIds: [...pageEntryIds, ...prev.entryIds],
+      }));
       setHistoryHasEarlier(d.historyPage.hasEarlier);
       persistWindowCache(sid);
       refreshErrorRef.current = null;
@@ -1983,9 +1970,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
     if (promptRunIdRef.current !== runId) return;
-    let refreshed = false;
     try {
-      if (sid) refreshed = Boolean(await loadSession(sid));
+      if (sid) await loadSession(sid);
     } finally {
       if (promptRunIdRef.current !== runId) return;
       const promptWasPending = rpcPromptPendingRef.current;
@@ -1993,10 +1979,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       rpcPromptPendingRef.current = false;
       sdkAgentActiveRef.current = false;
       optimisticUserMessageKeyRef.current = null;
-      // The streaming bubble is cleared only once the refresh has merged the
-      // final message_end into the journal window (#124); on a failed refresh
-      // keep it — the next successful refresh/reconcile settles the stage.
-      const wasRunning = refreshed ? settleUiStage() : agentRunningRef.current;
+      // This path IS the network-partition fallback: settle the stage even
+      // when the refresh failed (no SSE may remain to settle later). A late
+      // final message_end is still accepted after settlement and merged by
+      // the idempotent durable upsert, so the answer is never lost (#124).
+      const wasRunning = settleUiStage();
       if (promptWasPending) {
         notifyPromptStage(runId);
       } else if (agentWasActive && wasRunning) {
