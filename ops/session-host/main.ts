@@ -297,7 +297,7 @@ async function main(): Promise<void> {
     }
 
     const scope = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
-    const defaultRole = readDefaultModelRole(settings);
+    const defaultRole = readDefaultModelRole(settings, scope.visible);
     const initial = hasExistingMessages
       ? { scopedModels: [...scope.scopedModels], model: undefined, thinkingLevel: undefined }
       : selectInitialModelScope(scope, {
