@@ -2033,6 +2033,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const detailsText = hasDetails ? safeJson(message.details) : "";
   const title = formatCustomType(message.customType);
   const time = formatTime(message.timestamp);
+  const isSystemPrelude = message.customType === "eager-task-prelude";
 
   const copyContent = () => {
     copyText(text || detailsText).then(() => {
@@ -2045,7 +2046,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
     <div style={{ marginBottom: 16 }}>
       <div
         style={{
-          border: "1px solid var(--border)",
+          border: `1px solid ${isSystemPrelude ? "color-mix(in srgb, #0d9488 35%, var(--border))" : "var(--border)"}`,
           borderRadius: 8,
           overflow: "hidden",
           background: isHiddenDisplay ? "var(--bg-subtle)" : "var(--bg)",
@@ -2064,7 +2065,13 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             fontSize: 12,
           }}
         >
-          <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+          {isSystemPrelude && (
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#0d9488" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+              <path d="M5.1 1.2h1.8l.3 1.4a3.5 3.5 0 0 1 1.2.7l1.4-.5.9 1.6-1.1 1a3.5 3.5 0 0 1 0 1.4l1.1 1-.9 1.6-1.4-.5a3.5 3.5 0 0 1-1.2.7l-.3 1.4H5.1l-.3-1.4a3.5 3.5 0 0 1-1.2-.7l-1.4.5-.9-1.6 1.1-1a3.5 3.5 0 0 1 0-1.4l-1.1-1 .9-1.6 1.4.5a3.5 3.5 0 0 1 1.2-.7l.3-1.4Z" />
+              <circle cx="6" cy="6" r="1.6" />
+            </svg>
+          )}
+          <span style={{ color: isSystemPrelude ? "#0d9488" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {title}
           </span>
            {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
