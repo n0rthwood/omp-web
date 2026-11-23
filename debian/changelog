@@ -1,3 +1,23 @@
+omp-web (0.5.38) jammy; urgency=medium
+
+  * Live transcript (#124): the final assistant answer no longer jumps away
+    from the bottom (or vanishes) when a turn completes. The bounded history
+    window treated every journal append as a rewrite because it compared the
+    active leaf id, which advances on every entry; refreshes now append by
+    entry-id continuity, merge the durable window and live tail by entry id
+    (live messages always after durable ones), run one coalesced latest-wins
+    refresh per session, and ignore mid-prompt agent_end (willContinue).
+    Chat and outline agree again.
+  * Session host (#124): history boundaries wait for in-flight message
+    persistence before snapshotting the journal, so a boundary never covers
+    a message_end whose entry is not yet written.
+  * Default model (#123): new sessions honour modelRoles.default when the
+    model id itself contains a colon (OpenRouter :free / :beta variants);
+    the selector is resolved with omp's own parser instead of being cut at
+    the first colon and silently falling back to the first enabled model.
+
+ -- JoySort Release Bot <release@joysort.cc>  Mon, 23 Nov 2026 00:00:00 +0000
+
 omp-web (0.5.37) jammy; urgency=medium
 
   * SSE connect timeout (#122): increase client-side EVENT_STREAM_CONNECT_TIMEOUT_MS
