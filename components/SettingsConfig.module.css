@@ -229,7 +229,7 @@
 .settingDescription { color: var(--text-dim); font-size: 11px; line-height: 1.45; }
 .settingControl { min-width: 0; display: flex; justify-content: flex-end; }
 
-.select, .textInput, .jsonEditor, .numberInput {
+.select, .textInput, .jsonEditor, .numberInput, .dateInput {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -238,8 +238,8 @@
   color: var(--text);
   font: 11px var(--font-mono);
 }
-.select, .textInput, .numberInput { height: 34px; padding: 0 10px; }
-.select:focus, .textInput:focus, .numberInput:focus, .jsonEditor:focus { border-color: var(--accent); }
+.select, .textInput, .numberInput, .dateInput { height: 34px; padding: 0 10px; }
+.select:focus, .textInput:focus, .numberInput:focus, .dateInput:focus, .jsonEditor:focus { border-color: var(--accent); }
 
 .switch {
   width: 38px;
@@ -347,6 +347,27 @@
 .primaryButton:disabled { cursor: wait; opacity: .5; }
 .empty { height: 100%; display: grid; place-items: center; padding: 30px; color: var(--text-dim); font: 12px/1.6 var(--font-mono); text-align: center; }
 
+.staticMappingList { display: flex; flex-direction: column; gap: 14px; }
+.staticMappingCard { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); }
+.staticMappingHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 15px 16px 12px; border-bottom: 1px solid var(--border); }
+.staticMappingName { min-width: 0; }
+.staticMappingName h3 { margin: 0 0 5px; overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.staticMappingName code { color: var(--text-dim); font: 10px var(--font-mono); }
+.staticMappingBadges { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.sourceBadge[data-status="active"], .sourceBadge[data-status="retained"] { border-color: color-mix(in srgb, var(--success) 50%, var(--border)); color: var(--success); }
+.sourceBadge[data-status="revoked"], .sourceBadge[data-status="expired"], .sourceBadge[data-status="deleted"] { border-color: color-mix(in srgb, var(--danger) 50%, var(--border)); color: var(--danger); }
+.staticMappingPath { display: flex; flex-direction: column; gap: 5px; padding: 12px 16px 0; }
+.staticMappingPath a { overflow: hidden; color: var(--accent); font: 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.staticMappingMeta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 0; padding: 13px 16px; }
+.staticMappingMeta > div { min-width: 0; }
+.staticMappingMeta dt { margin-bottom: 4px; color: var(--text-dim); font: 9px var(--font-mono); text-transform: uppercase; }
+.staticMappingMeta dd { margin: 0; overflow: hidden; color: var(--text-muted); font: 10px/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.staticMappingControls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 240px) auto; align-items: end; gap: 12px; padding: 13px 16px; border-top: 1px solid var(--border); }
+.staticMappingControlGroup { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.staticMappingExpiry { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.staticMappingRevoke { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 16px 15px; border-top: 1px solid var(--border); }
+.staticMappingActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.staticMappingActions .dangerButton { height: 30px; padding-inline: 9px; font-size: 10px; }
 @media (max-width: 760px) {
   .backdrop { padding: 8px; }
   .window { width: calc(100vw - 16px); height: calc(100dvh - 16px); grid-template-columns: 82px minmax(0, 1fr); border-radius: 10px; }
@@ -364,4 +385,9 @@
   .themeGrid { grid-template-columns: 1fr; }
   .mcpLayout { grid-template-columns: 1fr; }
   .mcpList { min-height: 180px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .staticMappingHeader, .staticMappingRevoke { align-items: stretch; flex-direction: column; }
+  .staticMappingBadges, .staticMappingActions { justify-content: flex-start; }
+  .staticMappingMeta { grid-template-columns: 1fr 1fr; }
+  .staticMappingControls { grid-template-columns: 1fr; align-items: stretch; }
+  .staticMappingActions .dangerButton { flex: 1 1 auto; }
 }

@@ -1,8 +1,10 @@
 import type { configureHttpDispatcher as ConfigureHttpDispatcher } from "@/lib/http-dispatcher";
 import type { isUnauthenticatedTerminalExposure as IsUnauthenticatedTerminalExposure } from "@/lib/terminals/terminal-gate";
+import type { startStaticMappingCleanup as StartStaticMappingCleanup } from "@/lib/static-mapping-store";
 
 type DispatcherModule = { configureHttpDispatcher: typeof ConfigureHttpDispatcher };
 type TerminalGateModule = { isUnauthenticatedTerminalExposure: typeof IsUnauthenticatedTerminalExposure };
+type StaticMappingCleanupModule = { startStaticMappingCleanup: typeof StartStaticMappingCleanup };
 
 /**
  * Hides the specifier from webpack's static import graph. Next compiles this
@@ -39,6 +41,11 @@ export async function register(): Promise<void> {
       + "   loopback, unless every network that reaches this port is trusted.\n",
     );
   }
+
+  const { startStaticMappingCleanup } = await importRuntimeModule<StaticMappingCleanupModule>(
+    runtimeModuleUrl("lib/static-mapping-store.ts"),
+  );
+  startStaticMappingCleanup();
 
   if (typeof process.versions.bun === "string") return;
 

@@ -1196,6 +1196,10 @@ const HOST_INHERITED_ENV = [
   "PI_PROFILE",
   "OMP_PROFILE",
   "OMP_WEB_USERS_FILE",
+  "OMP_WEB_MACHINE_ID",
+  "OMP_WEB_MACHINE_NAME",
+  "OMP_WEB_STATIC_MAPPINGS_FILE",
+  "OMP_WEB_STATIC_ROOT",
 ] as const;
 
 /** `--setenv=K=V` for each listed key present in `env`; absent keys stay unset host-side. */
@@ -1222,7 +1226,8 @@ async function spawnSessionHost(start: HostStartOptions): Promise<void> {
   // HOST_INHERITED_ENV — the isolation seams the host must agree with this
   // process on: the socket run dir (web computes hostSocketPath from ITS env;
   // a host binding the default dir would never be found), the idle-reap
-  // override, and the agent-dir seams. Unset vars stay unset (host defaults).
+  // override, the agent-dir seams, and the static-content machine/path
+  // configuration. Unset vars stay unset (host defaults).
   argv.push(...hostSpawnSetenvArgs(process.env));
   argv.push(process.execPath, ...hostSpawnArgs(start));
   const proc = Bun.spawn(argv, { cwd: HOST_REPO_ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe" });

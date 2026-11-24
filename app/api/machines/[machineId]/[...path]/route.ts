@@ -4,6 +4,7 @@ import {
   getMachine,
 } from "@/lib/machines/machine-store";
 import { isProxyablePath, proxyToMachine } from "@/lib/machines/remote-request";
+import { enforceStaticDocumentPolicy } from "@/lib/static-mapping-content";
 import { applySessionListVisibilityFilter, isSessionListProxyPath } from "@/lib/machines/proxy-response-filter";
 import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
 import { jsonError, requireMachineGrant } from "../../../web-users/_guard";
@@ -46,7 +47,10 @@ async function handle(req: Request, context: RouteContext): Promise<NextResponse
   }
 
   const search = new URL(req.url).search;
-  const response = await proxyToMachine(machine, req, remotePathname, search);
+  const proxied = await proxyToMachine(machine, req, remotePathname, search);
+  const response = remotePathname.startsWith("/api/static/")
+    ? enforceStaticDocumentPolicy(proxied)
+    : proxied;
   if (isSessionListProxyPath(req.method, remotePathname)) {
     const user = await getWebUserOrSynthetic(req);
     if (user) return applySessionListVisibilityFilter(user, response);

@@ -11,6 +11,7 @@ import { refreshOmpTheme, useTheme } from "@/hooks/useTheme";
 import { useWebUser } from "@/hooks/useWebUser";
 import { WebUsersConfig } from "./WebUsersConfig";
 import { MachinesConfig } from "./MachinesConfig";
+import { StaticContentConfig } from "./StaticContentConfig";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { apiPath } from "@/lib/api-path";
 import type {
@@ -25,7 +26,7 @@ import type {
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
 
-type SettingsSection = "models" | "prompts" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | `settings:${string}`;
+type SettingsSection = "models" | "prompts" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | "static-content" | `settings:${string}`;
 
 interface SettingsConfigProps {
   cwd?: string | null;
@@ -41,6 +42,7 @@ const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; r
   { id: "models", label: "Models", icon: "model", requiresAdmin: true },
   { id: "prompts", label: "Prompts", icon: "context", requiresAdmin: true },
   { id: "themes", label: "Themes", icon: "theme", requiresAdmin: true },
+  { id: "static-content", label: "Static content", icon: "static-content" },
   { id: "skills", label: "Skills", icon: "skill", requiresCwd: true, requiresAdmin: true },
   { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
   { id: "mcp", label: "MCP", icon: "mcp", requiresAdmin: true },
@@ -55,6 +57,7 @@ const ICON_PATHS: Record<string, React.ReactNode> = {
   plugin: <><path d="M8 3v5m8-5v5M6 8h12v5a6 6 0 0 1-12 0V8Zm6 11v3"/></>,
   mcp: <><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 7.5 11 16m5-8.5L13 16M8 6h8"/></>,
   machine: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h.01M7 15h.01M11 9h6M11 15h6"/></>,
+  "static-content": <><path d="M4 4h16v16H4z"/><path d="M8 8h8m-8 4h8m-8 4h5"/></>,
   appearance: <><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></>,
   interaction: <><path d="M4 5h16v11H9l-5 4V5Z"/><path d="M8 9h8m-8 3h5"/></>,
   context: <><path d="M5 3h11l3 3v15H5z"/><path d="M15 3v4h4M8 11h8m-8 4h8"/></>,
@@ -373,7 +376,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
           {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => { const value = event.target.value; navigateSettings(() => setQuery(value)); }} /></div>}
           <nav className={styles.nav}>
             <div className={styles.navLabel}>Configuration</div>
-            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => navigateSettings(() => { setQuery(""); setSection(item.id); })}><SettingsIcon kind={item.icon}/><span>{item.id === "prompts" ? t("prompts.title") : item.label}</span></button>)}
+            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => navigateSettings(() => { setQuery(""); setSection(item.id); })}><SettingsIcon kind={item.icon}/><span>{item.id === "prompts" ? t("prompts.title") : item.id === "static-content" ? t("staticContent.title") : item.label}</span></button>)}
             {isAdminUser && settings && (<>
               <div className={styles.navLabel}>OMP settings</div>
               {settings.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => navigateSettings(() => { setQuery(""); setSection(`settings:${tab.id}`); })}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
@@ -391,7 +394,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
         <main className={styles.content}>
           {visibleCoreSections.length === 0 ? (
             <div className={styles.empty}>No settings are available for this user.</div>
-          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
+          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "static-content" ? <StaticContentConfig /> : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
         </main>
       </div>
     </div>
