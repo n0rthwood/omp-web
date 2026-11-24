@@ -16,14 +16,24 @@ manage all of that machine's mappings.
 - Serve static bytes only. Never expose server-side code, invoke generated
   files as code, or assume a project visible-root/file ACL applies.
 - Do not construct a host name, origin, machine ID, mapping ID, or public URL
-  yourself. Use the `publicPath` returned by the CLI exactly.
+  yourself. Use the `publicPath` returned by the CLI exactly. It is a complete
+  origin-relative public path, normally `/static/<machine-id>/<mapping-id>/index.html`.
 - Write generated files under the returned `writeDir`; do not write them into
   the project tree or guess the server's storage directory.
 - The local CLI is the primary session-host API. It is a same-user local
   execution surface: it does not make an HTTP request and never needs browser
   credentials.
-- In the final response, return only the returned `publicPath` link (no
-  invented domain and no extra explanation).
+- In the final response, return only the returned `publicPath` link — a
+  complete origin-relative path, normally
+  `/static/<machine-id>/<mapping-id>/index.html` (no invented domain and no
+  extra explanation).
+- Generated output must use origin-relative links only. Never hard-code a
+  hostname or a protocol URL (`http://…` / `https://…`) in returned links or
+  in generated HTML. omp-web is reachable through several configured domain
+  exits across regions; an origin-relative link resolves against whichever
+  origin the reader already authenticated on, while a hard-coded domain sends
+  the reader to a different origin and forces cross-domain re-authentication
+  (or fails outright when that exit is not configured for them).
 
 ## Primary API: local packaged CLI
 
@@ -70,7 +80,10 @@ accepted as the nested mutation object. Create and update responses include
 
 Do not construct a URL from the machine name or from a guessed host. Write
 every generated asset beneath the returned `writeDir`, using normal relative
-asset names, then use the returned `publicPath` exactly.
+asset names, then use the returned `publicPath` exactly. Links inside generated
+HTML must stay relative (asset names relative to the document, or
+origin-relative `/static/…` paths) so they keep working on every configured
+domain exit without cross-domain re-authentication.
 
 ### Create
 
@@ -147,6 +160,10 @@ the current authenticated origin and use its normal auth/session path.
 - `GET /static/:machineId/:mappingId/:asset...` serves the authenticated
   origin-relative public path; registered remote IDs stream bytes through the
   Gateway without forwarding browser cookies or authorization headers.
+- A bare mapping URL (`GET /static/:machineId/:mappingId`, with or without a
+  trailing slash) serves `index.html`, falling back to `index.htm`; if neither
+  exists it is 404. Directories are never listed. The Gateway applies the same
+  behavior when forwarding to a remote machine.
 
 Generated HTML, SVG, and XML documents have a restrictive CSP: scripts and
 network connections are disabled while same-origin local styles, images, fonts,

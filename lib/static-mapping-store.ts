@@ -136,10 +136,16 @@ export function isValidStaticAssetSegment(segment: string): boolean {
 }
 
 export function validateStaticAssetSegments(segments: readonly string[]): void {
-  if (segments.length === 0 || segments.some((segment) => !isValidStaticAssetSegment(segment))) {
+  if (segments.some((segment) => !isValidStaticAssetSegment(segment))) {
     throw new StaticMappingError("asset path is invalid", 400, "path");
   }
 }
+
+/**
+ * Fixed index fallback order for a bare mapping URL (`/static/<machine>/<mapping>`).
+ * Only these two names are ever tried; a directory is never listed.
+ */
+const INDEX_FILE_SEGMENTS: readonly string[][] = [["index.html"], ["index.htm"]];
 
 function normalizeEntryFile(input: unknown): string {
   if (input === undefined) return "index.html";
@@ -595,14 +601,16 @@ export function revokeStaticMapping(id: string, content: "delete" | "retain" = "
 /**
  * Resolve an existing file while enforcing registered active state, realpath
  * containment, and symlink rejection. This is the only fs path resolver used
- * by the internal and public static routes.
+ * by the internal and public static routes. An empty segment list (a bare
+ * mapping URL) resolves to index.html, then index.htm; if neither exists it
+ * resolves to null (404). Directories are never listed.
  */
 export function resolveStaticMappingFile(
   id: string,
   segments: readonly string[],
 ): { mapping: StaticMappingRecord; filePath: string; stat: Stats } | null {
   validateStaticMappingId(id);
-  validateStaticAssetSegments(segments);
+  if (segments.length > 0) validateStaticAssetSegments(segments);
   const mapping = getStaticMapping(id);
   if (!mapping || mapping.state !== "active" || !mapping.contentRetained) return null;
   const root = getStaticMappingRoot(id);
@@ -625,24 +633,28 @@ export function resolveStaticMappingFile(
   }
   const rootRel = relative(realStaticRoot, realRoot);
   if (rootRel.startsWith("..") || isAbsolute(rootRel) || rootRel === "") return null;
-  const requested = resolve(root, ...segments);
-  if (requested !== root && !requested.startsWith(`${root}/`)) return null;
-  let realFile: string;
-  try {
-    realFile = realpathSync(requested);
-  } catch {
-    return null;
+  const candidates = segments.length > 0 ? [segments] : INDEX_FILE_SEGMENTS;
+  for (const candidate of candidates) {
+    const requested = resolve(root, ...candidate);
+    if (!requested.startsWith(`${root}/`)) continue;
+    let realFile: string;
+    try {
+      realFile = realpathSync(requested);
+    } catch {
+      continue;
+    }
+    const rel = relative(realRoot, realFile);
+    if (rel.startsWith("..") || isAbsolute(rel) || rel === "") continue;
+    let stat: Stats;
+    try {
+      stat = statSync(realFile);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    return { mapping, filePath: realFile, stat };
   }
-  const rel = relative(realRoot, realFile);
-  if (rel.startsWith("..") || isAbsolute(rel) || rel === "") return null;
-  let stat: Stats;
-  try {
-    stat = statSync(realFile);
-  } catch {
-    return null;
-  }
-  if (!stat.isFile()) return null;
-  return { mapping, filePath: realFile, stat };
+  return null;
 }
 
 /** Run one immediate persisted sweep and install one bounded process timer. */
