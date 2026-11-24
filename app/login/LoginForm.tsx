@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -20,6 +20,8 @@ export function LoginForm({ next }: { next: string }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -95,15 +97,58 @@ export function LoginForm({ next }: { next: string }) {
           onChange={(event) => setUsername(event.target.value)}
           style={inputStyle}
         />
-        <input
-          aria-label="Password"
-          type="password"
-          autoComplete="current-password"
-          placeholder="Password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          style={inputStyle}
-        />
+        <div style={{ position: "relative", width: "100%" }}>
+          <input
+            ref={passwordRef}
+            aria-label="Password"
+            type={passwordVisible ? "text" : "password"}
+            autoComplete="current-password"
+            placeholder="Password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            style={{ ...inputStyle, paddingRight: 34 }}
+          />
+          <button
+            type="button"
+            aria-label={passwordVisible ? "Hide password" : "Show password"}
+            aria-pressed={passwordVisible}
+            title={passwordVisible ? "Hide password" : "Show password"}
+            onClick={() => {
+              setPasswordVisible((v) => !v);
+              passwordRef.current?.focus();
+            }}
+            style={{
+              position: "absolute",
+              right: 5,
+              top: "50%",
+              transform: "translateY(-50%)",
+              width: 24,
+              height: 24,
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {passwordVisible ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.89 1 12a18.45 18.45 0 0 1 5.06-6.94" />
+                <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c5 0 9.27 3.11 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+                <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
+                <path d="M1 1l22 22" />
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12Z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            )}
+          </button>
+        </div>
         {error && (
           <div role="alert" style={{ fontSize: 12, color: "var(--danger)", lineHeight: 1.4 }}>
             {error}
