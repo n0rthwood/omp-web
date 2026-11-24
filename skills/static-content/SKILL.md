@@ -27,16 +27,20 @@ manage all of that machine's mappings.
 
 ## Primary API: local packaged CLI
 
-Use the stable packaged entrypoint:
+Use the fleet checkout entrypoint (it shares the runtime dependency tree used by
+the running omp-web service):
 
 ```sh
-STATIC_CONTENT_CLI="${OMP_WEB_STATIC_CONTENT_CLI:-/opt/omp-web/current/ops/static-content/cli.ts}"
+STATIC_CONTENT_CLI="${OMP_WEB_STATIC_CONTENT_CLI:-/home/joysort/omp/ompweb/ops/static-content/cli.ts}"
 ```
 
-The optional `OMP_WEB_STATIC_CONTENT_CLI` override is for source/worktree
-operation. The CLI honors the host's existing agent-directory and profile
-environment. Send one JSON command through stdin (or pass one JSON argument)
-and parse its JSON response:
+Set `OMP_WEB_STATIC_CONTENT_CLI` to an absolute `ops/static-content/cli.ts`
+path for a source checkout, worktree, or custom deployment. The selected CLI
+path MUST belong to the same checkout/runtime dependency tree as the running
+omp-web service; invoking a packaged overlay whose dependencies live elsewhere
+can fail to resolve `@oh-my-pi`.
+
+The optional override is for source/worktree or custom deployment operation.
 
 ```sh
 printf '%s\n' '{"command":"create","label":"report","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
