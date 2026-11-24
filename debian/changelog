@@ -1,3 +1,12 @@
+omp-web (0.5.42) jammy; urgency=medium
+
+  * Static content CLI path (#127): packaged sessions now invoke the CLI from
+    the runtime checkout that contains the service's Bun dependency tree, with
+    `OMP_WEB_STATIC_CONTENT_CLI` available for source, worktree, and custom
+    deployments.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 24 Nov 2026 06:33:48 +0000
+
 omp-web (0.5.41) jammy; urgency=medium
 
   * Static content (#127): machine-scoped HTML reports and visualizations can
