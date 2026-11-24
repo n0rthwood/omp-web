@@ -17,6 +17,9 @@ const FORWARDED_HEADER_NAMES: Record<string, true> = {
   "accept": true,
   "content-type": true,
   "range": true,
+  "if-none-match": true,
+  "if-modified-since": true,
+  "if-range": true,
 };
 
 /** Response headers passed through from the remote. */
@@ -29,6 +32,8 @@ const PASSTHROUGH_RESPONSE_HEADERS: Record<string, true> = {
   "etag": true,
   "last-modified": true,
   "cache-control": true,
+  "content-security-policy": true,
+  "x-content-type-options": true,
 };
 
 /** Bound on connect+headers for the upstream fetch; cleared once headers arrive, so streaming bodies are never cut off.

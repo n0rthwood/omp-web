@@ -783,9 +783,11 @@ importing the SDK; without it every run left untitled `-tmp-omp99-run-*` shells
 in production. The same class of leak exists on the host side: session hosts are
 spawned with `systemd-run --user`, which does **not** inherit the caller's
 environment, so `spawnSessionHost` forwards `HOST_INHERITED_ENV` (`HOME`,
-`PI_CODING_AGENT_DIR`, `PI_PROFILE`, `OMP_PROFILE`, `OMP_WEB_USERS_FILE`, plus
-the socket run dir and idle override). An isolated instance launched with a fake
-`HOME` keeps its journals inside that HOME — verify with
+`PI_CODING_AGENT_DIR`, `PI_PROFILE`, `OMP_PROFILE`, `OMP_WEB_USERS_FILE`,
+`OMP_WEB_MACHINE_ID`, `OMP_WEB_MACHINE_NAME`, `OMP_WEB_STATIC_MAPPINGS_FILE`,
+`OMP_WEB_STATIC_ROOT`, plus the socket run dir and idle override). An isolated
+instance launched with a fake `HOME` keeps its journals inside that HOME —
+verify with
 `tr '\0' '\n' < /proc/<host pid>/environ | grep '^HOME='`.
 
 ### Live transcript refresh must stay idempotent (#124)

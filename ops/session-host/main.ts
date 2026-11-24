@@ -37,6 +37,7 @@ import { untrustedProjectSessionOptions } from "../../lib/project-trust";
 import { readDefaultModelRole } from "../../lib/model-roles";
 import { applyConversationRotation } from "../../lib/model-rotation";
 import { getOmpSetting } from "../../lib/omp-setting-access";
+import { injectStaticContentSkill } from "../../lib/static-content-skill";
 import { getOmpRuntime, getSettingsForCwd } from "../../lib/omp-runtime";
 import { persistExplicitStartupPreferences } from "../../lib/startup-preferences";
 import { FOREIGN_LEASE_ERROR } from "../../lib/session-host-transport";
@@ -279,17 +280,17 @@ async function main(): Promise<void> {
     // win and must not burn a rotation slot.
     //
     // `getSettingsForCwd` hands back the SHARED process-wide Settings when the
-    // cwd already matches, so the override has to go on a clone or it leaks
-    // into every other conversation and into the TUI-facing config.
-    let settings = sessionSettings;
+    // cwd already matches. Every host therefore gets its own clone before
+    // applying the built-in skill override, so it cannot leak into another
+    // conversation or the TUI-facing config.
+    const settings = await sessionSettings.cloneForCwd(sessionCwd);
+    injectStaticContentSkill(settings);
     const hasExistingMessages = sessionManager.buildSessionContext().messages.length > 0;
     if (!hasExistingMessages) {
-      const own = await sessionSettings.cloneForCwd(sessionCwd);
-      const rotated = applyConversationRotation(own, agentDir, {
+      const rotated = applyConversationRotation(settings, agentDir, {
         skipRoles: initialModel ? ["default"] : [],
       });
       if (rotated.length > 0) {
-        settings = own;
         console.log(`[omp-web] rotated models for new session: ${
           rotated.map((r) => `${r.role}=${r.primary} (${r.index + 1}/${r.poolSize})`).join(", ")
         }`);
