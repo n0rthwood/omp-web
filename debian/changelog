@@ -1,3 +1,18 @@
+omp-web (0.5.41) jammy; urgency=medium
+
+  * Static content (#127): machine-scoped HTML reports and visualizations can
+    be published from the local execution environment and opened through
+    authenticated origin-relative `/static/<machine-id>/<mapping-id>/...`
+    links. Gateway requests stream remote content without copying directories.
+    Mappings support temporary TTLs, persistent retention, safe revoke/delete,
+    path and symlink containment, and a management panel independent of
+    project permissions.
+  * Static content skill and CLI: packaged environments receive a built-in
+    skill and local JSON API for creating, updating, listing, and revoking
+    static mappings. Static documents are isolated with a restrictive CSP.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 24 Nov 2026 06:05:45 +0000
+
 omp-web (0.5.40) jammy; urgency=medium
 
   * Login page (#126): the password field gets a show/hide eye toggle so
