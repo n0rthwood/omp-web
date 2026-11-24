@@ -45,13 +45,21 @@ do not create a second alias merely for static content.
 
 ## Session-host API
 
-The packaged same-user local API is the primary API for agent sessions:
+The packaged same-user local API is the primary API for agent sessions. Use the
+fleet checkout entrypoint below; it shares the runtime dependency tree used by
+the running omp-web service:
 
 ```sh
-STATIC_CONTENT_CLI="${OMP_WEB_STATIC_CONTENT_CLI:-/opt/omp-web/current/ops/static-content/cli.ts}"
+STATIC_CONTENT_CLI="${OMP_WEB_STATIC_CONTENT_CLI:-/home/joysort/omp/ompweb/ops/static-content/cli.ts}"
 printf '%s\n' '{"command":"create","label":"report","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
   | bun --bun "$STATIC_CONTENT_CLI"
 ```
+
+For a source checkout, worktree, or custom deployment, set
+`OMP_WEB_STATIC_CONTENT_CLI` to its absolute `ops/static-content/cli.ts` path.
+The selected CLI MUST use the same checkout/runtime dependency tree as the
+running omp-web service; a packaged source overlay with dependencies installed
+elsewhere may fail to resolve `@oh-my-pi`.
 
 The CLI reads the host's existing agent-directory/profile environment; it does
 not make an HTTP request and does not need browser credentials. It accepts one
