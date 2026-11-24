@@ -1,3 +1,12 @@
+omp-web (0.5.40) jammy; urgency=medium
+
+  * Login page (#126): the password field gets a show/hide eye toggle so
+    users can inspect exactly what they typed (trailing spaces from
+    autofill, IME fullwidth characters) before submitting. Masked by
+    default; toggling keeps the value and input focus, never submits.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 24 Nov 2026 01:23:44 +0000
+
 omp-web (0.5.39) jammy; urgency=medium
 
   * Session outline (#125): injected system reminders (eager-task-prelude)
