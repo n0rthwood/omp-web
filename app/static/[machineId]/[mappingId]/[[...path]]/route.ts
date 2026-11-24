@@ -13,7 +13,7 @@ import { jsonError, requireMachineGrant } from "@/app/api/web-users/_guard";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: Promise<{ machineId: string; mappingId: string; path: string[] }>;
+  params: Promise<{ machineId: string; mappingId: string; path?: string[] }>;
 }
 
 function encodedPathSegment(segment: string): string {
@@ -21,12 +21,15 @@ function encodedPathSegment(segment: string): string {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  const { machineId, mappingId, path } = await context.params;
+  const { machineId, mappingId, path: rawPath } = await context.params;
+  // A bare mapping URL (`/static/<machine>/<mapping>`) carries no catch-all
+  // segments; it resolves to index.html/index.htm in the shared resolver.
+  const path = rawPath ?? [];
   const local = isLocalStaticMachineId(machineId);
   const denied = await requireMachineGrant(
     request,
     local ? LOCAL_STATIC_MACHINE_ID : machineId,
-    `/api/static/${mappingId}/${path.join("/")}`,
+    `/api/static/${mappingId}${path.length ? `/${path.join("/")}` : ""}`,
   );
   if (denied) return denied;
 
@@ -42,7 +45,7 @@ export async function GET(request: Request, context: RouteContext) {
 
   const machine = getMachine(machineId);
   if (!machine) return jsonError(404, "Machine not found");
-  const remotePathname = `/api/static/${encodedPathSegment(mappingId)}/${path.map(encodedPathSegment).join("/")}`;
+  const remotePathname = `/api/static/${encodedPathSegment(mappingId)}${path.length ? `/${path.map(encodedPathSegment).join("/")}` : ""}`;
   if (!isProxyablePath(request.method, remotePathname)) return jsonError(403, "Proxy path not allowed");
   const response = await proxyToMachine(machine, request, remotePathname, new URL(request.url).search);
   return enforceStaticDocumentPolicy(response);

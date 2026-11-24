@@ -72,6 +72,17 @@ For source/worktree operation, set `OMP_WEB_STATIC_CONTENT_CLI` to the absolute
 worktree `ops/static-content/cli.ts` path. Do not guess a host name or prepend
 a domain to `publicPath`.
 
+Generated output must return a complete origin-relative public path, normally
+`/static/<machine-id>/<mapping-id>/index.html`. Never hard-code a hostname or a
+protocol URL (`http://…` / `https://…`) in returned links or generated HTML.
+omp-web is reachable through several configured domain exits across regions;
+an origin-relative link resolves against whichever origin the reader already
+authenticated on, while a hard-coded domain sends the reader to a different
+origin and forces cross-domain re-authentication (or fails outright when that
+exit is not configured for them). Links inside generated HTML must therefore
+stay relative: asset names relative to the document, or origin-relative
+`/static/…` paths.
+
 Examples:
 
 ```json
@@ -103,6 +114,11 @@ unauthenticated endpoint.
 - `GET /static/:machineId/:mappingId/:asset...` — authenticated public path;
   the Gateway streams registered remote machine bytes without forwarding the
   browser's cookie or authorization header.
+- A bare mapping URL (`GET /static/:machineId/:mappingId`, with or without a
+  trailing slash) serves `index.html`, falling back to `index.htm`; if neither
+  exists it is 404. Directories are never listed. The Gateway forwards the
+  bare internal path (`GET /api/static/:mappingId`) so remote machines apply
+  the same index fallback and 404 behavior.
 
 Generated HTML, SVG, and XML document responses carry a restrictive CSP:
 inline/external scripts and network connections are disabled, while same-origin

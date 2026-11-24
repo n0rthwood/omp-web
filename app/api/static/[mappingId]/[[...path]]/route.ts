@@ -5,12 +5,13 @@ import { requireMachineGrant } from "@/app/api/web-users/_guard";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: Promise<{ mappingId: string; path: string[] }>;
+  params: Promise<{ mappingId: string; path?: string[] }>;
 }
 
 export async function GET(request: Request, context: RouteContext) {
   const { mappingId, path } = await context.params;
   const denied = await requireMachineGrant(request, LOCAL_STATIC_MACHINE_ID, `/api/static/${mappingId}`);
   if (denied) return denied;
-  return serveStaticMappingFile(request, mappingId, path);
+  // A bare mapping URL resolves to index.html/index.htm in the shared resolver.
+  return serveStaticMappingFile(request, mappingId, path ?? []);
 }

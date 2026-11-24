@@ -166,3 +166,125 @@ test("a machine-granted user streams remote static bytes without forwarding brow
     globalThis.fetch = originalFetch;
   }
 });
+
+test("a bare mapping URL serves index.html first and never lists the directory", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { mappings } = await loadLibs();
+  const mapping = mappings.createStaticMapping({ id: "bare-html", lifecycle: "persistent" });
+  const root = mappings.getStaticMappingRoot(mapping.id);
+  writeFileSync(join(root, "index.html"), "<h1>html wins</h1>");
+  writeFileSync(join(root, "index.htm"), "<h1>htm fallback</h1>");
+  writeFileSync(join(root, "notes.txt"), "not an index");
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+
+  const response = await route.GET(
+    request("/static/joysort187/bare-html", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-html", path: undefined }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "<h1>html wins</h1>");
+  assert.match(response.headers.get("content-type"), /text\/html/);
+  assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+
+  // Explicit asset paths keep their exact behavior.
+  const explicit = await route.GET(
+    request("/static/joysort187/bare-html/index.htm", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-html", path: ["index.htm"] }),
+  );
+  assert.equal(explicit.status, 200);
+  assert.equal(await explicit.text(), "<h1>htm fallback</h1>");
+  const asset = await route.GET(
+    request("/static/joysort187/bare-html/notes.txt", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-html", path: ["notes.txt"] }),
+  );
+  assert.equal(asset.status, 200);
+  assert.equal(await asset.text(), "not an index");
+});
+
+test("a bare mapping URL falls back to index.htm when index.html is absent", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { mappings } = await loadLibs();
+  const mapping = mappings.createStaticMapping({ id: "bare-htm", lifecycle: "persistent" });
+  writeFileSync(join(mappings.getStaticMappingRoot(mapping.id), "index.htm"), "<h1>htm only</h1>");
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+
+  const response = await route.GET(
+    request("/static/joysort187/bare-htm", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-htm", path: undefined }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "<h1>htm only</h1>");
+  assert.match(response.headers.get("content-type"), /text\/html/);
+});
+
+test("a bare mapping URL with neither index file is 404 without a directory listing", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { mappings } = await loadLibs();
+  const mapping = mappings.createStaticMapping({ id: "bare-empty", lifecycle: "persistent" });
+  writeFileSync(join(mappings.getStaticMappingRoot(mapping.id), "notes.txt"), "not an index");
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+
+  const response = await route.GET(
+    request("/static/joysort187/bare-empty", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-empty", path: undefined }),
+  );
+  assert.equal(response.status, 404);
+  const body = await response.text();
+  assert.equal(body, "Not found");
+  assert.ok(!body.includes("notes.txt"), "no directory listing may be exposed");
+});
+
+test("a bare remote mapping URL forwards the bare internal path and passes a remote 404 through", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response("<h1>remote index</h1>", {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  };
+  try {
+    const response = await route.GET(
+      request("/static/gpu-1/remote-bare", cookie),
+      params({ machineId: "gpu-1", mappingId: "remote-bare", path: undefined }),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "<h1>remote index</h1>");
+    assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://gpu-1.local/api/static/remote-bare");
+    const outbound = new Headers(calls[0].init.headers);
+    assert.equal(outbound.get("authorization"), null);
+    assert.equal(outbound.get("cookie"), null);
+
+    // A remote missing both index files answers 404; the Gateway passes it through.
+    globalThis.fetch = async () => new Response("Not found", { status: 404 });
+    const missing = await route.GET(
+      request("/static/gpu-1/remote-bare", cookie),
+      params({ machineId: "gpu-1", mappingId: "remote-bare", path: undefined }),
+    );
+    assert.equal(missing.status, 404);
+    assert.equal(await missing.text(), "Not found");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

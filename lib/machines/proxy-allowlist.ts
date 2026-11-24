@@ -67,6 +67,7 @@ const ALLOWED_ROUTES: readonly RouteRule[] = [
   { template: "/api/settings", methods: ["GET", "PATCH"] },
   { template: "/api/static-mappings", methods: ["GET", "POST"] },
   { template: "/api/static-mappings/:id", methods: ["GET", "PATCH", "DELETE"] },
+  { template: "/api/static/:mappingId", methods: ["GET"] },
   { template: "/api/static/:mappingId/:asset", methods: ["GET"] },
   { template: "/api/static/:mappingId/:asset/*", methods: ["GET"] },
   { template: "/api/settings/injections", methods: ["GET", "PATCH"] },
