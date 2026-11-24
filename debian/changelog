@@ -1,3 +1,12 @@
+omp-web (0.5.43) jammy; urgency=medium
+
+  * Static content links (#127): bare mapping URLs now serve `index.html`,
+    then `index.htm`, without exposing directory listings; missing entry files
+    return 404. The built-in skill and operator documentation require complete
+    origin-relative links and contain no deployment-specific hostnames.
+
+ -- JoySort Release Bot <release@joysort.cc>  Tue, 24 Nov 2026 11:41:04 +0000
+
 omp-web (0.5.42) jammy; urgency=medium
 
   * Static content CLI path (#127): packaged sessions now invoke the CLI from
