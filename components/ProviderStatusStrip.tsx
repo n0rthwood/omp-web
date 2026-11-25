@@ -1,18 +1,21 @@
 "use client";
 
 /**
- * Provider status strip (issue #134): one compact row at the sidebar bottom
- * showing each configured provider's brand icon, quota status dot and headline
- * numbers. Hover for all windows + reset times + last fetch + errors; click
- * opens the Models settings modal. Polls GET /api/provider-status every ~60s
- * through apiPath(), so a remote machine view shows that machine's snapshot
- * via the gateway proxy. Sized to wrap in table mode and collapse to dots in
- * the 92px strip mode (lib/panel-layout.ts SIDEBAR_STRIP_WIDTH).
+ * Provider status strip (issue #134; moved above the composer by #145): one
+ * compact line with each configured provider's brand icon, quota status dot
+ * and headline numbers, ending in the time those numbers were measured. Hover
+ * a provider for every window, reset time, data time and error; click opens
+ * the Models settings modal.
+ *
+ * Presentational only: the shell owns the poll (hooks/useProviderStatus)
+ * because ChatWindow is re-keyed per session, which would restart an in-strip
+ * poll on every session switch. The line never wraps — headline text shrinks
+ * with an ellipsis, and the mobile breakpoint drops it (app/globals.css) so
+ * every provider keeps its icon + dot.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
-import { apiPath } from "@/lib/api-path";
 import type {
   ProviderStatusEntry,
   ProviderStatusSnapshot,
@@ -38,13 +41,20 @@ const BRAND_ICONS: Record<string, { Icon: IconComponent; hasColor: boolean }> = 
   "zai": { Icon: ZAIIcon, hasColor: false },
 };
 
-const POLL_INTERVAL_MS = 60_000;
+const CODEX_WINDOW_PREFIX = "openai-codex:";
 
 function statusColor(status: ProviderStatusEntry["status"]): string {
   if (status === "exhausted" || status === "error") return "var(--danger)";
   if (status === "warning") return "var(--warning)";
   if (status === "absent") return "var(--text-dim)";
   return "var(--success)";
+}
+
+function windowAmount(window: ProviderStatusWindow): string | null {
+  if (window.usedPercent !== undefined) return `${window.usedPercent}%`;
+  if (window.used !== undefined && window.limit !== undefined) return `${window.used}/${window.limit}`;
+  if (window.used !== undefined) return String(window.used);
+  return null;
 }
 
 /** Headline numbers per provider kind; full detail lives in the tooltip. */
@@ -65,8 +75,19 @@ function headline(entry: ProviderStatusEntry, t: (key: string, params?: Record<s
     return parts.length > 0 ? parts.join(" · ") : null;
   }
   if (entry.id === "openai-codex") {
-    const primary = entry.windows.find((w) => w.id === "openai-codex:primary");
-    return primary?.usedPercent !== undefined ? `${primary.usedPercent}%` : null;
+    // Every metered window, not only `primary`: the weekly window and extra
+    // meters (e.g. Spark) each gate requests on their own.
+    const parts: string[] = [];
+    for (const window of entry.windows) {
+      const amount = windowAmount(window);
+      if (amount === null) continue;
+      // Compact window name: the SDK's window id ("5h", "7d"), else the last id segment.
+      const tag = window.windowId ?? window.id.split(":").pop() ?? window.id;
+      const meter = window.id.startsWith(CODEX_WINDOW_PREFIX) ? window.id.slice(CODEX_WINDOW_PREFIX.length) : "";
+      // An extra meter (`openai-codex:<slug>:<key>`, e.g. Spark) is named by its slug.
+      parts.push(`${meter.includes(":") ? `${meter.split(":")[0]} ` : ""}${tag} ${amount}`);
+    }
+    return parts.length > 0 ? parts.join(" · ") : null;
   }
   // Other usage-capable providers (zai, alibaba-token-plan, …): worst window %.
   const percents = entry.windows.map((w) => w.usedPercent).filter((p): p is number => p !== undefined);
@@ -82,21 +103,23 @@ function formatResetTime(resetsAt: number): string {
   });
 }
 
+function formatAge(time: number, now: number, t: (key: string, params?: Record<string, string | number>) => string): string {
+  const minutes = Math.max(0, Math.round((now - time) / 60_000));
+  return minutes < 60
+    ? t("providerStatus.ageMinutes", { minutes })
+    : t("providerStatus.ageHours", { hours: Math.round(minutes / 60) });
+}
+
 function windowLine(window: ProviderStatusWindow, t: (key: string, params?: Record<string, string | number>) => string): string {
-  let amount: string;
-  if (window.usedPercent !== undefined) amount = `${window.usedPercent}%`;
-  else if (window.used !== undefined && window.limit !== undefined) amount = `${window.used}/${window.limit}`;
-  else if (window.used !== undefined) amount = String(window.used);
-  else amount = "—";
   const reset = window.resetsAt !== undefined
     ? ` · ${t("providerStatus.resetsAt", { time: formatResetTime(window.resetsAt) })}`
     : "";
-  return `${window.label}: ${amount}${reset}`;
+  return `${window.label}: ${windowAmount(window) ?? "—"}${reset}`;
 }
 
 function tooltipText(
   entry: ProviderStatusEntry,
-  fetchedAt: number | null,
+  dataTime: number | null,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): string {
   const lines = [entry.displayName];
@@ -113,53 +136,63 @@ function tooltipText(
   if (entry.error) lines.push(t("providerStatus.errorLine", { error: entry.error }));
   if (entry.status === "absent") lines.push(t("providerStatus.absent"));
   lines.push(
-    fetchedAt !== null
-      ? t("providerStatus.lastFetch", { time: formatResetTime(fetchedAt) })
+    dataTime !== null
+      ? t("providerStatus.dataAt", { time: formatResetTime(dataTime) })
       : t("providerStatus.pending"),
   );
   return lines.join("\n");
 }
 
-export function ProviderStatusStrip({ onOpenModels }: { onOpenModels: () => void }) {
+export function ProviderStatusStrip({ snapshot, onOpenModels }: {
+  /** Latest poll snapshot; `null` or an empty provider list renders nothing. */
+  snapshot: ProviderStatusSnapshot | null;
+  onOpenModels: () => void;
+}) {
   const { t } = useI18n();
-  const [snapshot, setSnapshot] = useState<ProviderStatusSnapshot | null>(null);
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    let timer: NodeJS.Timeout | undefined;
-    let controller: AbortController | undefined;
-
-    async function poll() {
-      controller?.abort();
-      controller = new AbortController();
-      try {
-        const response = await fetch(apiPath("/api/provider-status"), { signal: controller.signal });
-        if (response.ok && mountedRef.current) {
-          setSnapshot((await response.json()) as ProviderStatusSnapshot);
-        }
-      } catch {
-        // Transient network failure: keep the last snapshot, retry next tick.
-      }
-      if (mountedRef.current) timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    }
-    void poll();
-
-    return () => {
-      mountedRef.current = false;
-      clearTimeout(timer);
-      controller?.abort();
-    };
-  }, []);
-
   const providers = snapshot?.providers ?? [];
+  // "Now" lives in state: reading the clock during render is impure, and the
+  // 30s tick keeps the tooltip's relative age honest between two polls.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   if (providers.length === 0) return null;
+
+  const fetchedAt = snapshot?.fetchedAt ?? null;
+  // A report-backed entry carries its own measurement time; everything else
+  // was computed in the cycle. The label shows the oldest of them so it never
+  // claims fresher numbers than the stalest one on the line.
+  const measured = providers
+    .map((entry) => entry.recordedAt ?? fetchedAt)
+    .filter((time): time is number => time !== null);
+  if (fetchedAt !== null) measured.push(fetchedAt);
+  const dataTime = measured.length > 0 ? Math.min(...measured) : null;
+  // Clock label: "HH:mm" while the data is from today, "MMM d HH:mm" once older.
+  let dataTimeLabel: string | null = null;
+  if (dataTime !== null) {
+    const measuredOn = new Date(dataTime);
+    const today = new Date(now);
+    const sameDay = measuredOn.getFullYear() === today.getFullYear()
+      && measuredOn.getMonth() === today.getMonth()
+      && measuredOn.getDate() === today.getDate();
+    dataTimeLabel = sameDay
+      ? measuredOn.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+      : formatResetTime(dataTime);
+  }
+
+  const dataTimeTitle = dataTime === null ? undefined : [
+    t("providerStatus.dataAt", { time: formatResetTime(dataTime) }),
+    formatAge(dataTime, now, t),
+    ...(snapshot?.nextPollAt ? [t("providerStatus.nextPoll", { time: formatResetTime(snapshot.nextPollAt) })] : []),
+  ].join(" · ");
 
   return (
     <div
       role="button"
       tabIndex={0}
       aria-label={t("providerStatus.title")}
+      data-testid="provider-status-strip"
       onClick={onOpenModels}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -169,14 +202,17 @@ export function ProviderStatusStrip({ onOpenModels }: { onOpenModels: () => void
       }}
       style={{
         display: "flex",
-        flexWrap: "wrap",
+        flexWrap: "nowrap",
         alignItems: "center",
-        justifyContent: "center",
-        gap: "4px 10px",
-        padding: "4px 0",
+        gap: 12,
+        height: 26,
+        flexShrink: 0,
+        minWidth: 0,
+        overflow: "hidden",
+        whiteSpace: "nowrap",
         cursor: "pointer",
         fontFamily: "var(--font-mono)",
-        fontSize: 10,
+        fontSize: 10.5,
         color: "var(--text-muted)",
         userSelect: "none",
       }}
@@ -188,13 +224,13 @@ export function ProviderStatusStrip({ onOpenModels }: { onOpenModels: () => void
         return (
           <span
             key={entry.id}
-            title={tooltipText(entry, snapshot?.fetchedAt ?? null, t)}
-            style={{ display: "inline-flex", alignItems: "center", gap: 4, maxWidth: "100%", overflow: "hidden" }}
+            title={tooltipText(entry, entry.recordedAt ?? fetchedAt, t)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, flex: "0 1 auto", minWidth: 0 }}
           >
             {brand ? (
               <brand.Icon size={12} style={brand.hasColor ? undefined : { color: "var(--text-muted)", flexShrink: 0 }} />
             ) : (
-              <span style={{ flexShrink: 0 }}>{entry.displayName}</span>
+              <span style={{ flexShrink: 0, maxWidth: 72, overflow: "hidden", textOverflow: "ellipsis" }}>{entry.displayName}</span>
             )}
             <span
               aria-hidden="true"
@@ -208,11 +244,22 @@ export function ProviderStatusStrip({ onOpenModels }: { onOpenModels: () => void
               }}
             />
             {text !== null && (
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+              <span className="provider-status-headline" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {text}
+              </span>
             )}
           </span>
         );
       })}
+      {dataTimeLabel !== null && (
+        <span
+          data-testid="provider-status-data-time"
+          title={dataTimeTitle}
+          style={{ flexShrink: 0, marginLeft: "auto", color: "var(--text-dim)" }}
+        >
+          {t("providerStatus.dataTime", { time: dataTimeLabel })}
+        </span>
+      )}
     </div>
   );
 }

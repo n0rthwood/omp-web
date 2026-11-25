@@ -1,5 +1,5 @@
 import type { ProviderSource } from "./types";
-import type { ApiKeyProvider, OAuthProvider, ProviderEntry } from "./types";
+import type { ApiKeyProvider, OAuthProvider, ProviderEntry, ProviderHealth } from "./types";
 
 /** One provider in the left column, merged across the three config layers. */
 export interface ProviderRow {
@@ -8,6 +8,8 @@ export interface ProviderRow {
   sources: ProviderSource[];
   configured: boolean;
   loggedIn: boolean;
+  /** A credential of this provider was disabled and never replaced. */
+  hasCredentialHistory: boolean;
   modelCount: number;
   /** `override` = models.yml covers a catalog provider; `custom` = models.yml only. */
   tag?: "override" | "custom";
@@ -16,11 +18,28 @@ export interface ProviderRow {
   config?: ProviderEntry;
 }
 
-/** The layer a row is listed under: models.yml first, then subscription, then key. */
+/**
+ * The layer a row is listed under: models.yml first, then subscription, then key.
+ *
+ * A provider left with only a disabled credential has no working layer; it is
+ * re-authenticated through its OAuth card, so it sits with the logins.
+ */
 export function providerRowGroup(row: ProviderRow): ProviderSource {
   if (row.config) return "config";
-  if (row.loggedIn) return "oauth";
+  if (row.loggedIn || (!row.configured && row.hasCredentialHistory)) return "oauth";
   return "api_key";
+}
+
+/**
+ * An OAuth-capable provider with no login and no key either (mockup `oauthOut`):
+ * nothing in its table can run, so every row is dimmed.
+ *
+ * The scan's `missing` is the test. The row's own flags cannot answer it:
+ * OpenRouter, xAI and Zhipu are listed as OAuth-capable while they run on an
+ * API key, and a key declared in models.yml never shows up as `configured`.
+ */
+export function providerLoggedOut(row: ProviderRow, health: ProviderHealth | undefined): boolean {
+  return row.oauth !== undefined && !row.oauth.loggedIn && health?.state === "missing";
 }
 
 /**
@@ -30,7 +49,8 @@ export function providerRowGroup(row: ProviderRow): ProviderSource {
  * by id is what removes the duplicate row the old tree showed, and the config
  * layer wins because that is the file this panel edits. Rows with no
  * configuration at all (a catalog provider you have not logged into) are
- * dropped — they are reachable from "+ Add provider" instead.
+ * dropped — they are reachable from "+ Add provider" instead. A provider whose
+ * only credential was disabled stays, so an expired login can be redone (#144).
  */
 export function mergeProviderRows(
   oauthProviders: readonly OAuthProvider[],
@@ -45,7 +65,7 @@ export function mergeProviderRows(
   const ensure = (id: string): ProviderRow => {
     const existing = byId.get(id);
     if (existing) return existing;
-    const row: ProviderRow = { id, name: id, sources: [], configured: false, loggedIn: false, modelCount: 0 };
+    const row: ProviderRow = { id, name: id, sources: [], configured: false, loggedIn: false, hasCredentialHistory: false, modelCount: 0 };
     byId.set(id, row);
     return row;
   };
@@ -55,6 +75,7 @@ export function mergeProviderRows(
     if (!row.sources.includes("oauth")) row.sources.push("oauth");
     row.oauth = provider;
     row.loggedIn = row.loggedIn || provider.loggedIn;
+    row.hasCredentialHistory = row.hasCredentialHistory || Boolean(provider.hasCredentialHistory);
     if (row.name === row.id) row.name = provider.name;
   }
   for (const provider of apiKeyProviders) {
@@ -74,5 +95,5 @@ export function mergeProviderRows(
     row.tag = catalogIds.has(id) ? "override" : "custom";
   }
 
-  return [...byId.values()].filter((row) => row.config || row.loggedIn || row.configured);
+  return [...byId.values()].filter((row) => row.config || row.loggedIn || row.configured || row.hasCredentialHistory);
 }

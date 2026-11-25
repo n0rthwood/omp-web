@@ -62,6 +62,19 @@ export function RefreshDiffPanel({ state, providerName }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
         <b style={{ fontSize: 11.5, color: "var(--text)" }}>{t("models.diffTitle")}</b>
         <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{t("models.diffCounts", { added: addedCount, removed: removedCount, changed: changedCount })}</span>
+        <span style={{ flex: 1 }} />
+        {state.completedAt !== undefined && (
+          <span data-testid="refresh-diff-time" style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--text-dim)" }}>
+            {new Date(state.completedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          </span>
+        )}
+        <span
+          data-testid="refresh-diff-badge"
+          style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, color: "var(--success, #3fb950)", whiteSpace: "nowrap" }}
+        >
+          <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
+          {t("models.diffUpdated")}
+        </span>
       </div>
       <div style={{ padding: "6px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
         {state.warning && (

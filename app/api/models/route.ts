@@ -1,10 +1,12 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
   loadModelsWithCache,
   withModelRuntimeError,
   withSafeModelLoadFailure,
+  type ModelCatalogEntry,
   type ModelHealth,
   type ModelsData,
 } from "@/lib/models-cache";
@@ -28,7 +30,25 @@ function compareModelEntries(
     || modelNameCollator.compare(a.id, b.id);
 }
 
-async function loadModels(cwd: string, includeHidden = false): Promise<ModelsData> {
+/**
+ * Catalog facts of one registry row (#144). A `null` window means the
+ * catalog does not know it, so it is left out instead of being sent as 0.
+ */
+function toCatalogEntry(model: Model<Api>): ModelCatalogEntry {
+  const { id, name, provider, input, reasoning, cost, contextWindow, maxTokens } = model;
+  return {
+    id,
+    name,
+    provider,
+    input: [...input],
+    reasoning,
+    cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite },
+    ...(contextWindow !== null ? { contextWindow } : {}),
+    ...(maxTokens !== null ? { maxTokens } : {}),
+  };
+}
+
+async function loadModels(cwd: string | undefined, includeHidden = false): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let defaultModel: { provider: string; modelId: string } | null = null;
   const thinkingLevels: Record<string, string[]> = {};
@@ -53,11 +73,7 @@ async function loadModels(cwd: string, includeHidden = false): Promise<ModelsDat
   const visible = scoped ? scoped.visible : modelRegistry.getAvailable();
   const thinkingLevelPins = scoped?.thinkingLevelPins ?? {};
   const warnings = scoped?.warnings ?? [];
-  const modelList = visible.map((m) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-  })).sort(compareModelEntries);
+  const modelList = visible.map(toCatalogEntry).sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -124,30 +140,41 @@ const EMPTY_MODELS: ModelsData = {
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
-  const includeHidden = new URL(req.url).searchParams.get("all") === "1";
-  const cwd = resolve(requestedCwd);
+  const params = new URL(req.url).searchParams;
+  const includeHidden = params.get("all") === "1";
+  const requestedCwd = params.get("cwd");
+  // `?all=1` is a catalog read (allow-list picker, provider tables), not a
+  // scope decision. With no `cwd` to scope it, it reads the default settings
+  // and needs no directory access check: falling back to the server's own
+  // working directory instead turned every project-less request into a 403
+  // and left the provider table empty (#144).
+  const unscoped = includeHidden && !requestedCwd;
+  const cwd = unscoped ? null : resolve(requestedCwd || process.cwd());
 
-  let cwdStat;
-  try {
-    cwdStat = await stat(cwd);
-  } catch {
-    return Response.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
-  }
-  if (!cwdStat.isDirectory()) {
-    return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
-  }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return Response.json({ error: "Access denied" }, { status: 403 });
+  if (cwd) {
+    let cwdStat;
+    try {
+      cwdStat = await stat(cwd);
+    } catch {
+      return Response.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
+    }
+    if (!cwdStat.isDirectory()) {
+      return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
+    }
+    const allowedRoots = await getAllowedFileRoots();
+    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+      return Response.json({ error: "Access denied" }, { status: 403 });
+    }
   }
 
   try {
     // The unfiltered list is a picker input, not a scope decision: it is never
     // cached, so a freshly added provider shows up immediately.
-    const data = includeHidden
-      ? await loadModels(cwd, true)
-      : await loadModelsWithCache(cwd, () => loadModels(cwd));
+    const data = cwd === null
+      ? await loadModels(undefined, true)
+      : includeHidden
+        ? await loadModels(cwd, true)
+        : await loadModelsWithCache(cwd, () => loadModels(cwd));
     return Response.json(data);
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));

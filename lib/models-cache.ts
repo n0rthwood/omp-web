@@ -3,9 +3,27 @@ import type { ModelHealth } from "./models-health";
 
 export type { ModelHealth };
 
+/**
+ * Catalog facts of one listed model, copied from its registry row (#144).
+ * Every field is optional so a payload written before it existed still parses.
+ */
+export interface ModelCatalogFields {
+  input?: string[];
+  reasoning?: boolean;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+export interface ModelCatalogEntry extends ModelCatalogFields {
+  id: string;
+  name: string;
+  provider: string;
+}
+
 export interface ModelsData {
   models: Record<string, string>;
-  modelList: { id: string; name: string; provider: string }[];
+  modelList: ModelCatalogEntry[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;
   thinkingLevelMaps: Record<string, Record<string, string | null>>;

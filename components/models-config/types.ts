@@ -1,3 +1,4 @@
+import type { ModelCatalogFields } from "@/lib/models-cache";
 import type { ProviderModelDiff } from "@/lib/models-config-diff";
 
 /**
@@ -30,7 +31,25 @@ export interface ProviderEntry {
   headers?: Record<string, string>;
   compat?: Record<string, unknown>;
   models?: ModelEntry[];
-  modelOverrides?: Record<string, unknown>;
+  /**
+   * Sparse per-model patches over catalog rows, keyed by model id. A field
+   * that is present overrides the catalog value; an absent one inherits it,
+   * which is what makes an override follow later catalog updates (#144).
+   */
+  modelOverrides?: Record<string, ModelOverridePatch>;
+}
+
+/**
+ * The fields this panel writes into `modelOverrides`, plus whatever a
+ * hand-edited `models.yml` carries (headers, compat, promptCache, …).
+ */
+export interface ModelOverridePatch {
+  name?: string;
+  input?: string[];
+  contextWindow?: number;
+  maxTokens?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  [field: string]: unknown;
 }
 
 export interface ModelsJson {
@@ -44,6 +63,8 @@ export interface OAuthProvider {
   loggedIn: boolean;
   /** Provider also accepts an API key, so it appears in both picker sections. */
   supportsApiKey?: boolean;
+  /** A credential of this provider was disabled and never replaced: the card is where the login is redone. */
+  hasCredentialHistory?: boolean;
 }
 
 export interface ApiKeyProvider {
@@ -57,6 +78,8 @@ export interface ApiKeyProvider {
   displayName: string;
   configured: boolean;
   source?: string;
+  /** The environment variable backing an env-sourced key, when a single named one does. */
+  sourceEnvVar?: string;
   modelCount: number;
   /** Provider also supports OAuth, so it appears in both picker sections. */
   supportsOAuth?: boolean;
@@ -67,6 +90,8 @@ export type ProviderSource = "oauth" | "api_key" | "config";
 
 export type ModelHealthState = "ok" | "disabled" | "unverified";
 
+export type ProviderHealthState = "ok" | "disabled" | "missing" | "expiring";
+
 export interface ModelHealth {
   state: ModelHealthState;
   cause?: string;
@@ -76,10 +101,12 @@ export interface ModelHealth {
 export type ModelHealthMap = Record<string, ModelHealth>;
 
 export interface ProviderHealth {
-  state: "ok" | "disabled" | "missing" | "expiring";
+  state: ProviderHealthState;
   cause?: string;
   expiresAt?: number;
   account?: string;
+  /** Epoch ms of the credential's last refresh: the failed refresh that disabled it, or the last successful keepalive probe while alive. */
+  lastRefreshAt?: number;
 }
 
 export interface ModelsHealthResponse {
@@ -90,19 +117,17 @@ export interface ModelsHealthResponse {
 }
 
 /** One selectable model, as the roles/allow-list pickers consume them. */
-export interface ModelOption {
+export interface ModelOption extends ModelCatalogFields {
   id: string;
   name: string;
   provider: string;
-  input?: string[];
-  contextWindow?: number;
 }
 
 /** One provider's refresh, as the panel tracks it. */
 export type ProviderRefreshState =
   | { phase: "idle" }
   | { phase: "loading"; providerName: string }
-  | { phase: "success"; providerName: string; warning?: string; diff?: ProviderModelDiff }
+  | { phase: "success"; providerName: string; warning?: string; diff?: ProviderModelDiff; /** Epoch ms the refresh finished; stamps the diff header. */ completedAt?: number }
   | { phase: "error"; providerName: string; message: string };
 
 export function modelHealthKey(provider: string, modelId: string): string {
