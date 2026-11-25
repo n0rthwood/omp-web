@@ -205,8 +205,24 @@ export class AgentSessionWrapper {
       // RpcClient reader is live before any host bytes arrive.
       this.attachToHost();
       await this.client.start();
+      // #142: a restarted web tier has an EMPTY subagentHistory — the frames
+      // that filled it were consumed by the previous process. Ask the host for
+      // its roster so `subagents` (and the outline's live merge) is not blind
+      // until the next lifecycle frame. Best-effort: the READ_ONLY bound in
+      // send() rejects on a degraded host and the next attach retries.
+      void this.seedSubagentHistory();
     })();
     return this.startPromise;
+  }
+
+  /** #142: pull the host's subagent roster into the wrapper-side history. */
+  private async seedSubagentHistory(): Promise<void> {
+    try {
+      const result = await this.send({ type: "get_subagents" }) as { subagents?: SubagentSnapshot[] } | null;
+      for (const snapshot of result?.subagents ?? []) this.rememberSubagentSnapshot(snapshot);
+    } catch {
+      // Seeding is an optimization; the live frames remain authoritative.
+    }
   }
 
   async waitUntilReady(): Promise<void> {

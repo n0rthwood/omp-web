@@ -310,6 +310,15 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
             const jobsTooltip = item.jobs && item.jobs.length > 0
               ? item.jobs.map((job) => `${job.name}: ${jobStatusLabel(job.status, t)}`).join("\n")
               : undefined;
+            // #142: name the subagent INSTANCE(S) on the row face. A single
+            // job shows its name; a multi-job row shows the first name +n with
+            // the full list in the tooltip (the per-job chips below already
+            // enumerate the rest).
+            const jobNames = item.jobs && item.jobs.length > 0
+              ? item.jobs.length === 1
+                ? item.jobs[0].name
+                : `${item.jobs[0].name} +${item.jobs.length - 1}`
+              : undefined;
             return (
               <div key={item.entryId} role="listitem">
               <button
@@ -351,8 +360,9 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                       <span className="flex-shrink-0 tabular-nums">#{item.ordinal + 1}</span>
                       <span className="flex-shrink-0">{roleLabel(item.role, t)}</span>
                       {item.jobStatus && <JobStatusBadge status={item.jobStatus} label={jobStatusLabel(item.jobStatus, t)} />}
+                      {jobNames && <span className="min-w-0 truncate" title={jobsTooltip}>{jobNames}</span>}
                       {item.jobs && item.jobs.length > 1 && (
-                        <span className="flex flex-shrink-0 items-center gap-0.5" title={jobsTooltip}>
+                        <span className="flex flex-shrink-0 items-center gap-0.5" title={jobsTooltip} data-outline-jobs={item.jobs.length}>
                           {item.jobs.slice(0, 8).map((job) => (
                             <JobStatusBadge key={job.id} status={job.status} label={`${job.name}: ${jobStatusLabel(job.status, t)}`} />
                           ))}

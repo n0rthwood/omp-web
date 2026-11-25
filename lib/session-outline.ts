@@ -117,10 +117,18 @@ export function applyLiveOutlineJobStatus(
       return state && state.status !== job.status ? { ...job, status: state.status } : job;
     });
     const known = new Set(merged.map((job) => job.id));
+    // #142: a live snapshot whose parentToolCallId matches can duplicate a
+    // receipt job under a different id (the revive path reuses the parent call
+    // id). Never add a second job with the same display name — that produced a
+    // phantom third spinner.
+    const knownNames = new Set(merged.map((job) => job.name));
     for (const state of matched) {
       if (known.has(state.id)) continue;
+      const name = state.name ?? state.id;
+      if (knownNames.has(name)) continue;
       known.add(state.id);
-      merged.push({ id: state.id, name: state.name ?? state.id, status: state.status });
+      knownNames.add(name);
+      merged.push({ id: state.id, name, status: state.status });
     }
     // Aggregate over ALL merged jobs (uncapped); cap only the display list.
     const jobStatus = aggregateOutlineJobStatus(merged) ?? entry.jobStatus;
