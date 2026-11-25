@@ -1,6 +1,7 @@
 // Health strip + its details panel (issue #139; panel gaps closed by #145):
 //   T1 no scan → nothing rendered.
 //   T2 only credentials that failed are counted, never unconfigured providers.
+//   T2 a clean scan shows one separator, not the label's own plus a second one.
 //   T3 the panel lists the failures and the providers still usable.
 //   T4 the "N min ago" clock ticks.
 // Individually runnable: bun test components/models-config/HealthStrip.test.mjs
@@ -72,6 +73,13 @@ test("the strip counts only credentials that failed, never providers that were n
 test("a scan with no failure shows no invalid count at all", () => {
   const html = renderStrip(scan({ google: { state: "ok" }, "xai-oauth": { state: "ok" } }));
   assert.doesNotMatch(html, /credentials invalid/);
+});
+
+test("a clean scan shows one separator between the label and the available count", () => {
+  const text = (health) => renderStrip(health).replace(/<[^>]+>/g, "");
+  // The label ends in its own "·"; the second one belongs to the invalid count.
+  assert.match(text(scan({ google: { state: "ok" }, "xai-oauth": { state: "ok" } })), /min ago ·744 available· details/);
+  assert.match(text(scan()), /min ago ·2 credentials invalid·744 available· details/);
 });
 
 // ── T3 ──────────────────────────────────────────────────────────────────────

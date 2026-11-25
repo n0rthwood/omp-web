@@ -52,8 +52,12 @@ export function HealthStrip({ health }: { health: ModelsHealthResponse | null })
         }}
       >
         <span>{t("models.healthStrip", { minutes: scannedMinutesAgo })}</span>
-        {failing.length > 0 && <span style={{ color: "var(--warning, #d29922)" }}>{t("models.healthFailing", { count: failing.length })}</span>}
-        <span>·</span>
+        {failing.length > 0 && (
+          <>
+            <span style={{ color: "var(--warning, #d29922)" }}>{t("models.healthFailing", { count: failing.length })}</span>
+            <span>·</span>
+          </>
+        )}
         <span style={{ color: "var(--success, #3fb950)" }}>{t("models.healthAvailable", { count: health.availableModelCount })}</span>
         <span>· {t("models.healthDetails")}</span>
       </button>
