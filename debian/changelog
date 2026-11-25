@@ -1,3 +1,11 @@
+omp-web (0.5.44) jammy; urgency=medium
+
+  * Static discovery (#136): require an explicit project root for mappings,
+    filter `/static` and Home discovery by machine and project grants, preserve
+    authenticated machine-only direct links, and add the Home Static content tab.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 25 Nov 2026 12:00:00 +0000
+
 omp-web (0.5.43) jammy; urgency=medium
 
   * Static content links (#127): bare mapping URLs now serve `index.html`,
