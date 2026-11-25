@@ -1,5 +1,6 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import type { ProviderCredentialType, ProviderListingInput } from "@/lib/provider-listing";
 import { getOmpRuntime } from "@/lib/omp-runtime";
 
@@ -34,6 +35,18 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
   }
 
   const descriptorsById = new Map(PROVIDER_DESCRIPTORS.map((descriptor) => [descriptor.providerId, descriptor]));
+  // Catalog seeds carry the base URL and API kind the add-provider flow
+  // prefills; the first seed is representative because a provider entry shares
+  // one endpoint across its models.
+  const catalogById = new Map<string, { baseUrl?: string; api?: string; envVar?: string }>();
+  for (const [id, entry] of Object.entries(providerEntries())) {
+    const seed = entry.seed?.models[0];
+    catalogById.set(id, {
+      ...(seed?.baseUrl ? { baseUrl: seed.baseUrl } : {}),
+      ...(seed?.api ? { api: seed.api } : {}),
+      ...(entry.envVars?.[0] ? { envVar: entry.envVars[0] } : {}),
+    });
+  }
   const ids = new Set<string>([
     ...modelCounts.keys(),
     ...oauthByProvider.keys(),
@@ -67,6 +80,7 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
       },
       ...(credentialTypes.has(id) ? { credentialType: credentialTypes.get(id) } : {}),
       modelCount: modelCounts.get(id) ?? 0,
+      ...catalogById.get(id),
     };
   });
 }

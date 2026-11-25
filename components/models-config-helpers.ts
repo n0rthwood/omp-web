@@ -1,3 +1,5 @@
+import type { ProviderModelDiff } from "@/lib/models-config-diff";
+
 import { apiPath } from "@/lib/api-path";
 
 export interface CompatEntry {
@@ -38,7 +40,7 @@ export async function refreshProviderModels(
   providerName: string,
   onModelsChanged?: () => void,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ discoveryStatus?: string; warning?: string }> {
+): Promise<{ discoveryStatus?: string; warning?: string; diff?: ProviderModelDiff }> {
   try {
     const response = await fetchImpl(apiPath("/api/models-config/refresh-provider"), {
       method: "POST",
@@ -49,6 +51,7 @@ export async function refreshProviderModels(
       success?: boolean;
       discoveryStatus?: string;
       warning?: string;
+      diff?: ProviderModelDiff;
       error?: string;
     } | null;
     if (!response.ok || !result?.success) {
