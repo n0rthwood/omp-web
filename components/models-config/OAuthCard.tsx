@@ -144,7 +144,7 @@ export function OAuthCard({ provider, health, onRefresh }: {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <SectionTitle>{t("models.oauthCardTitle")}</SectionTitle>
         <HealthBadge
-          health={health ? { state: health.state === "ok" ? "ok" : health.state === "expiring" ? "disabled" : health.state === "missing" ? "disabled" : "unverified", cause: health.cause } : undefined}
+          health={health}
           label={health ? undefined : provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
         />
       </div>

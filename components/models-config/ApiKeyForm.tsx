@@ -12,20 +12,36 @@ import type { ApiKeyProvider } from "./types";
  * The key is written to the auth store through `POST /api/auth/api-key/:id` and
  * removed with `DELETE`; the panel only ever holds the text being typed, never
  * a value read back from the server.
+ *
+ * A key that comes from the environment is outside that store, so "disconnect"
+ * cannot remove it: the card says so up front, repeats it after a disconnect,
+ * and offers to hide the row instead (#144).
  */
-export function ApiKeyForm({ provider, onRefresh }: { provider: ApiKeyProvider; onRefresh: () => void }) {
+export function ApiKeyForm({ provider, onHide, onRefresh }: {
+  provider: ApiKeyProvider;
+  /** Offered when the key is env-sourced and no models.yml entry owns the row. */
+  onHide?: () => void;
+  onRefresh: () => void;
+}) {
   const { t } = useI18n();
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setApiKey("");
     setError(null);
     setSavedOk(false);
+    setNotice(null);
   }, [provider.id]);
+
+  const envSourced = provider.source === "env";
+  const envSource = provider.sourceEnvVar
+    ? t("models.envKeyVariable", { name: provider.sourceEnvVar })
+    : t("models.envKeyUnnamed");
 
   const handleSave = useCallback(async () => {
     if (!apiKey.trim()) return;
@@ -60,16 +76,33 @@ export function ApiKeyForm({ provider, onRefresh }: { provider: ApiKeyProvider; 
       const res = await fetch(apiPath(`/api/auth/api-key/${encodeURIComponent(provider.id)}`), { method: "DELETE" });
       const data = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || data.error) setError(data.error ?? `HTTP ${res.status}`);
-      else onRefresh();
+      else {
+        // The stored credential is gone, but an env key keeps the provider configured.
+        if (envSourced) setNotice(t("models.envKeyDisconnectResult", { variable: envSource }));
+        onRefresh();
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setRemoving(false);
     }
-  }, [onRefresh, provider.id]);
+  }, [envSource, envSourced, onRefresh, provider.id, t]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {envSourced && (
+        <div role="note" data-testid="env-key-note"
+          style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 9px", border: "1px solid rgba(210,153,34,0.35)", borderRadius: 5, background: "rgba(210,153,34,0.08)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{t("models.envKeyNote", { variable: envSource })}</span>
+          {onHide && (
+            <button type="button" data-testid="hide-provider-button" onClick={onHide}
+              style={{ padding: "2px 8px", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0 }}>
+              {t("models.hideProvider")}
+            </button>
+          )}
+        </div>
+      )}
+
       <Field label="API Key">
         <div style={{ display: "flex", gap: 6 }}>
           <SecretTextInput
@@ -95,6 +128,12 @@ export function ApiKeyForm({ provider, onRefresh }: { provider: ApiKeyProvider; 
       </Field>
 
       {error && <p style={{ margin: 0, fontSize: 12, color: "var(--danger, #f87171)" }}>{error}</p>}
+
+      {notice && (
+        <p role="status" data-testid="env-key-disconnect-result" style={{ margin: 0, fontSize: 12, color: "var(--warning, #d29922)", lineHeight: 1.45 }}>
+          {notice}
+        </p>
+      )}
 
       {provider.configured && (
         <button type="button" onClick={() => void handleRemove()} disabled={removing}
