@@ -465,7 +465,9 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
     for (const item of details.progress) {
       if (!isPlainRecord(item)) continue;
       const status = normalizeJobStatus(item.status);
-      if (status) collectOutlineJob(jobs, item.id, item.agent, status);
+      // progress.id is the job/agent NAME (e.g. ScoutSdkUsage); progress.agent
+      // is the agent TYPE (scout/task) — prefer the id for display.
+      if (status) collectOutlineJob(jobs, item.id, item.id, status);
     }
   }
   if (Array.isArray(details.results)) {
@@ -476,7 +478,7 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
         : item.exitCode === 0 && !item.error ? "completed" : "failed";
       const existing = jobs.find((job) => job.id === id.slice(0, OUTLINE_JOB_ID_CAP));
       if (existing) existing.status = status;
-      else collectOutlineJob(jobs, id, item.agent, status);
+      else collectOutlineJob(jobs, id, id, status);
     }
   }
   let jobStatus = aggregateOutlineJobStatus(jobs);
@@ -499,7 +501,10 @@ function asyncResultJobs(details: unknown): OutlineJobInfo[] {
     const status = normalizeJobStatus(item.status);
     if (!status) continue;
     const id = typeof item.agentId === "string" && item.agentId ? item.agentId : item.jobId;
-    collectOutlineJob(jobs, id, item.label ?? item.agentId ?? item.jobId, status);
+    // bash/eval labels are the raw command line — the job id (bg_N) is the
+    // human handle; task deliveries carry a real agent name in agentId.
+    const name = item.type === "task" ? (item.label ?? item.agentId ?? item.jobId) : (item.jobId ?? item.label);
+    collectOutlineJob(jobs, id, name, status);
   }
   return jobs;
 }
@@ -588,6 +593,20 @@ function asyncResultPreview(content: unknown): string | null {
   if (status) label += `${label ? " · " : ""}${status}`;
   if (duration) label += `${label ? " · " : ""}${duration}`;
   return label ? appendPreview("", `${label}${count > 1 ? ` +${count - 1}` : ""}`) : null;
+}
+
+/** Compact label for bash/eval background-job deliveries (no <task-result>
+ * envelope): first "Background job <id> has <status>" line of the notice. */
+function backgroundJobPreview(content: unknown): string | null {
+  const length = typeof content === "string" ? 1 : Array.isArray(content) ? content.length : 0;
+  for (let i = 0; i < length; i++) {
+    const block = typeof content === "string" ? content : (content as unknown[])[i];
+    const text = typeof block === "string" ? block
+      : isPlainRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "";
+    const match = /Background job (\S+) has (\w+)/.exec(text);
+    if (match) return appendPreview("", `${match[1]} · ${match[2]}`);
+  }
+  return null;
 }
 
 /** Compact injected-reminder label: first non-empty line inside the
@@ -691,7 +710,7 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
       }
     }
     if (meta.customType === "async-result") {
-      preview = asyncResultPreview(content) ?? preview;
+      preview = asyncResultPreview(content) ?? backgroundJobPreview(content) ?? preview;
       // #135: delivery lifecycle — details.jobs[] (bash/eval jobs included),
       // envelope status as the fallback for a single delivered job.
       const jobs = asyncResultJobs(entry.details);
