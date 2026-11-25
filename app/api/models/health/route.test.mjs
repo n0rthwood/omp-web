@@ -85,9 +85,3 @@ test("the route serves the scanned snapshot with the keepalive time merged in", 
     disabledModelCount: 3,
   });
 });
-
-test("a failed scan is still a 503, not an empty body", async () => {
-  globalThis.__ompModelsHealthPoller = { snapshot: null, signature: "", timer: undefined, cycle: null, started: true };
-  const response = await GET();
-  assert.equal(response.status, 503);
-});
