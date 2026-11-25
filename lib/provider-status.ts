@@ -440,10 +440,18 @@ function pollerState(): PollerState {
 async function runtimeDeps(): Promise<ProviderStatusDeps> {
   const { authStorage, modelRegistry } = await getOmpRuntime();
   return {
-    fetchReports: () =>
-      authStorage.usage.reports({
+    fetchReports: async () => {
+      // The usage path reads the in-process pool without adopting external
+      // commits (only OAuth selection / markUsageLimitReached poll). A web
+      // tier that never runs turns would otherwise keep alive a boot-time
+      // snapshot forever: tokens rotated by hosts/CLI stay invisible, and a
+      // row edited or re-logged-in elsewhere never reaches the probe. Re-list
+      // stored rows once per cycle (a few ms on this fleet's credential count).
+      await authStorage.credentials.reload();
+      return authStorage.usage.reports({
         baseUrlResolver: (provider) => modelRegistry.getProviderBaseUrl(provider),
-      }),
+      });
+    },
     listCredentials: (provider) =>
       authStorage.credentials.list(provider).map((row) => ({
         type: row.credential.type,
