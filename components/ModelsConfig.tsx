@@ -36,6 +36,10 @@ const TABS: { id: TabId; labelKey: string }[] = [
   { id: "providers", labelKey: "models.providersTab" },
 ];
 
+// Re-read the health snapshot as often as the background scan runs
+// (`MODELS_HEALTH_SCAN_BASE_MS`), so the strip's age stays the scan's.
+const HEALTH_POLL_MS = 60_000;
+
 interface ModelsResponse {
   modelList?: ModelOption[];
   modelHealth?: ModelHealthMap;
@@ -155,9 +159,13 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
 
   // The background health scan is a separate service; a 404 (not deployed yet)
   // or any failure simply leaves the strip hidden.
+  //
+  // The snapshot is re-read on the scan's own cadence for as long as the panel
+  // is mounted. The strip's "N min ago" is the age of this snapshot, so read
+  // once it reports a scan that keeps running as ever staler.
   useEffect(() => {
     const controller = new AbortController();
-    void (async () => {
+    const load = async () => {
       try {
         const res = await fetch(apiPath("/api/models/health"), { signal: controller.signal });
         if (!res.ok) {
@@ -170,8 +178,13 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
         if ((error as Error).name === "AbortError") return;
         setHealth(null);
       }
-    })();
-    return () => controller.abort();
+    };
+    void load();
+    const timer = setInterval(() => void load(), HEALTH_POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
   }, [healthToken]);
   const addProviderEntry = useCallback((id: string, entry: ProviderEntry) => {
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [id]: entry } }));
