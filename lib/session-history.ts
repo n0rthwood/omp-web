@@ -37,7 +37,7 @@ import type { ContextUsage } from "./omp-types";
 import { getOmpRuntime } from "./omp-runtime";
 import { buildSessionContext, entryToUiMessage, parseDefaultModel } from "./session-reader";
 import { computeSessionTotalActiveMs } from "./session-timing";
-import type { SessionOutline, SessionOutlineEntry } from "./session-outline";
+import { aggregateOutlineJobStatus, type OutlineJobInfo, type OutlineJobStatus, type SessionOutline, type SessionOutlineEntry } from "./session-outline";
 import type {
   AgentMessage,
   SessionContext,
@@ -209,6 +209,16 @@ interface JournalRecordMeta {
   firstKeptEntryId?: string;
   /** message entries only: toolCall names in block order (bounded count, outline). */
   toolNames?: string[];
+  /** #135 assistant only: tool-call taxonomy for tool-only rows. */
+  toolCategory?: "tool" | "write" | "wait" | "task";
+  /** #135 assistant only: task toolCall ids for spawn-row receipt pairing. */
+  taskCallIds?: string[];
+  /** #135 toolResult only: pairing key + tool name. */
+  toolCallId?: string;
+  toolName?: string;
+  /** #135 task toolResult / async-result only: bounded per-job lifecycle. */
+  jobs?: OutlineJobInfo[];
+  jobStatus?: OutlineJobStatus;
   /** label only. */
   targetId?: string;
   label?: string | null;
@@ -349,6 +359,165 @@ function toolNameLabels(content: unknown[]): string[] {
   return labels;
 }
 
+// ---------------------------------------------------------------------------
+// #135 outline taxonomy: tool categories, async-job lifecycle, title rows
+// ---------------------------------------------------------------------------
+
+/** Per-row job bound; multi-spawn receipts stay O(record) in the spine. */
+const OUTLINE_JOB_CAP = 16;
+const OUTLINE_JOB_ID_CAP = 64;
+const OUTLINE_JOB_NAME_CAP = 48;
+const OUTLINE_TASK_CALL_CAP = 16;
+
+/** write/edit family, mirroring MessageView's isEditTool heuristics. */
+function isWriteToolName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === "write" || lower.startsWith("write_") || lower.endsWith("_write") || lower.endsWith(".write")
+    || lower === "edit" || lower.startsWith("edit_") || lower.endsWith(".edit") || lower.endsWith("_edit")
+    || lower.includes("str_replace") || lower.includes("replace_editor");
+}
+
+/** wait/hub family (hub = legacy Agent Hub wait alias). */
+function isWaitToolName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === "wait" || lower === "hub" || lower.endsWith(".wait") || lower.endsWith("_wait");
+}
+
+/** task tool, including namespaced variants. */
+function isTaskToolName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === "task" || lower.endsWith(".task") || lower.endsWith("_task");
+}
+
+/**
+ * Dominant taxonomy category of a tool-only assistant turn, from its raw
+ * toolCall blocks: task spawns > write/edit > wait/hub > other tools. Mixed
+ * turns take the highest-precedence family present. Bounded like toolNameLabels.
+ */
+function toolCallCategory(content: unknown[]): "tool" | "write" | "wait" | "task" | undefined {
+  let category: "tool" | "write" | "wait" | "task" | undefined;
+  let seen = 0;
+  for (const block of content) {
+    if (!isPlainRecord(block) || block.type !== "toolCall") continue;
+    seen++;
+    const name = typeof block.toolName === "string" ? block.toolName
+      : typeof block.name === "string" ? block.name : "";
+    if (isTaskToolName(name)) return "task";
+    if (isWriteToolName(name)) category = "write";
+    else if (category !== "write" && isWaitToolName(name)) category = "wait";
+    else if (category === undefined) category = "tool";
+    if (seen > TOOL_NAME_SCAN_CAP) break;
+  }
+  return category;
+}
+
+/** Bounded task toolCall ids for pairing the spawn receipt at outline time. */
+function taskToolCallIds(content: unknown[]): string[] {
+  const ids: string[] = [];
+  let seen = 0;
+  for (const block of content) {
+    if (!isPlainRecord(block) || block.type !== "toolCall") continue;
+    seen++;
+    const name = typeof block.toolName === "string" ? block.toolName
+      : typeof block.name === "string" ? block.name : "";
+    if (isTaskToolName(name)) {
+      const id = typeof block.toolCallId === "string" ? block.toolCallId
+        : typeof block.id === "string" ? block.id : "";
+      if (id && ids.length < OUTLINE_TASK_CALL_CAP) ids.push(id.slice(0, OUTLINE_JOB_ID_CAP));
+    }
+    if (seen > TOOL_NAME_SCAN_CAP) break;
+  }
+  return ids;
+}
+
+/** Normalize raw job statuses; cancelled (job manager) folds into aborted. */
+function normalizeJobStatus(value: unknown): OutlineJobStatus | undefined {
+  if (typeof value !== "string") return undefined;
+  const lower = value.trim().toLowerCase();
+  if (lower === "pending" || lower === "running" || lower === "completed" || lower === "failed" || lower === "aborted") return lower;
+  if (lower === "cancelled" || lower === "canceled") return "aborted";
+  if (lower.startsWith("failed") || lower.startsWith("merge failed")) return "failed";
+  return undefined;
+}
+
+function pushOutlineJob(jobs: OutlineJobInfo[], id: unknown, name: unknown, status: OutlineJobStatus): void {
+  if (jobs.length >= OUTLINE_JOB_CAP || typeof id !== "string" || id.length === 0) return;
+  jobs.push({
+    id: id.slice(0, OUTLINE_JOB_ID_CAP),
+    name: (typeof name === "string" && name ? name : id).slice(0, OUTLINE_JOB_NAME_CAP),
+    status,
+  });
+}
+
+/**
+ * Per-job lifecycle from a task toolResult receipt: details.progress[] rows
+ * (pending/running at spawn time, settled for inline subsets), upgraded by
+ * details.results[] where present. details.async.state is the fallback when
+ * no per-agent rows exist. The parent assistant stopReason is never consulted.
+ */
+function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus } {
+  if (!isPlainRecord(details)) return { jobs: [] };
+  const jobs: OutlineJobInfo[] = [];
+  if (Array.isArray(details.progress)) {
+    for (const item of details.progress) {
+      if (!isPlainRecord(item)) continue;
+      const status = normalizeJobStatus(item.status);
+      if (status) pushOutlineJob(jobs, item.id, item.agent, status);
+    }
+  }
+  if (Array.isArray(details.results)) {
+    for (const item of details.results) {
+      if (!isPlainRecord(item) || typeof item.id !== "string") continue;
+      const id = item.id;
+      const status: OutlineJobStatus = item.aborted === true ? "aborted"
+        : item.exitCode === 0 && !item.error ? "completed" : "failed";
+      const existing = jobs.find((job) => job.id === id.slice(0, OUTLINE_JOB_ID_CAP));
+      if (existing) existing.status = status;
+      else pushOutlineJob(jobs, id, item.agent, status);
+    }
+  }
+  let jobStatus = aggregateOutlineJobStatus(jobs);
+  if (jobStatus === undefined && isPlainRecord(details.async)) {
+    jobStatus = normalizeJobStatus(details.async.state);
+  }
+  return { jobs, jobStatus };
+}
+
+/**
+ * Per-job lifecycle from an async-result delivery's details.jobs[] (covers
+ * bash/eval background jobs too). The envelope status is the fallback.
+ */
+function asyncResultJobs(details: unknown): OutlineJobInfo[] {
+  if (!isPlainRecord(details) || !Array.isArray(details.jobs)) return [];
+  const jobs: OutlineJobInfo[] = [];
+  for (const item of details.jobs) {
+    if (!isPlainRecord(item)) continue;
+    const status = normalizeJobStatus(item.status);
+    if (status) pushOutlineJob(jobs, item.jobId, item.label ?? item.agentId, status);
+  }
+  return jobs;
+}
+
+/** Attributes of the first <task-result> envelope in a delivery's content. */
+function taskResultEnvelope(content: unknown): { id: string; status: string } | null {
+  const length = typeof content === "string" ? 1 : Array.isArray(content) ? content.length : 0;
+  for (let i = 0; i < length; i++) {
+    const block = typeof content === "string" ? content : (content as unknown[])[i];
+    const text = typeof block === "string" ? block
+      : isPlainRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "";
+    const match = /<task-result(?=[\s/>])([^<>]*)>/.exec(text);
+    if (!match) continue;
+    let id = "";
+    let status = "";
+    for (const attr of match[1].matchAll(/(?:^|\s)(id|status)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+      if (attr[1] === "id") id = attr[2] ?? attr[3];
+      else status = attr[2] ?? attr[3];
+    }
+    return { id, status };
+  }
+  return null;
+}
+
 function askResultPreview(details: unknown): string | null {
   if (!isPlainRecord(details)) return null;
   if (details.chatRedirect === true) {
@@ -473,12 +642,31 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         if (block.type === "text") preview = appendPreview(preview, block.text);
         if (preview.length >= PREVIEW_CAP) break;
       }
-      if (message.role === "assistant" && !preview && toolNames.length > 0) meta.toolOnly = true;
+      if (message.role === "assistant" && !preview && toolNames.length > 0) {
+        meta.toolOnly = true;
+        // #135: tool-only turns get a taxonomy category; task spawns keep
+        // their call ids so the outline can pair the receipt's job statuses.
+        const category = toolCallCategory(content);
+        if (category) meta.toolCategory = category;
+        if (category === "task") {
+          const callIds = taskToolCallIds(content);
+          if (callIds.length > 0) meta.taskCallIds = callIds;
+        }
+      }
     }
-    if (message.role === "toolResult" && message.toolName === "ask") {
-      meta.isAskResult = true;
-      meta.askError = message.isError === true;
-      if (!meta.askError) preview = askResultPreview(message.details) ?? preview;
+    if (message.role === "toolResult") {
+      if (typeof message.toolCallId === "string") meta.toolCallId = message.toolCallId;
+      if (typeof message.toolName === "string") meta.toolName = message.toolName;
+      if (message.toolName === "ask") {
+        meta.isAskResult = true;
+        meta.askError = message.isError === true;
+        if (!meta.askError) preview = askResultPreview(message.details) ?? preview;
+      } else if (typeof message.toolName === "string" && isTaskToolName(message.toolName)) {
+        // #135: spawn receipt — per-job lifecycle from details.progress[].
+        const { jobs, jobStatus } = taskResultJobs(message.details);
+        if (jobs.length > 0) meta.jobs = jobs;
+        if (jobStatus) meta.jobStatus = jobStatus;
+      }
     }
     if (preview) meta.preview = preview;
   } else if (type === "custom_message") {
@@ -496,8 +684,27 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         if (preview.length >= PREVIEW_CAP) break;
       }
     }
-    if (meta.customType === "async-result") preview = asyncResultPreview(content) ?? preview;
-    if (meta.customType === "eager-task-prelude") preview = systemReminderPreview(content) ?? preview;
+    if (meta.customType === "async-result") {
+      preview = asyncResultPreview(content) ?? preview;
+      // #135: delivery lifecycle — details.jobs[] (bash/eval jobs included),
+      // envelope status as the fallback for a single delivered job.
+      const jobs = asyncResultJobs(entry.details);
+      if (jobs.length > 0) {
+        meta.jobs = jobs;
+        meta.jobStatus = aggregateOutlineJobStatus(jobs);
+      } else {
+        const envelope = taskResultEnvelope(content);
+        const status = envelope ? normalizeJobStatus(envelope.status) : undefined;
+        if (status) {
+          meta.jobStatus = status;
+          if (envelope && envelope.id) meta.jobs = [{ id: envelope.id.slice(0, OUTLINE_JOB_ID_CAP), name: envelope.id.slice(0, OUTLINE_JOB_NAME_CAP), status }];
+        }
+      }
+    } else {
+      // #135: every other injected custom_message lists as system with the
+      // cleaned reminder first line when wrapped, raw preview otherwise.
+      preview = systemReminderPreview(content) ?? preview;
+    }
     if (preview) meta.preview = preview;
   } else if (type === "branch_summary") {
     meta.hasSummary = typeof entry.summary === "string" && entry.summary.length > 0;
@@ -511,6 +718,10 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
   } else if (type === "label") {
     meta.targetId = typeof entry.targetId === "string" ? entry.targetId : undefined;
     meta.label = typeof entry.label === "string" ? entry.label : null;
+  } else if (type === "title_change") {
+    // #135: rename audit rows list with the new title; they render no
+    // transcript block, so the outline anchors them to a rendered neighbor.
+    if (typeof entry.title === "string") meta.preview = appendPreview("", entry.title);
   } else if (type === "model_usage") {
     if (entry.activeLeafId === null || typeof entry.activeLeafId === "string") {
       meta.activeLeafId = entry.activeLeafId;
@@ -857,21 +1068,29 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
 /**
  * Outline role for a rendered display record, or null when the record is a
  * rendered message that the outline does not list (non-ask toolResult,
- * bashExecution, or custom_message other than async-result and
- * eager-task-prelude). Such positions still count toward ordinals to match
- * the window readers exactly.
+ * bashExecution). Such positions still count toward ordinals to match the
+ * window readers exactly. #135: tool-only assistants classify by tool family
+ * (task spawns become async rows), every injected custom_message lists as
+ * system except async-result deliveries (subagent), and title_change rows
+ * list separately via outlineTitleEntries (they render no message).
  */
 function outlineRole(meta: JournalRecordMeta): SessionOutlineEntry["role"] | null {
   if (meta.type === "message") {
     if (meta.role === "user") return "user";
-    if (meta.role === "assistant") return "assistant";
+    if (meta.role === "assistant") {
+      if (meta.toolOnly === true && meta.toolCategory) {
+        return meta.toolCategory === "task" ? "subagent" : meta.toolCategory;
+      }
+      return "assistant";
+    }
     if (meta.role === "toolResult" && meta.isAskResult) return "ask";
     return null;
   }
   if (meta.type === "compaction") return "summary";
   if (meta.type === "branch_summary") return "summary";
-  if (meta.type === "custom_message" && meta.customType === "async-result") return "subagent";
-  if (meta.type === "custom_message" && meta.customType === "eager-task-prelude") return "system";
+  if (meta.type === "custom_message") {
+    return meta.customType === "async-result" ? "subagent" : "system";
+  }
   return null;
 }
 
@@ -896,6 +1115,114 @@ function renderedPositions(display: JournalRecordMeta[]): number[] {
     if (rendersMessage(display[i])) positions.push(i);
   }
   return positions;
+}
+
+/**
+ * #135: task toolCallId → spawn receipt jobs, from display metadata only.
+ * The receipt is the toolResult paired to the assistant's task call (same
+ * index-time pairing the ask answers use); unpaired calls get no jobs.
+ */
+function taskReceiptsByCallId(display: JournalRecordMeta[]): Map<string, { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus }> {
+  const receipts = new Map<string, { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus }>();
+  for (const meta of display) {
+    if (meta.type === "message" && meta.role === "toolResult" && meta.toolCallId && meta.jobs && meta.jobs.length > 0) {
+      receipts.set(meta.toolCallId, { jobs: meta.jobs, jobStatus: meta.jobStatus });
+    }
+  }
+  return receipts;
+}
+
+/**
+ * #135: outline row for a rendered display record at its rendered ordinal.
+ * Spawn rows merge their paired receipts' per-job statuses; delivery rows
+ * carry the parsed envelope/details lifecycle. Old payloads without the new
+ * fields simply omit them.
+ */
+function outlineEntryFromMeta(
+  meta: JournalRecordMeta,
+  ordinal: number,
+  receipts: Map<string, { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus }>,
+): SessionOutlineEntry | null {
+  const role = outlineRole(meta);
+  if (!role) return null;
+  const entry: SessionOutlineEntry = {
+    entryId: meta.id,
+    role,
+    preview: outlinePreview(meta),
+    timestamp: meta.timestamp,
+    ordinal,
+    ...(meta.toolOnly ? { toolOnly: true } : {}),
+  };
+  if (role === "tool" || role === "write" || role === "wait") {
+    if (meta.toolNames && meta.toolNames.length > 0) entry.toolNames = meta.toolNames;
+  }
+  if (role === "subagent") {
+    if (meta.type === "message" && meta.taskCallIds && meta.taskCallIds.length > 0) {
+      const jobs: OutlineJobInfo[] = [];
+      for (const callId of meta.taskCallIds) {
+        const receipt = receipts.get(callId);
+        if (!receipt) continue;
+        for (const job of receipt.jobs) {
+          if (jobs.length >= OUTLINE_JOB_CAP) break;
+          if (!jobs.some((existing) => existing.id === job.id)) jobs.push(job);
+        }
+      }
+      if (jobs.length > 0) {
+        entry.jobs = jobs;
+        entry.jobStatus = aggregateOutlineJobStatus(jobs);
+      }
+    } else {
+      if (meta.jobs && meta.jobs.length > 0) entry.jobs = meta.jobs;
+      if (meta.jobStatus) entry.jobStatus = meta.jobStatus;
+    }
+  }
+  return entry;
+}
+
+/**
+ * #135: title_change rows. They render no transcript block, so each anchors
+ * to the nearest FOLLOWING rendered entry (nearest preceding when the rename
+ * is the branch tail; omitted entirely when nothing renders). Rows splice in
+ * at their branch position; ordinals stay rendered-message positions.
+ */
+function spliceOutlineTitleEntries(entries: SessionOutlineEntry[], display: JournalRecordMeta[], positions: number[]): SessionOutlineEntry[] {
+  const titleRows: Array<{ at: number; entry: SessionOutlineEntry }> = [];
+  for (let i = 0; i < display.length; i++) {
+    const meta = display[i];
+    if (meta.type !== "title_change") continue;
+    let ordinal = -1;
+    for (let p = 0; p < positions.length; p++) {
+      if (positions[p] > i) { ordinal = p; break; }
+    }
+    if (ordinal === -1 && positions.length > 0) ordinal = positions.length - 1;
+    if (ordinal === -1) continue;
+    titleRows.push({
+      at: i,
+      entry: {
+        entryId: meta.id,
+        role: "title",
+        preview: outlinePreview(meta),
+        timestamp: meta.timestamp,
+        ordinal,
+        anchorEntryId: display[positions[ordinal]].id,
+      },
+    });
+  }
+  if (titleRows.length === 0) return entries;
+  const merged: SessionOutlineEntry[] = [];
+  let titleAt = 0;
+  let entryAt = 0;
+  while (titleAt < titleRows.length || entryAt < entries.length) {
+    const nextEntryPos = entryAt < entries.length ? positions[entries[entryAt].ordinal] : Number.POSITIVE_INFINITY;
+    if (titleAt < titleRows.length && titleRows[titleAt].at < nextEntryPos) {
+      merged.push(titleRows[titleAt].entry);
+      titleAt++;
+    } else {
+      merged.push(entries[entryAt]);
+      entryAt++;
+    }
+  }
+  return merged;
 }
 
 /**
@@ -1455,17 +1782,17 @@ export async function readSessionOutline(
         : options.leafId !== undefined && legacy.byId.has(options.leafId)
           ? options.leafId
           : undefined;
-      const full = buildSessionContext(legacy.entries, resolvedLeaf, {});
-      const entries: SessionOutlineEntry[] = [];
-      for (let ordinal = 0; ordinal < full.entryIds.length; ordinal++) {
-        const meta = legacy.byId.get(full.entryIds[ordinal]);
-        if (!meta) continue;
-        const role = outlineRole(meta);
-        if (!role) continue;
-        entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal, ...(meta.toolOnly ? { toolOnly: true } : {}) });
-      }
       const leafId = resolvedLeaf === undefined ? resolveLeafFromMeta(legacy.metas, legacy.byId) : resolvedLeaf;
-      return { anchor, leafId, entries };
+      // Same branch + compaction view as the window reader, over migrated metas.
+      const display = displayMetaPath(branchMetaPath(legacy.byId, leafId));
+      const positions = renderedPositions(display);
+      const receipts = taskReceiptsByCallId(display);
+      const entries: SessionOutlineEntry[] = [];
+      for (let ordinal = 0; ordinal < positions.length; ordinal++) {
+        const entry = outlineEntryFromMeta(display[positions[ordinal]], ordinal, receipts);
+        if (entry) entries.push(entry);
+      }
+      return { anchor, leafId, entries: spliceOutlineTitleEntries(entries, display, positions) };
     }
 
     const replayedLeaf = resolveLeafFromMeta(visible, visibleById);
@@ -1476,14 +1803,13 @@ export async function readSessionOutline(
         : replayedLeaf;
     const display = displayMetaPath(branchMetaPath(visibleById, leafId));
     const positions = renderedPositions(display);
+    const receipts = taskReceiptsByCallId(display);
     const entries: SessionOutlineEntry[] = [];
     for (let ordinal = 0; ordinal < positions.length; ordinal++) {
-      const meta = display[positions[ordinal]];
-      const role = outlineRole(meta);
-      if (!role) continue;
-      entries.push({ entryId: meta.id, role, preview: outlinePreview(meta), timestamp: meta.timestamp, ordinal, ...(meta.toolOnly ? { toolOnly: true } : {}) });
+      const entry = outlineEntryFromMeta(display[positions[ordinal]], ordinal, receipts);
+      if (entry) entries.push(entry);
     }
-    return { anchor, leafId, entries };
+    return { anchor, leafId, entries: spliceOutlineTitleEntries(entries, display, positions) };
   } finally {
     closeSync(fd);
   }

@@ -26,7 +26,7 @@ import { useWebUser } from "@/hooks/useWebUser";
 import type { HistoryBoundary, HistoryPage, JournalAnchor } from "@/lib/session-history";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
-import type { SessionOutline, SessionOutlineEntry } from "@/lib/session-outline";
+import { applyLiveOutlineJobStatus, type OutlineJobStatus, type SessionOutline, type SessionOutlineEntry } from "@/lib/session-outline";
 import {
   EARLIER_PAGE_SIZE,
   INITIAL_HISTORY_WINDOW,
@@ -869,6 +869,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
   }, []);
+
+  // #135: merge live subagent snapshots into outline async rows so lifecycle
+  // badges flip without a reload (live snapshot > async-result > spawn receipt).
+  // The same snapshot map feeds SubagentPanel; identity is preserved when
+  // nothing changed so the outline rail does not re-render per progress frame.
+  const outlineEntries = useMemo(() => {
+    if (subagents.length === 0) return outline;
+    const live = new Map<string, OutlineJobStatus>();
+    for (const subagent of subagents) live.set(subagent.id, subagent.status);
+    return applyLiveOutlineJobStatus(outline, live);
+  }, [outline, subagents]);
 
   // Bounded journal refresh (#99/#124): always `tail=5`, never a full-history
   // GET. `boundaryAnchor` is the FRESH atomic splice anchor from the connected
@@ -2414,6 +2425,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             };
             return mergeSubagentSnapshots(current, [finished]);
           });
+          // #135: terminal subagent event — the live badge flips via the
+          // snapshot merge above; refresh the outline so durable delivery
+          // rows appear once journaled (coalesced, never per progress frame).
+          if (sessionIdRef.current) void loadOutline();
           break;
         }
         const started: SubagentSnapshot = {
@@ -3418,7 +3433,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     historyLoading, handleLoadEarlier,
     // #104 follow controller + outline + historic navigation
     autoFollow, pauseAutoFollow, resumeAutoFollow, toggleAutoFollow,
-    outline, outlineLoading, outlineError, loadOutline,
+    outline: outlineEntries, outlineLoading, outlineError, loadOutline,
     historyBrowsing, historyTargetEntryId, historyNavigationLoading, historyNavigationError,
     handleJumpToEntry, handleReturnToLatest, cancelHistoryNavigation,
     // Refs
