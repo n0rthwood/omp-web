@@ -1248,7 +1248,9 @@ function outlineEntryFromMeta(
     ordinal,
     ...(meta.toolOnly ? { toolOnly: true } : {}),
   };
-  if (role === "tool" || role === "write" || role === "wait") {
+  // #143: subagent rows are tool-only task spawns too — their preview is the
+  // raw "task"/"todo, task" label list, so they need the same localization.
+  if (role === "tool" || role === "write" || role === "wait" || role === "subagent") {
     if (meta.toolNames && meta.toolNames.length > 0) entry.toolNames = meta.toolNames;
   }
   if (role === "subagent") {
