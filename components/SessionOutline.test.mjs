@@ -81,12 +81,27 @@ for (const role of ["user", "assistant", "ask", "summary", "subagent"]) {
   });
 }
 
-test("only assistants with toolOnly exactly true are grouped", () => {
+test("only tool-category rows are grouped; text assistants never join runs", () => {
   const entries = [
     entry(0), entry(1, { toolOnly: false }), entry(2, { toolOnly: undefined }),
     entry(3, { role: "subagent" }), entry(4, { role: "user" }), entry(5),
   ];
   assert.deepEqual(groupOutlineEntries(entries), entries.map((item) => ({ kind: "entry", entry: item })));
+});
+
+test("#135 tool/write/wait rows group together; async and title rows break runs", () => {
+  const tool = entry(0, { role: "tool", toolOnly: undefined });
+  const write = entry(1, { role: "write", toolOnly: undefined });
+  const wait = entry(2, { role: "wait", toolOnly: undefined });
+  const spawn = entry(3, { role: "subagent", toolOnly: true });
+  const more = entry(4, { role: "tool", toolOnly: undefined });
+  const title = entry(5, { role: "title", toolOnly: undefined });
+  const rows = groupOutlineEntries([tool, write, wait, spawn, more, title]);
+  assert.deepEqual(rows.map((row) => row.kind), ["toolGroup", "entry", "entry", "entry"]);
+  assert.deepEqual(rows[0].entries, [tool, write, wait]);
+  assert.strictEqual(rows[1].entry, spawn);
+  assert.strictEqual(rows[2].entry, more);
+  assert.strictEqual(rows[3].entry, title);
 });
 
 test("mixed sequences preserve source order and noncontiguous rendered-message ordinals", () => {
@@ -216,6 +231,88 @@ for (const variant of ["rail", "drawer"]) {
   });
 }
 
+for (const variant of ["rail", "drawer"]) {
+  test(`${variant} #135 tool-category rows use wrench/pencil/hourglass glyphs and labels`, () => {
+    const cases = [
+      { role: "tool", label: "Tool", path: /M7 2a3 3 0 0 0/ },
+      { role: "write", label: "Edit", path: /M8\.6 1\.9l1\.5 1\.5/ },
+      { role: "wait", label: "Wait", path: /M3 1\.5h6M3 10\.5h6/ },
+    ];
+    for (const { role, label, path } of cases) {
+      const html = renderOutline([entry(1, { role, toolOnly: undefined, preview: `${role} row` })], { variant });
+      assert.match(html, new RegExp(`>${label}</span>`));
+      assert.match(html, path);
+      assert.match(html, /data-outline-subdued="true"/);
+    }
+  });
+
+  test(`${variant} #135 collapsed mixed groups show member-category glyphs and an expand toggle`, () => {
+    const entries = [
+      entry(0, { role: "tool", toolOnly: undefined, preview: "bash run" }),
+      entry(1, { role: "write", toolOnly: undefined, preview: "edit file" }),
+      entry(2, { role: "wait", toolOnly: undefined, preview: "wait jobs" }),
+    ];
+    const html = renderOutline(entries, { variant });
+    assert.deepEqual(renderedEntryIds(html), ["entry-0"]);
+    assert.match(html, /×3<\/span>/);
+    assert.match(html, /M8\.6 1\.9l1\.5 1\.5/, "pencil in the mixed-glyph strip");
+    assert.match(html, /M3 1\.5h6M3 10\.5h6/, "hourglass in the mixed-glyph strip");
+    assert.match(html, /data-outline-group-toggle="entry-0"/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.match(html, /aria-label="Expand tool rows"/);
+    assert.doesNotMatch(html, /edit file|wait jobs/, "collapsed members stay hidden");
+  });
+
+  test(`${variant} #135 async rows carry lifecycle badges with SubagentPanel colors`, () => {
+    const cases = [
+      { jobStatus: "running", marker: /stroke-dasharray="22 13"/, color: /color:var\(--accent\)/ },
+      { jobStatus: "pending", marker: /stroke-dasharray="22 13"/, color: /color:var\(--accent\)/ },
+      { jobStatus: "completed", marker: />✓</, color: /color:var\(--success\)/ },
+      { jobStatus: "failed", marker: />✗</, color: /color:var\(--danger\)/ },
+      { jobStatus: "aborted", marker: />⊘</, color: /color:var\(--warning\)/ },
+    ];
+    for (const { jobStatus, marker, color } of cases) {
+      const html = renderOutline([entry(1, { role: "subagent", toolOnly: undefined, preview: "worker", jobStatus })], { variant });
+      assert.match(html, marker, `${jobStatus} badge glyph`);
+      assert.match(html, color, `${jobStatus} badge color`);
+    }
+  });
+
+  test(`${variant} #135 multi-job spawn rows show the worst-status badge plus per-job mini badges`, () => {
+    const html = renderOutline([entry(1, {
+      role: "subagent", toolOnly: true, preview: "task, task",
+      jobStatus: "failed",
+      jobs: [
+        { id: "w1", name: "scout", status: "completed" },
+        { id: "w2", name: "task", status: "failed" },
+      ],
+    })], { variant });
+    assert.match(html, />✗</, "aggregate failed badge");
+    assert.match(html, />✓</, "per-job completed mini badge");
+    assert.match(html, /title="scout: completed\ntask: failed"/, "per-job tooltip");
+  });
+
+  test(`${variant} #135 title rows use the tag glyph and Title label`, () => {
+    const html = renderOutline([entry(1, { role: "title", toolOnly: undefined, preview: "New name", anchorEntryId: "entry-9" })], { variant });
+    assert.match(html, />Title<\/span>/);
+    assert.match(html, /M1\.8 5\.4V2\.6/, "tag body");
+    assert.match(html, /<circle cx="4" cy="4" r="0\.7"/, "tag hole");
+    assert.doesNotMatch(html, /data-outline-subdued/);
+  });
+
+  test(`${variant} #135 old payloads without new fields render unchanged`, () => {
+    const html = renderOutline([
+      entry(0, { preview: "legacy tools" }),
+      entry(1, { preview: "legacy tools 2" }),
+      entry(2, { role: "subagent", toolOnly: undefined, preview: "legacy delivery" }),
+    ], { variant });
+    assert.match(html, />Tools<\/span>/);
+    assert.match(html, /×2<\/span>/);
+    assert.doesNotMatch(html, /✓|✗|⊘|stroke-dasharray/, "no badges without jobStatus");
+    assert.match(html, />Subagent<\/span>/);
+  });
+}
+
 test("all built-in locales translate the new outline labels", () => {
   assert.equal(enLocale.messages["outline.roleSubagent"], "Subagent");
   assert.equal(enLocale.messages["outline.roleTools"], "Tools");
@@ -223,4 +320,16 @@ test("all built-in locales translate the new outline labels", () => {
   assert.equal(zhCNLocale.messages["outline.roleSubagent"], "子代理");
   assert.equal(zhCNLocale.messages["outline.roleTools"], "工具调用");
   assert.equal(zhCNLocale.messages["outline.roleSystem"], "系统");
+  assert.equal(enLocale.messages["outline.roleTool"], "Tool");
+  assert.equal(enLocale.messages["outline.roleWrite"], "Edit");
+  assert.equal(enLocale.messages["outline.roleWait"], "Wait");
+  assert.equal(enLocale.messages["outline.roleTitle"], "Title");
+  assert.equal(zhCNLocale.messages["outline.roleTool"], "工具");
+  assert.equal(zhCNLocale.messages["outline.roleWrite"], "编辑");
+  assert.equal(zhCNLocale.messages["outline.roleWait"], "等待");
+  assert.equal(zhCNLocale.messages["outline.roleTitle"], "标题");
+  for (const key of ["outline.expandTools", "outline.collapseTools", "outline.jobPending", "outline.jobRunning", "outline.jobCompleted", "outline.jobFailed", "outline.jobAborted"]) {
+    assert.ok(enLocale.messages[key], `en ${key}`);
+    assert.ok(zhCNLocale.messages[key], `zh-CN ${key}`);
+  }
 });

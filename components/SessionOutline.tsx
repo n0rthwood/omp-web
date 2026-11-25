@@ -1,6 +1,6 @@
 "use client";
-import { useCallback, useEffect, useRef } from "react";
-import type { SessionOutlineEntry } from "@/lib/session-outline";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { OutlineJobStatus, SessionOutlineEntry } from "@/lib/session-outline";
 import { useI18n } from "@/hooks/useI18n";
 
 // #104: journal outline panel. Rendered either as a persistent rail beside the
@@ -27,18 +27,25 @@ type OutlineRow =
   | { kind: "entry"; entry: SessionOutlineEntry }
   | { kind: "toolGroup"; entries: SessionOutlineEntry[] };
 
-/** Collapse only adjacent tool-only assistant entries; keep journal positions intact. */
+/** #135: tool-category rows (wrench/pencil/hourglass) plus legacy tool-only
+ * assistant rows from old remotes. */
+function isToolCategoryEntry(entry: SessionOutlineEntry): boolean {
+  return entry.role === "tool" || entry.role === "write" || entry.role === "wait"
+    || (entry.role === "assistant" && entry.toolOnly === true);
+}
+
+/** Collapse adjacent tool-category entries; keep journal positions intact. */
 export function groupOutlineEntries(entries: SessionOutlineEntry[]): OutlineRow[] {
   const rows: OutlineRow[] = [];
   for (let index = 0; index < entries.length;) {
     const entry = entries[index];
-    if (entry.role !== "assistant" || entry.toolOnly !== true) {
+    if (!isToolCategoryEntry(entry)) {
       rows.push({ kind: "entry", entry });
       index++;
       continue;
     }
     let end = index + 1;
-    while (end < entries.length && entries[end].role === "assistant" && entries[end].toolOnly === true) {
+    while (end < entries.length && isToolCategoryEntry(entries[end])) {
       end++;
     }
     rows.push(end - index >= 2
@@ -66,7 +73,36 @@ function roleLabel(role: SessionOutlineEntry["role"], t: (key: string, params?: 
   if (role === "ask") return t("outline.roleAsk");
   if (role === "subagent") return t("outline.roleSubagent");
   if (role === "system") return t("outline.roleSystem");
+  if (role === "tool") return t("outline.roleTool");
+  if (role === "write") return t("outline.roleWrite");
+  if (role === "wait") return t("outline.roleWait");
+  if (role === "title") return t("outline.roleTitle");
   return t("outline.roleAssistant");
+}
+
+function jobStatusLabel(status: OutlineJobStatus, t: (key: string, params?: Record<string, string | number>) => string): string {
+  if (status === "pending") return t("outline.jobPending");
+  if (status === "running") return t("outline.jobRunning");
+  if (status === "failed") return t("outline.jobFailed");
+  if (status === "aborted") return t("outline.jobAborted");
+  return t("outline.jobCompleted");
+}
+
+/** #135: lifecycle badge — SubagentPanel conventions: in-flight spins with the
+ * accent dashed circle, completed ✓ success, failed ✗ danger, aborted ⊘ warning. */
+function JobStatusBadge({ status, label }: { status: OutlineJobStatus; label: string }) {
+  if (status === "pending" || status === "running") {
+    return (
+      <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-label={label} role="img" style={{ color: "var(--accent)", flexShrink: 0 }}>
+        <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.8" strokeDasharray="22 13">
+          <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.9s" repeatCount="indefinite" />
+        </circle>
+      </svg>
+    );
+  }
+  const glyph = status === "completed" ? "✓" : status === "failed" ? "✗" : "⊘";
+  const color = status === "completed" ? "var(--success)" : status === "failed" ? "var(--danger)" : "var(--warning)";
+  return <span aria-label={label} role="img" style={{ color, fontSize: 10, fontWeight: 700, lineHeight: 1, flexShrink: 0 }}>{glyph}</span>;
 }
 
 function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] | "tools" }) {
@@ -89,10 +125,37 @@ function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] | "tools" }) {
   if (role === "ask") {
     return <span aria-hidden="true" style={{ fontSize: 12, fontWeight: 700 }}>?</span>;
   }
-  if (role === "tools") {
+  if (role === "tools" || role === "tool") {
+    // Wrench: unified glyph for all generic tool rows and collapsed groups.
     return (
       <svg {...common}>
         <path d="M7 2a3 3 0 0 0-3.7 3.7L1.5 7.5a1.4 1.4 0 0 0 2 2l1.8-1.8A3 3 0 0 0 9 4L7.2 5 6 3.8 7 2Z" />
+      </svg>
+    );
+  }
+  if (role === "write") {
+    // Pencil: diagonal body with tip at lower-left.
+    return (
+      <svg {...common}>
+        <path d="M8.6 1.9l1.5 1.5-5.6 5.6-2 .5.5-2 5.6-5.6Z" />
+        <path d="M7.4 3.1l1.5 1.5" />
+      </svg>
+    );
+  }
+  if (role === "wait") {
+    // Hourglass: two bulbs between caps.
+    return (
+      <svg {...common}>
+        <path d="M3 1.5h6M3 10.5h6M3.8 1.5c0 2 1.4 2.9 2.2 4.5-.8 1.6-2.2 2.5-2.2 4.5M8.2 1.5c0 2-1.4 2.9-2.2 4.5.8 1.6 2.2 2.5 2.2 4.5" />
+      </svg>
+    );
+  }
+  if (role === "title") {
+    // Tag/label: pointed body with a punch hole.
+    return (
+      <svg {...common}>
+        <path d="M1.8 5.4V2.6a.8.8 0 0 1 .8-.8h2.8L10 6.4a1 1 0 0 1 0 1.4L7.8 10a1 1 0 0 1-1.4 0L1.8 5.4Z" />
+        <circle cx="4" cy="4" r="0.7" />
       </svg>
     );
   }
@@ -130,6 +193,9 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  // #135: tool-group expansion is local component state, keyed by the group's
+  // first member id; collapsed by default.
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
   // Keep the current-reading row visible inside the outline's OWN scroll area
   // (never touches the transcript scroll position).
@@ -176,45 +242,113 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
         </div>
       )}
       <div ref={listRef} role="list" aria-label={t("outline.title")} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
-        {groupOutlineEntries(entries).map((row) => {
+        {groupOutlineEntries(entries).flatMap((row) => {
           const isToolGroup = row.kind === "toolGroup";
           const entry = row.kind === "toolGroup" ? row.entries[0] : row.entry;
-          // Tools are de-emphasized: dim glyph, no accent, slightly faded row.
-          const subdued = isToolGroup || (entry.role === "assistant" && entry.toolOnly === true);
-          const isReading = row.kind === "toolGroup"
-            ? row.entries.some((member) => member.entryId === readingEntryId)
-            : readingEntryId === entry.entryId;
-          const isTarget = row.kind === "toolGroup"
-            ? row.entries.some((member) => member.entryId === targetEntryId)
-            : targetEntryId === entry.entryId;
+          const expanded = isToolGroup && expandedGroups[entry.entryId] === true;
+          const renderEntryRow = (item: SessionOutlineEntry, inGroup: boolean) => {
+            // Tools are de-emphasized: dim glyph, no accent, slightly faded row.
+            const subdued = isToolCategoryEntry(item);
+            const isReading = readingEntryId === item.entryId;
+            const isTarget = targetEntryId === item.entryId;
+            const time = formatOutlineTime(item.timestamp);
+            // #135: title rows render no transcript block — jump to their anchor.
+            const jumpId = item.role === "title" ? item.anchorEntryId ?? item.entryId : item.entryId;
+            const jobsTooltip = item.jobs && item.jobs.length > 0
+              ? item.jobs.map((job) => `${job.name}: ${jobStatusLabel(job.status, t)}`).join("\n")
+              : undefined;
+            return (
+              <div key={item.entryId} role="listitem">
+              <button
+                ref={isReading ? activeItemRef : undefined}
+                type="button"
+                data-outline-entry={item.entryId}
+                data-outline-subdued={subdued ? "true" : undefined}
+                data-outline-group-member={inGroup ? "true" : undefined}
+                aria-current={isReading ? "location" : undefined}
+                aria-label={t("outline.jumpLabel", { index: item.ordinal + 1, preview: item.preview })}
+                onClick={() => onJump(jumpId)}
+                className="mb-1 block w-full min-w-0 rounded-lg border px-2 py-1.5 text-left transition-colors"
+                style={{
+                  borderColor: isTarget || isReading ? "var(--accent)" : "transparent",
+                  background: isReading ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent",
+                  opacity: subdued ? 0.75 : undefined,
+                }}
+              >
+                <span className="flex min-w-0 items-start gap-2">
+                  <span
+                    aria-hidden="true"
+                    className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md"
+                    style={{
+                      color: subdued ? "var(--text-dim)" : item.role === "ask" || item.role === "user" ? "var(--accent)" : item.role === "assistant" ? "var(--success)" : item.role === "summary" ? "#d97706" : item.role === "subagent" ? "#8b5cf6" : item.role === "system" ? "#0d9488" : item.role === "title" ? "#d97706" : "var(--text-muted)",
+                      background: "color-mix(in srgb, var(--text-dim) 12%, transparent)",
+                    }}
+                  >
+                    <RoleGlyph role={item.role} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className="block overflow-hidden text-xs leading-snug text-text"
+                      style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflowWrap: "anywhere" }}
+                    >
+                      {item.preview}
+                    </span>
+                    <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-dim">
+                      <span className="flex-shrink-0 tabular-nums">#{item.ordinal + 1}</span>
+                      <span className="flex-shrink-0">{roleLabel(item.role, t)}</span>
+                      {item.jobStatus && <JobStatusBadge status={item.jobStatus} label={jobStatusLabel(item.jobStatus, t)} />}
+                      {item.jobs && item.jobs.length > 1 && (
+                        <span className="flex flex-shrink-0 items-center gap-0.5" title={jobsTooltip}>
+                          {item.jobs.slice(0, 8).map((job) => (
+                            <JobStatusBadge key={job.id} status={job.status} label={`${job.name}: ${jobStatusLabel(job.status, t)}`} />
+                          ))}
+                          {item.jobs.length > 8 && <span className="tabular-nums">+{item.jobs.length - 8}</span>}
+                        </span>
+                      )}
+                      {time && <span className="flex-shrink-0 tabular-nums">{time}</span>}
+                      {isTarget && navigating && (
+                        <span className="inline-block h-2.5 w-2.5 flex-shrink-0 animate-[spin_1s_linear_infinite] rounded-full border border-border border-t-[var(--accent)]" aria-hidden="true" />
+                      )}
+                    </span>
+                  </span>
+                </span>
+              </button>
+              </div>
+            );
+          };
+          if (!isToolGroup) return [renderEntryRow(entry, false)];
+          // #135: collapsed groups keep the first-member jump affordance;
+          // expanding reveals individual rows with their per-category glyphs.
+          const groupRows = expanded ? row.entries.map((member) => renderEntryRow(member, true)) : [];
+          const isReading = row.entries.some((member) => member.entryId === readingEntryId);
+          const isTarget = row.entries.some((member) => member.entryId === targetEntryId);
           const time = formatOutlineTime(entry.timestamp);
-          return (
-            <div key={entry.entryId} role="listitem">
+          const categoryGlyphs = [...new Set(row.entries.map((member) => member.role === "assistant" ? "tool" : member.role))];
+          const header = (
+            <div key={`${entry.entryId}-group`} role="listitem">
+            <div className="mb-1 flex w-full min-w-0 items-stretch gap-1">
             <button
-              ref={isReading || (isToolGroup && isTarget) ? activeItemRef : undefined}
+              ref={isReading || isTarget ? activeItemRef : undefined}
               type="button"
               data-outline-entry={entry.entryId}
-              data-outline-subdued={subdued ? "true" : undefined}
+              data-outline-subdued="true"
               aria-current={isReading ? "location" : undefined}
               aria-label={t("outline.jumpLabel", { index: entry.ordinal + 1, preview: entry.preview })}
               onClick={() => onJump(entry.entryId)}
-              className="mb-1 block w-full min-w-0 rounded-lg border px-2 py-1.5 text-left transition-colors"
+              className="block min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-left transition-colors"
               style={{
                 borderColor: isTarget || isReading ? "var(--accent)" : "transparent",
                 background: isReading ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "transparent",
-                opacity: subdued ? 0.75 : undefined,
+                opacity: 0.75,
               }}
             >
               <span className="flex min-w-0 items-start gap-2">
                 <span
                   aria-hidden="true"
                   className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md"
-                  style={{
-                    color: subdued ? "var(--text-dim)" : entry.role === "ask" || entry.role === "user" ? "var(--accent)" : entry.role === "assistant" ? "var(--success)" : entry.role === "summary" ? "#d97706" : entry.role === "subagent" ? "#8b5cf6" : entry.role === "system" ? "#0d9488" : "var(--text-muted)",
-                    background: "color-mix(in srgb, var(--text-dim) 12%, transparent)",
-                  }}
+                  style={{ color: "var(--text-dim)", background: "color-mix(in srgb, var(--text-dim) 12%, transparent)" }}
                 >
-                  <RoleGlyph role={isToolGroup ? "tools" : entry.role} />
+                  <RoleGlyph role="tools" />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span
@@ -225,13 +359,16 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-dim">
                     <span className="flex-shrink-0 tabular-nums">#{entry.ordinal + 1}</span>
-                    <span className="flex-shrink-0">{isToolGroup ? t("outline.roleTools") : roleLabel(entry.role, t)}</span>
-                    {row.kind === "toolGroup" && (
-                      <span
-                        className="flex-shrink-0 rounded-full px-1.5 py-0.5 tabular-nums"
-                        style={{ color: "var(--text-dim)", background: "color-mix(in srgb, var(--text-dim) 15%, transparent)" }}
-                      >
-                        ×{row.entries.length}
+                    <span className="flex-shrink-0">{t("outline.roleTools")}</span>
+                    <span
+                      className="flex-shrink-0 rounded-full px-1.5 py-0.5 tabular-nums"
+                      style={{ color: "var(--text-dim)", background: "color-mix(in srgb, var(--text-dim) 15%, transparent)" }}
+                    >
+                      ×{row.entries.length}
+                    </span>
+                    {categoryGlyphs.length > 1 && (
+                      <span className="flex flex-shrink-0 items-center gap-0.5" aria-hidden="true">
+                        {categoryGlyphs.map((role) => <RoleGlyph key={role} role={role} />)}
                       </span>
                     )}
                     {time && <span className="flex-shrink-0 tabular-nums">{time}</span>}
@@ -242,8 +379,22 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                 </span>
               </span>
             </button>
+            <button
+              type="button"
+              data-outline-group-toggle={entry.entryId}
+              aria-expanded={expanded}
+              aria-label={expanded ? t("outline.collapseTools") : t("outline.expandTools")}
+              onClick={() => setExpandedGroups((current) => ({ ...current, [entry.entryId]: !expanded }))}
+              className="flex w-6 flex-shrink-0 items-center justify-center rounded-lg text-text-dim transition-colors hover:bg-bg-panel hover:text-text"
+            >
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: expanded ? "rotate(90deg)" : undefined, transition: "transform 120ms" }}>
+                <path d="M4 2.5l4 3.5-4 3.5" />
+              </svg>
+            </button>
+            </div>
             </div>
           );
+          return [header, ...groupRows];
         })}
       </div>
     </div>
