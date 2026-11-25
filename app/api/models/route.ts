@@ -5,6 +5,7 @@ import {
   loadModelsWithCache,
   withModelRuntimeError,
   withSafeModelLoadFailure,
+  type ModelHealth,
   type ModelsData,
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
@@ -12,6 +13,7 @@ import { getOmpSetting } from "@/lib/omp-setting-access";
 import { listModelRoles, readDefaultModelRole } from "@/lib/model-roles";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { getOmpRuntime, getSettingsForCwd } from "@/lib/omp-runtime";
+import { ensureModelsHealthSnapshot, refreshModelsFreshness } from "@/lib/models-health";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +33,13 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   let defaultModel: { provider: string; modelId: string } | null = null;
   const thinkingLevels: Record<string, string[]> = {};
 
-  const { modelRegistry } = await getOmpRuntime();
+  const runtime = await getOmpRuntime();
+  const { modelRegistry } = runtime;
+  // External changes (CLI login/logout, a credential disabled by a failed
+  // OAuth refresh, a hand-edited models.yml) must be visible on the next
+  // request, not after a web-tier restart (#139). Both calls are incremental:
+  // a `data_version` read plus a models.yml mtime check.
+  await refreshModelsFreshness(runtime);
   const settings = await getSettingsForCwd(cwd);
   const modelError = modelRegistry.getError()?.message;
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
@@ -69,6 +77,18 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     ? modelRegistry.getAvailable().length - visible.length
     : undefined;
 
+  // Per-model credential health for the health bar (#139). Only the models
+  // this response actually lists are copied, so the payload stays proportional
+  // to the picker. Absent when the first scan has not produced a snapshot.
+  const health = await ensureModelsHealthSnapshot();
+  const modelHealth: Record<string, ModelHealth> = {};
+  if (health) {
+    for (const m of visible) {
+      const entry = health.modelHealth[`${m.provider}/${m.id}`];
+      if (entry) modelHealth[`${m.provider}/${m.id}`] = entry;
+    }
+  }
+
   return withModelRuntimeError(
     {
       models: Object.fromEntries(nameMap),
@@ -80,6 +100,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
       roles,
       ...(hiddenModelCount !== undefined ? { hiddenModelCount } : {}),
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
+      ...(Object.keys(modelHealth).length > 0 ? { modelHealth } : {}),
     },
     modelError,
   );
