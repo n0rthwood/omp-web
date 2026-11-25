@@ -1,3 +1,28 @@
+omp-web (0.5.47) jammy; urgency=medium
+
+  * Outline subagent rows reconcile across journal rows (#142): wait-result
+    and async-delivery completions fold back into the spawn row by agent
+    name, rows show instance names, spinner count matches real pending jobs,
+    revives dedupe, and attach seeds the live subagent snapshot.
+  * Tool names are localized (#143) in call headers, running hints and
+    outline previews (zh: 写入/任务/命令行/待办列表…), and IRC injections
+    render as a structured card instead of leaking the literal <irc> envelope.
+  * Provider page data layer (#144): expiring credentials get their own amber
+    badge (never "disabled"), the expiry label reads 有效期至, catalog rows
+    carry input/reasoning/cost/context from the full registry (no allow-list
+    clipping, no cwd 403), editing a catalog row writes a sparse
+    modelOverrides patch, env-sourced providers can be hidden/restored with a
+    clear env-key notice, and tombstoned OAuth subscriptions stay listed for
+    re-login.
+  * The provider-status strip moves above the composer (#145) as a single
+    line (polling lifted to the shell, mobile-safe), codex shows all windows
+    with a data timestamp, the health panel re-reads every 60s while open,
+    and the remaining mockup gaps are closed (chain empty-state wording,
+    OAuth last-refresh, refresh-diff badge, wizard auto-preflight and
+    content-level diff, available-provider list, logged-out row dimming).
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 25 Nov 2026 20:56:00 +0000
+
 omp-web (0.5.46) jammy; urgency=medium
 
   * Model-config overhaul: cross-model fallback is now visible in chat (#138)
