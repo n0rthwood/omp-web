@@ -12,6 +12,7 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { FALLBACK_MODEL_ROLE } from "@/lib/fallback-events";
 import { resolveLocalFilePath } from "@/lib/file-links";
 import { getFileName } from "@/lib/file-paths";
 import { apiPath } from "@/lib/api-path";
@@ -248,6 +249,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
+    }
+    if ((message as CustomMessage).customType === "model_change") {
+      return <ModelChangeMessageView message={message as CustomMessage} />;
     }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
   }
@@ -1934,6 +1938,51 @@ function FileMentionRow({ file, cwd, onOpenFile }: { file: FileMentionFile; cwd?
           {file.content}
         </pre>
       )}
+    </div>
+  );
+}
+
+/**
+ * #138: a journal `model_change` rendered as a transcript system row.
+ *
+ * The composer's model chip follows the configured default (a retry fallback
+ * is ephemeral in the journal), so without this row a degrade that happened
+ * before a reload leaves no trace in the chat. `role: "fallback"` (or the
+ * SDK's resolvedModelIsFallback flag) marks the degrade and tints it amber,
+ * the same palette as the live fallback banner.
+ */
+function ModelChangeMessageView({ message }: { message: CustomMessage }) {
+  const { t } = useI18n();
+  const model = getMessageText(message.content);
+  const details = (message.details ?? {}) as { role?: unknown; resolvedModelIsFallback?: unknown };
+  const role = typeof details.role === "string" && details.role ? details.role : "default";
+  const isFallback = role === FALLBACK_MODEL_ROLE || details.resolvedModelIsFallback === true;
+  const time = formatTime(message.timestamp);
+  const label = isFallback
+    ? t("chat.modelFallback", { model, role })
+    : t("chat.modelChanged", { model });
+
+  return (
+    <div
+      data-testid="model-change-row"
+      data-fallback={isFallback ? "true" : "false"}
+      style={{
+        marginBottom: 12,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 12,
+        color: isFallback ? "rgba(180,130,0,0.95)" : "var(--text-muted)",
+      }}
+    >
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M16 3h5v5" />
+        <path d="M8 21H3v-5" />
+        <path d="M21 3l-7 7" />
+        <path d="M3 21l7-7" />
+      </svg>
+      <span style={{ minWidth: 0, overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>{label}</span>
+      {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
     </div>
   );
 }

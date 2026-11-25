@@ -589,6 +589,23 @@ export function entryToUiMessage(
         },
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
+    case "model_change":
+      // #138: a model change is part of the transcript. The journal records
+      // the selector and the role it was resolved for ("fallback" for a retry
+      // fallback), so a degrade stays visible after a reload even though the
+      // composer's model chip follows the configured default again.
+      if (!entry.model) return null;
+      return {
+        role: "custom",
+        customType: "model_change",
+        content: entry.model,
+        display: true,
+        details: {
+          role: entry.role ?? "default",
+          resolvedModelIsFallback: entry.resolvedModelIsFallback === true,
+        },
+        timestamp: parseEntryTimestamp(entry.timestamp),
+      };
     case "branch_summary":
       if (!entry.summary) return null;
       return {
