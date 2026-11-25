@@ -336,9 +336,11 @@ export async function collectProviderStatus(deps: ProviderStatusDeps) {
     const providerReports = byProvider.get(provider) ?? [];
     const hasUsage = deps.hasUsageProvider(provider);
 
-    if (!hasUsage && providerReports.length === 0) {
-      // Presence-only: a configured provider (stored row or concrete env/config
-      // key) → green. Zero upstream requests.
+    if (providerReports.length === 0 && (!hasUsage || rows.length === 0)) {
+      // Presence-only: a configured provider with no probe answer and either
+      // no usage provider at all, or no stored credential row (env/.env keys —
+      // usage probes like alibaba-token-plan need a stored cookie credential,
+      // an env API key can never yield windows). Green, zero extra requests.
       entries.set(provider, {
         id: provider,
         displayName: deps.displayName(provider),
