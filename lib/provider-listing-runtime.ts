@@ -77,6 +77,7 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
       status: {
         configured: Boolean(origin?.concrete),
         ...(origin?.kind ? { source: origin.kind } : {}),
+        ...(origin?.envVar ? { envVar: origin.envVar } : {}),
       },
       ...(credentialTypes.has(id) ? { credentialType: credentialTypes.get(id) } : {}),
       modelCount: modelCounts.get(id) ?? 0,

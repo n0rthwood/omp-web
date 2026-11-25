@@ -23,7 +23,8 @@
  *    the external change without a restart.
  *
  * The scan never probes upstream: "disabled" comes from SQLite tombstones
- * (`disabled_cause`), "expiring" from the stored OAuth `expires` field.
+ * (`disabled_cause`), "expiring" from the stored OAuth `expires` field of a
+ * grant the SDK cannot renew by itself.
  * No credential material leaves this module — only provider ids, states,
  * causes and account labels.
  */
@@ -76,7 +77,12 @@ export interface ModelsHealthResponse {
 // ── Scan policy ──────────────────────────────────────────────────────────────
 
 export const MODELS_HEALTH_SCAN_BASE_MS = 60_000;
-/** OAuth access tokens inside this window are reported as `expiring`. */
+/**
+ * OAuth grants WITHOUT a refresh token inside this window are reported as
+ * `expiring`. A grant that carries one is renewed by the SDK at `expires`, so
+ * its access token is always short of a day from expiry — a day-wide window
+ * flagged every healthy short-lived login as expiring permanently (#144).
+ */
 const EXPIRING_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Cap on upstream error text kept in a cause (never echoes key material). */
 const MAX_CAUSE_TEXT = 300;
@@ -190,18 +196,26 @@ export async function collectModelsHealth(deps: ModelsHealthDeps): Promise<Model
   for (const provider of [...ids].sort()) {
     const active = activeByProvider.get(provider) ?? [];
     if (active.length > 0) {
-      let expiring: { expiresAt: number; account?: string } | undefined;
+      // Soonest unexpired access token across the provider's live OAuth rows:
+      // the "valid until" the provider card shows.
+      let expiresAt: number | undefined;
+      let expiring = false;
       let account: string | undefined;
       for (const row of active) {
         if (row.credential.type !== "oauth") continue;
         account ??= row.credential.email ?? row.credential.accountId;
         const expires = row.credential.expires;
-        if (expires === undefined || expires <= now || expires - now > EXPIRING_WINDOW_MS) continue;
-        if (!expiring || expires < expiring.expiresAt) expiring = { expiresAt: expires, account };
+        // An already-expired token is renewed on demand, not a warning.
+        if (expires === undefined || expires <= now) continue;
+        if (expiresAt === undefined || expires < expiresAt) expiresAt = expires;
+        if (row.credential.refresh) continue;
+        if (expires - now <= EXPIRING_WINDOW_MS) expiring = true;
       }
-      providers[provider] = expiring
-        ? { state: "expiring", expiresAt: expiring.expiresAt, ...(expiring.account ? { account: expiring.account } : {}) }
-        : { state: "ok", ...(account ? { account } : {}) };
+      providers[provider] = {
+        state: expiring ? "expiring" : "ok",
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+        ...(account ? { account } : {}),
+      };
       continue;
     }
     const disabled = disabledByProvider.get(provider) ?? [];

@@ -1,19 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { DiscoveredModel } from "@/lib/model-discovery";
 import { useI18n } from "@/hooks/useI18n";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { OAuthCard } from "./OAuthCard";
 import { ProviderConfigForm } from "./ProviderConfigForm";
 import { ProviderIcon } from "./ProviderIcon";
-import { ProviderModelTable, type ModelRow } from "./ProviderModelTable";
-import { RefreshDiffPanel } from "./RefreshDiffPanel";
+import { ProviderModelTable } from "./ProviderModelTable";
+import { buildProviderModelRows } from "./provider-model-rows";
 import { mergeProviderRows, providerRowGroup } from "./provider-merge";
+import { RefreshDiffPanel } from "./RefreshDiffPanel";
 import type {
   ApiKeyProvider,
   ModelEntry,
   ModelHealthMap,
   ModelOption,
+  ModelOverridePatch,
   ModelsJson,
   OAuthProvider,
   ProviderEntry,
@@ -33,11 +36,10 @@ const GROUP_LABEL_KEYS: Record<ProviderSource, { title: string; sub: string }> =
 /**
  * Tab 3 — providers, merged into one row per provider.
  *
- * A provider that exists both in the built-in catalog and in `models.yml` used
- * to render twice ("two Zhipu"); here the rows are keyed by provider id and the
- * config layer wins, with a badge naming every layer that contributed. The
- * right half is the connection info, the OAuth card (subscriptions only), the
- * refresh diff, and the merged model table.
+ * `models` is the provider's untrimmed registry list: neither the
+ * `enabledModels` allow-list nor a missing project scope narrows it, so a
+ * catalog provider shows every model it serves with the catalog facts
+ * (modalities, thinking, pricing, windows) the runtime resolves (#144).
  */
 export function ProvidersTab({
   config,
@@ -46,6 +48,8 @@ export function ProvidersTab({
   apiKeyProviders,
   models,
   modelHealth,
+  thinkingLevels,
+  hiddenProviders,
   providerHealth,
   focusProviderId,
   refreshState,
@@ -55,31 +59,40 @@ export function ProvidersTab({
   onUpdateProvider,
   onRenameProvider,
   onDeleteProvider,
+  onOverrideModel,
   onAddDiscoveredModels,
   onAuthChanged,
   onModelsChanged,
+  onHideProvider,
+  onShowProvider,
   onAddProvider,
   onSync,
 }: {
   config: ModelsJson;
-  savedProviderNames: readonly string[];
-  oauthProviders: readonly OAuthProvider[];
-  apiKeyProviders: readonly ApiKeyProvider[];
-  models: readonly ModelOption[];
+  savedProviderNames: string[];
+  oauthProviders: OAuthProvider[];
+  apiKeyProviders: ApiKeyProvider[];
+  models: ModelOption[];
   modelHealth?: ModelHealthMap;
+  /** `provider:modelId` → efforts the registry supports, for the Thinking column. */
+  thinkingLevels?: Readonly<Record<string, readonly string[]>>;
+  /** Provider ids this machine's user hid from the list (#144). */
+  hiddenProviders: ReadonlySet<string>;
   providerHealth?: Record<string, ProviderHealth>;
-  /** Provider to select when the tab opens (e.g. just added from the catalog). */
-  focusProviderId?: string | null;
+  focusProviderId: string | null;
   refreshState: ProviderRefreshState;
   refreshBusy: boolean;
   saving: boolean;
-  onRefresh: (providerName: string) => void;
+  onRefresh: (name: string) => void;
   onUpdateProvider: (name: string, provider: ProviderEntry) => void;
   onRenameProvider: (oldName: string, newName: string) => void;
   onDeleteProvider: (name: string) => void;
-  onAddDiscoveredModels: (name: string, models: { id: string; name?: string }[]) => void;
+  onOverrideModel: (providerName: string, modelId: string, changed: ModelOverridePatch) => void;
+  onAddDiscoveredModels: (providerName: string, models: DiscoveredModel[]) => void;
   onAuthChanged: () => void;
   onModelsChanged?: () => void;
+  onHideProvider: (id: string) => void;
+  onShowProvider: (id: string) => void;
   onAddProvider: () => void;
   onSync: () => void;
 }) {
@@ -91,55 +104,36 @@ export function ProvidersTab({
     [apiKeyProviders, config.providers, oauthProviders],
   );
 
+  // A key that comes from the environment cannot be disconnected, so its row
+  // is hidden on request instead. Hidden rows stay listed here so the choice
+  // can be undone, and an id without a row any more is simply not shown.
+  const hiddenRows = useMemo(() => rows.filter((row) => hiddenProviders.has(row.id)), [hiddenProviders, rows]);
+  const visibleRows = useMemo(() => rows.filter((row) => !hiddenProviders.has(row.id)), [hiddenProviders, rows]);
+
   const grouped = useMemo(() => GROUP_ORDER
     .map((source) => ({
       source,
-      rows: rows
+      rows: visibleRows
         .filter((row) => providerRowGroup(row) === source)
         .sort((a, b) => a.name.localeCompare(b.name)),
     }))
-    .filter((group) => group.rows.length > 0), [rows]);
+    .filter((group) => group.rows.length > 0), [visibleRows]);
 
   useEffect(() => {
-    if (focusProviderId && rows.some((row) => row.id === focusProviderId)) {
+    if (focusProviderId && visibleRows.some((row) => row.id === focusProviderId)) {
       setSelectedId(focusProviderId);
       return;
     }
-    if (selectedId && rows.some((row) => row.id === selectedId)) return;
-    setSelectedId(rows[0]?.id ?? null);
-  }, [focusProviderId, rows, selectedId]);
+    if (selectedId && visibleRows.some((row) => row.id === selectedId)) return;
+    setSelectedId(visibleRows[0]?.id ?? null);
+  }, [focusProviderId, visibleRows, selectedId]);
 
-  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const selected = visibleRows.find((row) => row.id === selectedId) ?? null;
 
-  const modelRows = useMemo<ModelRow[]>(() => {
-    if (!selected) return [];
-    const byId = new Map<string, ModelRow>();
-    for (const model of models) {
-      if (model.provider !== selected.id) continue;
-      byId.set(model.id, {
-        id: model.id,
-        source: "catalog",
-        configIndex: null,
-        entry: { id: model.id },
-        contextWindow: model.contextWindow,
-      });
-    }
-    (selected.config?.models ?? []).forEach((entry, index) => {
-      const existing = byId.get(entry.id);
-      const merged: ModelRow = {
-        id: entry.id,
-        source: existing ? "merged" : "config",
-        configIndex: index,
-        entry,
-        contextWindow: entry.contextWindow ?? existing?.contextWindow,
-        maxTokens: entry.maxTokens ?? existing?.maxTokens,
-        cost: entry.cost ?? existing?.cost,
-        reasoning: entry.reasoning ?? existing?.reasoning,
-      };
-      byId.set(entry.id, merged);
-    });
-    return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
-  }, [models, selected]);
+  const modelRows = useMemo(
+    () => (selected ? buildProviderModelRows(selected, models, thinkingLevels ?? {}) : []),
+    [models, selected, thinkingLevels],
+  );
 
   const updateModelAt = (index: number, model: ModelEntry) => {
     if (!selected?.config) return;
@@ -147,6 +141,20 @@ export function ProvidersTab({
     next[index] = model;
     onUpdateProvider(selected.id, { ...selected.config, models: next });
   };
+
+  const createModel = (model: ModelEntry) => {
+    if (!selected?.config) return;
+    onUpdateProvider(selected.id, { ...selected.config, models: [...(selected.config.models ?? []), model] });
+  };
+
+  // omp serves a `models[]` definition only under an entry that says where to
+  // send it and in which dialect. Without both the file fails validation and
+  // every models.yml provider disappears, so the entry is not offered.
+  const canAddModel = Boolean(selected?.config?.baseUrl && selected.config.api);
+
+  // Hiding is for rows nothing else can remove: a models.yml entry has Delete,
+  // a login or stored key has Disconnect.
+  const hideable = selected !== null && !selected.config && selected.apiKey?.source === "env";
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 340px) 1fr", gap: 16, height: "100%" }}>
@@ -170,6 +178,7 @@ export function ProvidersTab({
                   key={row.id}
                   type="button"
                   data-testid="provider-list-item"
+                  data-provider-id={row.id}
                   aria-current={isSelected}
                   onClick={() => setSelectedId(row.id)}
                   style={{
@@ -208,6 +217,21 @@ export function ProvidersTab({
             })}
           </div>
         ))}
+        {hiddenRows.length > 0 && (
+          <div data-testid="hidden-providers" style={{ margin: "4px 0 10px" }}>
+            <p style={{ margin: "0 4px 4px", fontSize: 11, color: "var(--text-dim)" }}>{t("models.hiddenProviders", { count: hiddenRows.length })}</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "0 4px" }}>
+              {hiddenRows.map((row) => (
+                <button key={row.id} type="button" data-testid="show-provider-button" onClick={() => onShowProvider(row.id)}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: "none", border: "1px dashed var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
+                  <ProviderIcon id={row.id} size={12} />
+                  {row.name}
+                  <span style={{ color: "var(--accent)" }}>{t("models.showProvider")}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
           <button type="button" data-testid="add-provider-button" onClick={onAddProvider}
             style={{ padding: "6px 0", width: "100%", background: "none", border: "1px dashed var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
@@ -244,6 +268,7 @@ export function ProvidersTab({
             {selected.apiKey && !selected.config && (
               <ApiKeyForm
                 provider={selected.apiKey}
+                onHide={hideable ? () => onHideProvider(selected.id) : undefined}
                 onRefresh={() => { onAuthChanged(); onModelsChanged?.(); }}
               />
             )}
@@ -256,7 +281,11 @@ export function ProvidersTab({
                 <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{selected.config?.api ?? "—"}</code>
                 <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{t("models.credential")}</span>
                 <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>
-                  {selected.config?.apiKey ?? selected.apiKey?.source ?? (selected.oauth ? t("models.credentialOAuth") : "—")}
+                  {selected.config?.apiKey
+                    ?? (selected.apiKey?.source === "env" && selected.apiKey.sourceEnvVar
+                      ? t("models.envKeyVariable", { name: selected.apiKey.sourceEnvVar })
+                      : selected.apiKey?.source)
+                    ?? (selected.oauth ? t("models.credentialOAuth") : "—")}
                 </code>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -292,13 +321,11 @@ export function ProvidersTab({
               providerName={selected.id}
               rows={modelRows}
               health={modelHealth}
-              canAddModel={Boolean(selected.config)}
-              onAddModel={() => {
-                if (!selected.config) return;
-                const next = [...(selected.config.models ?? []), { id: "" }];
-                onUpdateProvider(selected.id, { ...selected.config, models: next });
-              }}
+              canAddModel={canAddModel}
+              addModelBlockedReason={t("models.addModelNeedsHost")}
               onUpdateModel={updateModelAt}
+              onOverrideModel={(modelId, changed) => onOverrideModel(selected.id, modelId, changed)}
+              onCreateModel={createModel}
             />
           </div>
         )}

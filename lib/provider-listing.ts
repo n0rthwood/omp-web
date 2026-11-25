@@ -41,8 +41,8 @@ export interface ProviderListingInput {
   hasOAuth: boolean;
   /** Label of the OAuth method, e.g. "Anthropic (Claude Pro/Max)". */
   oauthName?: string;
-  /** Result of `ModelRuntime.getProviderAuthStatus()`. */
-  status: { configured: boolean; source?: string };
+  /** Result of `ModelRuntime.getProviderAuthStatus()`: where the key comes from. */
+  status: { configured: boolean; source?: string; envVar?: string };
   /** Type of the credential stored for this provider, when there is one. */
   credentialType?: ProviderCredentialType;
   modelCount: number;
@@ -57,6 +57,8 @@ export interface ApiKeyProviderListing {
   displayName: string;
   configured: boolean;
   source?: string;
+  /** The environment variable backing an env-sourced key, when a single named one does. */
+  sourceEnvVar?: string;
   modelCount: number;
   /** True when the same provider can also be authenticated with OAuth. */
   supportsOAuth: boolean;
@@ -110,6 +112,7 @@ export function buildApiKeyProviderList(
       displayName: provider.name,
       configured,
       ...(configured && provider.status.source ? { source: provider.status.source } : {}),
+      ...(configured && provider.status.source === "env" && provider.status.envVar ? { sourceEnvVar: provider.status.envVar } : {}),
       modelCount: provider.modelCount,
       supportsOAuth: provider.hasOAuth,
       ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
