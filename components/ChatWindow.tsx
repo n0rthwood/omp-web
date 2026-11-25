@@ -897,8 +897,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
                 // call AND are outline-listed (role "ask"), so they need an
                 // anchor for the outline jump to seek.
                 const entryId = entryIds[idx];
+                // #135: injected custom_messages (system reminders, async-result
+                // deliveries) are outline-listed and CustomMessageView renders a
+                // header block for them even when display:false (collapsed), so
+                // they need anchors too — otherwise outline jumps seek 30 frames
+                // and drop.
                 const anchorRole = msg.role === "user" || msg.role === "assistant"
-                  || (msg.role === "custom" && (msg as CustomMessage).customType === "compaction")
+                  || msg.role === "custom"
                   || (msg.role === "toolResult" && (msg as ToolResultMessage).toolName === "ask");
                 const anchor = !!entryId && anchorRole;
                 // Empty/empty-thinking-only non-error assistants render null in
