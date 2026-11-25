@@ -2,6 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SessionUploadResult } from "@/hooks/useAgentSession";
+import type { FallbackBanner as FallbackBannerInfo } from "@/lib/fallback-events";
 import type { ModelRoleAssignment, SkillsResponse } from "@/lib/api-types";
 import type { ContextUsage, SlashCommandInfo } from "@/lib/omp-types";
 import type { TextContent, UserMessage } from "@/lib/types";
@@ -84,6 +85,8 @@ interface Props {
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  /** #138: cross-model retry fallback banner (null when the turn kept its model). */
+  fallbackInfo?: FallbackBannerInfo | null;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
   onRecallQueue?: () => void;
@@ -492,12 +495,51 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
   );
 }
 
+/**
+ * #138: cross-model retry fallback banner.
+ *
+ * When the selected model hard-fails, the SDK walks `retry.fallbackChains`,
+ * switches the session onto the next entry and answers the turn there. The
+ * composer still shows the configured model, so without this shelf the switch
+ * is invisible and the answer looks like it came from the model the user
+ * picked. Same amber styling as the same-model auto-retry banner above, so
+ * both retry paths read alike.
+ */
+export function FallbackBanner({ info }: { info: FallbackBannerInfo }) {
+  const { t } = useI18n();
+  let label: string;
+  if (info.succeeded) {
+    label = t("chat.fallbackSucceeded", { model: info.to, role: info.role });
+  } else if (info.from && info.from !== info.to) {
+    label = t("chat.fallbackApplied", { from: info.from, to: info.to, role: info.role });
+  } else {
+    label = t("chat.fallbackAppliedSimple", { to: info.to, role: info.role });
+  }
+  return (
+    <div data-testid="fallback-banner" role="status" style={{
+      marginBottom: 8, padding: "5px 10px",
+      background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.25)",
+      borderRadius: 6, fontSize: 12, color: "rgba(180,130,0,0.9)",
+      display: "flex", alignItems: "center", gap: 6,
+    }}>
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M16 3h5v5" />
+        <path d="M8 21H3v-5" />
+        <path d="M21 3l-7 7" />
+        <path d="M3 21l7-7" />
+      </svg>
+      <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
+      {info.reason && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {info.reason}</span>}
+    </div>
+  );
+}
+
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, onModelChange,
   modelRoles, onRoleModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
+  retryInfo, fallbackInfo, queuedMessages, inputHistory = [], onRecallQueue,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
-  retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   planMode, onSetPlanMode,
@@ -1775,6 +1817,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
              {t("chat.retrying", { attempt: retryInfo.attempt, max: retryInfo.maxAttempts })}{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
           </div>
         )}
+        {/* #138: cross-model fallback shelf (same amber as the retry banner) */}
+        {fallbackInfo && <FallbackBanner info={fallbackInfo} />}
         {compactResultText && (
           <div style={{
             marginBottom: 8, padding: "5px 10px",

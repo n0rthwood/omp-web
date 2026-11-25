@@ -14,8 +14,16 @@
 /** Credential kinds pi stores in `auth.json`. */
 export type ProviderCredentialType = "api_key" | "oauth";
 
-/** Auth status sources that mean "this key comes from models.json". */
-const CUSTOM_PROVIDER_SOURCES = new Set(["models_json_key", "models_json_command"]);
+/**
+ * Auth status sources that mean "this key comes from models.yml".
+ *
+ * `KeyCascade.source()` (pi-ai `auth/cascade.ts`) only ever returns
+ * `runtime | config | oauth | api_key | env` — the earlier
+ * `models_json_key` / `models_json_command` kinds have no producer, so the
+ * exclusion never fired and a models.yml provider with an `apiKey` was listed
+ * twice: once here and once as a config-file provider.
+ */
+const CUSTOM_PROVIDER_SOURCES: Record<string, true> = { config: true };
 
 /** Friendlier names for OAuth entries whose provider name is not self-explanatory. */
 const OAUTH_DISPLAY_NAMES: Record<string, string> = {
@@ -38,6 +46,10 @@ export interface ProviderListingInput {
   /** Type of the credential stored for this provider, when there is one. */
   credentialType?: ProviderCredentialType;
   modelCount: number;
+  /** Catalog defaults the add-provider flow prefills a models.yml entry with. */
+  baseUrl?: string;
+  api?: string;
+  envVar?: string;
 }
 
 export interface ApiKeyProviderListing {
@@ -48,6 +60,12 @@ export interface ApiKeyProviderListing {
   modelCount: number;
   /** True when the same provider can also be authenticated with OAuth. */
   supportsOAuth: boolean;
+  /** Catalog base URL, when the provider is a built-in catalog entry. */
+  baseUrl?: string;
+  /** Catalog API kind, e.g. `openai-completions`. */
+  api?: string;
+  /** Env var the catalog expects the key in, e.g. `ZHIPU_API_KEY`. */
+  envVar?: string;
 }
 
 export interface OAuthProviderListing {
@@ -84,7 +102,7 @@ export function buildApiKeyProviderList(
   const result: ApiKeyProviderListing[] = [];
   for (const provider of dedupeById(providers)) {
     if (!provider.hasApiKeyLogin) continue;
-    if (provider.status.source && CUSTOM_PROVIDER_SOURCES.has(provider.status.source)) continue;
+    if (provider.status.source && CUSTOM_PROVIDER_SOURCES[provider.status.source]) continue;
 
     const configured = provider.status.configured && provider.credentialType !== "oauth";
     result.push({
@@ -94,6 +112,9 @@ export function buildApiKeyProviderList(
       ...(configured && provider.status.source ? { source: provider.status.source } : {}),
       modelCount: provider.modelCount,
       supportsOAuth: provider.hasOAuth,
+      ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+      ...(provider.api ? { api: provider.api } : {}),
+      ...(provider.envVar ? { envVar: provider.envVar } : {}),
     });
   }
   return result;

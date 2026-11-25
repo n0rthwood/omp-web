@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
+import { diffProviderModels, type ModelSnapshot } from "@/lib/models-config-diff";
 import { getOmpRuntime } from "@/lib/omp-runtime";
 import { hasJsonContentType } from "@/lib/request-security";
 import { requireAdminApi } from "../../web-users/_guard";
@@ -31,6 +32,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Unknown provider: ${providerName}` }, { status: 404 });
     }
 
+    // Snapshot before the refresh: the registry is mutated in place, so this is
+    // the only chance to see what the provider looked like beforehand.
+    const before: ModelSnapshot[] = modelRegistry.getProviderModels(providerName).map((model) => ({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      input: model.input,
+      reasoning: model.reasoning,
+      cost: model.cost,
+    }));
+
     // Refresh the shared registry in place: existing sessions hold this exact
     // instance. A refresh may mutate it even when discovery or config fails.
     try {
@@ -38,6 +51,17 @@ export async function POST(req: Request) {
     } finally {
       invalidateModelsCache();
     }
+
+    const after: ModelSnapshot[] = modelRegistry.getProviderModels(providerName).map((model) => ({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      input: model.input,
+      reasoning: model.reasoning,
+      cost: model.cost,
+    }));
+    const diff = diffProviderModels(before, after);
 
     const configError = modelRegistry.getError();
     if (configError) {
@@ -54,15 +78,16 @@ export async function POST(req: Request) {
     }
 
     if (discovery?.status === "empty") {
-      return NextResponse.json({ success: true, discoveryStatus: "empty", warning: "Provider returned no models" });
+      return NextResponse.json({ success: true, discoveryStatus: "empty", warning: "Provider returned no models", diff });
     }
     if (!discovery) {
       return NextResponse.json({
         success: true,
         warning: "Provider configuration was reloaded, but no online discovery status was reported",
+        diff,
       });
     }
-    return NextResponse.json({ success: true, discoveryStatus: discovery.status });
+    return NextResponse.json({ success: true, discoveryStatus: discovery.status, diff });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Model refresh failed";
     return NextResponse.json({ error: message.slice(0, 500) || "Model refresh failed" }, { status: 502 });

@@ -347,8 +347,12 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 
 export interface ModelChangeEntry extends SessionEntryBase {
   type: "model_change";
-  provider: string;
-  modelId: string;
+  /** Selector the session switched to, `"provider/modelId"`. */
+  model: string;
+  /** Role the change was recorded for; "fallback" marks a retry fallback. */
+  role?: string;
+  /** SDK flag: the resolved model is a fallback, not the configured primary. */
+  resolvedModelIsFallback?: boolean;
 }
 
 export interface CompactionEntry extends SessionEntryBase {

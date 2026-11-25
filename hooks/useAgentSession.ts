@@ -12,6 +12,7 @@ import type {
   SessionTreeNode,
   SubagentSnapshot,
 } from "@/lib/types";
+import { fallbackApplied, fallbackSucceeded, type FallbackBanner } from "@/lib/fallback-events";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { stripAnsi } from "@/lib/ansi";
@@ -505,6 +506,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
+  // #138: cross-model retry fallback (retry.fallbackChains) is user-visible —
+  // the turn silently continued on another model before this banner existed.
+  const [fallbackInfo, setFallbackInfo] = useState<FallbackBanner | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   // TUI parity: the host's meter keeps its last reading between turns, so this
   // is only cleared by a session switch (this hook's lifetime), never on idle.
@@ -1862,6 +1866,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setAgentPhase(null);
     setRetryInfo(null);
+    // The banner is turn-scoped: a settled run's fallback is history (the
+    // journal model_change row), not a live notice (#138).
+    setFallbackInfo(null);
     dispatch({ type: "end" });
     return wasRunning;
   }, []);
@@ -2188,6 +2195,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!agentRunningRef.current || agentEndContinues(event)) break;
         setAgentPhase(null);
         setRetryInfo(null);
+        setFallbackInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
           void requestHistoryRefresh(sessionIdRef.current);
@@ -2492,6 +2500,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_end":
         setRetryInfo(null);
         break;
+      case "retry_fallback_applied":
+      case "retry_fallback_succeeded": {
+        // A late frame from a settled run must not resurrect the banner: the
+        // stream replays after a frozen tab or a reconnect (#138).
+        if (!agentRunningRef.current) break;
+        const runId = promptRunIdRef.current;
+        if (event.type === "retry_fallback_applied") {
+          setFallbackInfo(fallbackApplied(event, runId));
+        } else {
+          setFallbackInfo((current) => fallbackSucceeded(event, current, runId));
+        }
+        break;
+      }
+      case "model_changed": {
+        // set_model / a role switch / the host's default-model change all land
+        // here. Re-read the canonical session so the composer's model chip
+        // follows, unless a user switch is still in flight (loadSession would
+        // otherwise clear that pending override).
+        if (modelSwitchPendingRef.current) break;
+        const sid = sessionIdRef.current;
+        if (sid) void loadSession(sid);
+        break;
+      }
+      case "notice": {
+        const level = event.level === "warning" ? "warning" : event.level === "error" ? "error" : "info";
+        addNotice({ type: level, message: (event.message as string | undefined) ?? "" });
+        break;
+      }
       case "auto_compaction_start":
       case "compaction_start":
         setIsCompacting(true);
@@ -2522,7 +2558,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, clearHistoricView, confirmPrompt, handleExtensionUiRequest, loadOutline, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, requestHistoryRefresh, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, cancelEventStreamGrace, clearHistoricView, confirmPrompt, handleExtensionUiRequest, loadOutline, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, requestHistoryRefresh, restoreRejectedPrompt, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   // A send path that failed before the server accepted the submission must
@@ -3427,7 +3463,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, refreshError, activeLeafId, messages: shownMessages, entryIds: shownEntryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, tokensPerSecond, systemPrompt, forkingEntryId,
+    retryInfo, fallbackInfo, contextUsage, tokensPerSecond, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,

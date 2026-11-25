@@ -1071,8 +1071,9 @@ function displayMetaPath(path: JournalRecordMeta[]): JournalRecordMeta[] {
 
 /**
  * Whether a display record renders a chat message, from metadata alone —
- * mirrors entryToUiMessage's null cases (only branch_summary without a
- * summary and custom_message with non-string/array content render nothing).
+ * mirrors entryToUiMessage's null cases (branch_summary without a summary,
+ * custom_message with non-string/array content, and a model_change without a
+ * selector render nothing).
  */
 function rendersMessage(meta: JournalRecordMeta): boolean {
   switch (meta.type) {
@@ -1085,6 +1086,9 @@ function rendersMessage(meta: JournalRecordMeta): boolean {
       // entryToUiMessage renders any custom_message whose content the SDK
       // accepts (string/array); the web conversion never returns null here.
       return meta.contentRenderable === true;
+    case "model_change":
+      // #138: the degrade is transcript history, not just a live banner.
+      return meta.modelSelector !== undefined;
     default:
       return false;
   }

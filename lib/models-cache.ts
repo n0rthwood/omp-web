@@ -1,4 +1,7 @@
 import type { ModelRoleAssignment } from "./model-roles";
+import type { ModelHealth } from "./models-health";
+
+export type { ModelHealth };
 
 export interface ModelsData {
   models: Record<string, string>;
@@ -15,6 +18,8 @@ export interface ModelsData {
   modelError?: string;
   /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
   modelScopeWarnings?: string[];
+  /** `provider/modelId` → credential health for the listed models (issue #139). */
+  modelHealth?: Record<string, ModelHealth>;
 }
 
 interface ModelsCacheState {
