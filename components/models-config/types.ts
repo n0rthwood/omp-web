@@ -103,6 +103,8 @@ export interface ProviderHealth {
   cause?: string;
   expiresAt?: number;
   account?: string;
+  /** Epoch ms of the credential's last refresh: the failed refresh that disabled it, or the last successful keepalive probe while alive. */
+  lastRefreshAt?: number;
 }
 
 export interface ModelsHealthResponse {

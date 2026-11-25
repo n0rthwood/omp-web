@@ -256,3 +256,17 @@ test("the preflight runs by itself on entry to step 2 and the push waits for ste
   // The preflight covers every machine, the push only the selection.
   assert.match(source, /targets: mode === "preflight" \? machines\.map\(\(machine\) => machine\.id\) : targets/);
 });
+
+test("a slow preflight never traps the user: only a push locks the wizard", async () => {
+  const source = await readFile(new URL("./SyncWizard.tsx", import.meta.url), "utf8");
+  // The gateway visits targets one by one, so step 2 stays usable: Next on
+  // steps 1-2 is not gated on a running request, and Back/Close only wait for a push.
+  assert.match(source, /const nextDisabled = step === 1 \? sections\.length === 0 : step === 2 \? targets\.length === 0 : running !== null;/);
+  assert.match(source, /disabled=\{step === 1 \|\| pushing\}/);
+  assert.doesNotMatch(source, /const busy = /);
+  // Stepping back or closing abandons the request instead of waiting it out.
+  assert.match(source, /const back = \(\) => \{[\s\S]{0,320}?abortRef\.current\?\.abort\(\);/);
+  assert.match(source, /useEffect\(\(\) => \(\) => abortRef\.current\?\.abort\(\), \[\]\);/);
+  assert.match(source, /signal: controller\.signal/);
+  assert.match(source, /if \(!controller\.signal\.aborted\) setError\(/);
+});

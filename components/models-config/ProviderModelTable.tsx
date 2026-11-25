@@ -53,7 +53,7 @@ function thinkingLabel(row: ModelRow, none: string): string {
  * `models.yml` definition is rewritten in place. Either way there is exactly
  * one models.yml write path, the panel's own Save button.
  */
-export function ProviderModelTable({ providerName, rows, health, canAddModel, addModelBlockedReason, onUpdateModel, onOverrideModel, onCreateModel }: {
+export function ProviderModelTable({ providerName, rows, health, canAddModel, addModelBlockedReason, loggedOut, onUpdateModel, onOverrideModel, onCreateModel }: {
   providerName: string;
   rows: readonly ModelRow[];
   health?: ModelHealthMap;
@@ -61,6 +61,8 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
   canAddModel: boolean;
   /** Why it cannot, shown on the disabled control. */
   addModelBlockedReason?: string;
+  /** An OAuth provider with no login: every row is dimmed — the catalog still lists them, but nothing can run. */
+  loggedOut?: boolean;
   onUpdateModel: (index: number, model: ModelEntry) => void;
   onOverrideModel: (modelId: string, changed: ModelOverridePatch) => void;
   onCreateModel: (model: ModelEntry) => void;
@@ -98,10 +100,12 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
           {rows.map((row) => {
             const editing = editingId === row.id;
             const modelHealth = health?.[modelHealthKey(providerName, row.id)];
+            // Mockup `tr.dim`: a model nothing can run right now is greyed as a whole row.
+            const dimmed = loggedOut || modelHealth?.state === "unverified";
             const cost = row.entry.cost;
             return (
               <Fragment key={row.id}>
-                <tr data-testid="provider-model-row" data-model-id={row.id} style={{ background: editing ? "var(--bg-hover)" : undefined }}>
+                <tr data-testid="provider-model-row" data-model-id={row.id} data-dimmed={dimmed || undefined} style={{ background: editing ? "var(--bg-hover)" : undefined, color: dimmed ? "var(--text-dim)" : undefined }}>
                   <td style={{ ...CELL_STYLE, fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>{row.id}</td>
                   <td style={CELL_STYLE}>
                     <span style={{ fontSize: 11, color: row.source === "merged" ? "var(--accent)" : "var(--text-dim)", border: "1px solid var(--border)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}>

@@ -55,6 +55,12 @@ export interface ProviderHealth {
   expiresAt?: number;
   /** Account label (email or account id) the credential is signed in as. */
   account?: string;
+  /**
+   * Epoch ms of the credential's last refresh (issue #145): when a failed
+   * refresh tore it down, or the last successful keepalive probe while it is
+   * alive (stamped by the health route from the provider-status poller).
+   */
+  lastRefreshAt?: number;
 }
 
 export interface ModelsHealthSnapshot {
@@ -115,6 +121,8 @@ export interface ModelsHealthDisabledRow {
   cause: string;
   email?: string;
   accountId?: string;
+  /** Epoch ms the row was disabled — its failed refresh — when the store reports it. */
+  disabledAtMs?: number;
 }
 
 export interface ModelsHealthDeps {
@@ -222,10 +230,13 @@ export async function collectModelsHealth(deps: ModelsHealthDeps): Promise<Model
     if (disabled.length > 0) {
       const first = disabled[0]!;
       const account = first.email ?? first.accountId;
+      // The newest tombstone says when the last refresh failed.
+      const lastRefreshAt = Math.max(0, ...disabled.map((row) => row.disabledAtMs ?? 0)) || undefined;
       providers[provider] = {
         state: "disabled",
         cause: first.cause,
         ...(account ? { account } : {}),
+        ...(lastRefreshAt !== undefined ? { lastRefreshAt } : {}),
       };
       continue;
     }
@@ -303,6 +314,7 @@ async function runtimeDeps(): Promise<ModelsHealthDeps> {
         cause: row.cause,
         ...(row.email ? { email: row.email } : {}),
         ...(row.accountId ? { accountId: row.accountId } : {}),
+        ...(row.disabledAtMs !== undefined ? { disabledAtMs: row.disabledAtMs } : {}),
       })),
     hasConcreteSource: (provider) => authStorage.keys.source(provider)?.concrete === true,
     keyless: (provider) => authStorage.keys.keyless(provider),

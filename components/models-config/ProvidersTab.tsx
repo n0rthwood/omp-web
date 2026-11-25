@@ -323,6 +323,7 @@ export function ProvidersTab({
               health={modelHealth}
               canAddModel={canAddModel}
               addModelBlockedReason={t("models.addModelNeedsHost")}
+              loggedOut={selected.oauth ? !selected.oauth.loggedIn : false}
               onUpdateModel={updateModelAt}
               onOverrideModel={(modelId, changed) => onOverrideModel(selected.id, modelId, changed)}
               onCreateModel={createModel}

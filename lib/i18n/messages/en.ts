@@ -657,6 +657,7 @@ export const enLocale: LocalePlugin = {
     "models.oauthAccount": "account",
     "models.oauthExpires": "expires",
     "models.oauthLastRefresh": "last refresh",
+    "models.oauthLastRefreshHint": "When the token was last refreshed: the latest keepalive probe while signed in, or the failed refresh that disabled it.",
     "models.envKeyNote": "The key is provided by {variable}. Disconnecting only removes a stored credential; the variable keeps this provider configured. Remove it from .env, or hide the provider here.",
     "models.envKeyDisconnectResult": "Stored credential removed. The key is still provided by {variable}, so the provider stays listed.",
     "models.envKeyVariable": "the environment variable {name}",

@@ -138,6 +138,7 @@ export function OAuthCard({ provider, health, onRefresh }: {
   const progressMessage = loginState.phase === "progress" ? loginState.message : (inputRequest?.progress ?? null);
   const showProgress = verifying || Boolean(inputRequest?.progress);
   const expiresAt = health?.expiresAt ? new Date(health.expiresAt).toLocaleString() : null;
+  const lastRefreshAt = health?.lastRefreshAt ? new Date(health.lastRefreshAt).toLocaleString() : null;
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)" }}>
@@ -152,6 +153,7 @@ export function OAuthCard({ provider, health, onRefresh }: {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 11, color: "var(--text-muted)" }}>
         <span>{t("models.oauthAccount")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{health?.account ?? "—"}</code></span>
         <span>{t("models.oauthExpires")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{expiresAt ?? "—"}</code></span>
+        <span title={t("models.oauthLastRefreshHint")}>{t("models.oauthLastRefresh")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{lastRefreshAt ?? "—"}</code></span>
       </div>
 
       {health?.cause && (

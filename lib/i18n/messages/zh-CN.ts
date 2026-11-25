@@ -657,6 +657,7 @@ export const zhCNLocale: LocalePlugin = {
     "models.oauthAccount": "账号",
     "models.oauthExpires": "有效期至",
     "models.oauthLastRefresh": "上次刷新",
+    "models.oauthLastRefreshHint": "令牌最近一次刷新的时间：登录态下是最近一次保活探测，失效后则是导致停用的那次刷新。",
     "models.envKeyNote": "密钥由{variable}提供。「断开」只会删除已存储的凭据，环境变量仍会让此提供方保持已配置。请从 .env 移除该变量，或在此隐藏该提供方。",
     "models.envKeyDisconnectResult": "已移除已存储的凭据。密钥仍由{variable}提供，该提供方会继续列出。",
     "models.envKeyVariable": "环境变量 {name}",

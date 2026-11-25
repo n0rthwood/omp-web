@@ -467,6 +467,28 @@ export async function collectProviderStatus(deps: ProviderStatusDeps) {
   });
 }
 
+/**
+ * Stamp a live credential's "last refresh" (issue #145) onto a health scan's
+ * provider rows. The scan never probes upstream, so it cannot know when a
+ * credential was last refreshed; this poller can — its usage probe is the
+ * keepalive that rotates an OAuth token when due. A disabled credential
+ * already carries the time its refresh failed, straight from the scan, and a
+ * row without a successful probe gets nothing rather than an invented time.
+ */
+export function stampKeepaliveTime<T extends { state: string; lastRefreshAt?: number }>(
+  providers: Record<string, T>,
+  keepalive: ReadonlyMap<string, number | undefined>,
+): Record<string, T> {
+  const stamped: Record<string, T> = {};
+  for (const [id, entry] of Object.entries(providers)) {
+    const touched = keepalive.get(id);
+    stamped[id] = entry.lastRefreshAt === undefined && touched !== undefined && (entry.state === "ok" || entry.state === "expiring")
+      ? { ...entry, lastRefreshAt: touched }
+      : entry;
+  }
+  return stamped;
+}
+
 // ── Process-wide poller singleton ────────────────────────────────────────────
 
 interface PollerState {

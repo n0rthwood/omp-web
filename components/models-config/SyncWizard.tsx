@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
 import { useI18n } from "@/hooks/useI18n";
 import type { TranslationParams } from "@/lib/i18n/types";
@@ -285,6 +285,10 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
   const [preflight, setPreflight] = useState<TargetResult[] | null>(null);
   const [pushResults, setPushResults] = useState<TargetResult[] | null>(null);
   const [sourceMachine, setSourceMachine] = useState<string | null>(null);
+  // The gateway visits targets one by one, so a preflight can take a while.
+  // It never traps the user: stepping back or closing abandons the request.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // A fresh opening re-presets step 1 from the entry point that mounted us.
   useEffect(() => {
@@ -299,6 +303,9 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
   }, [open, initialSections]);
 
   const run = useCallback(async (mode: "preflight" | "push") => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setRunning(mode);
     setError(null);
     try {
@@ -310,6 +317,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           sections,
           dryRun: mode === "preflight",
         }),
+        signal: controller.signal,
       });
       const data = await response.json().catch(() => ({})) as SyncRunResponse;
       if (!response.ok || data.error) {
@@ -320,9 +328,14 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
       if (mode === "preflight") setPreflight(data.results ?? []);
       else setPushResults(data.results ?? []);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      // A superseded or abandoned run is not an error.
+      if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setRunning(null);
+      // Only the run that still owns the slot may release it.
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setRunning(null);
+      }
     }
   }, [machines, sections, targets]);
 
@@ -331,7 +344,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
 
   if (!open) return null;
 
-  const busy = running !== null;
+  const pushing = running === "push";
   const toggleSection = (section: SyncSection) => {
     setSections((current) => current.includes(section)
       ? current.filter((entry) => entry !== section)
@@ -363,15 +376,21 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
   };
 
   const back = () => {
+    // Leaving a step abandons an in-flight preflight: it would answer for
+    // sections or machines the user is about to change. Stepping back from
+    // step 2 also drops its results — the next entry runs it again.
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRunning(null);
     setPushResults(null);
     setError(null);
-    // Leaving step 2 drops the preflight: sections may change on step 1, and
-    // the next entry runs it again.
     if (step === 2) setPreflight(null);
     setStep(Math.max(1, step - 1));
   };
 
-  const nextDisabled = busy || (step === 1 ? sections.length === 0 : step === 2 ? targets.length === 0 : false);
+  // Only a push blocks the wizard: it writes on the targets. A preflight in
+  // flight just delays the push button on the last step.
+  const nextDisabled = step === 1 ? sections.length === 0 : step === 2 ? targets.length === 0 : running !== null;
   const steps = [t("sync.step.sections"), t("sync.step.targets"), t("sync.step.push")];
 
   return (
@@ -388,7 +407,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
         background: "rgba(0,0,0,0.44)",
       }}
       onClick={(event) => {
-        if (!busy && event.target === event.currentTarget) onClose();
+        if (!pushing && event.target === event.currentTarget) onClose();
       }}
     >
       <div
@@ -422,9 +441,9 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           <button
             type="button"
             onClick={onClose}
-            disabled={busy}
+            disabled={pushing}
             aria-label={t("sync.close")}
-            style={{ border: 0, background: "none", color: "var(--text-muted)", cursor: busy ? "wait" : "pointer", fontSize: 16 }}
+            style={{ border: 0, background: "none", color: "var(--text-muted)", cursor: pushing ? "wait" : "pointer", fontSize: 16 }}
           >
             ×
           </button>
@@ -506,8 +525,8 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
                   type="button"
                   data-testid="sync-preflight-again"
                   onClick={() => void run("preflight")}
-                  disabled={busy}
-                  style={{ ...SECONDARY_BUTTON, alignSelf: "flex-start", cursor: busy ? "wait" : "pointer" }}
+                  disabled={running !== null}
+                  style={{ ...SECONDARY_BUTTON, alignSelf: "flex-start", cursor: running !== null ? "wait" : "pointer" }}
                 >
                   {t("sync.preflightAgain")}
                 </button>
@@ -546,8 +565,8 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           <button
             type="button"
             onClick={back}
-            disabled={busy || step === 1}
-            style={{ ...SECONDARY_BUTTON, cursor: busy || step === 1 ? "default" : "pointer" }}
+            disabled={step === 1 || pushing}
+            style={{ ...SECONDARY_BUTTON, cursor: step === 1 || pushing ? "default" : "pointer" }}
           >
             {t("sync.back")}
           </button>
@@ -555,8 +574,8 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           <button
             type="button"
             onClick={onClose}
-            disabled={busy}
-            style={{ ...SECONDARY_BUTTON, cursor: busy ? "wait" : "pointer" }}
+            disabled={pushing}
+            style={{ ...SECONDARY_BUTTON, cursor: pushing ? "wait" : "pointer" }}
           >
             {t("sync.cancel")}
           </button>
