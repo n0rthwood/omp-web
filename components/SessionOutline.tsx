@@ -1,12 +1,40 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutlineJobStatus, SessionOutlineEntry } from "@/lib/session-outline";
+import { resolveOutlineDrillTarget } from "@/lib/session-outline";
+import type { SubagentSnapshot } from "@/lib/types";
+import { clampPanelWidth } from "@/lib/panel-layout";
+import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/hooks/useI18n";
+import { useResizablePanel } from "@/hooks/useResizablePanel";
+import { SubagentDetail, formatSubagentDuration } from "./SubagentDetail";
 
 // #104: journal outline panel. Rendered either as a persistent rail beside the
 // transcript (wide containers) or as a modal drawer (narrow containers / side
 // panels). The drawer traps focus, closes on backdrop click, restores focus to
 // its trigger, and isolates Escape from the global agent-abort shortcut.
+
+/** #137: resizable rail geometry. The width is a per-browser preference
+ * (localStorage), never machine/fleet data. */
+export const OUTLINE_RAIL_DEFAULT_WIDTH = 320;
+export const OUTLINE_RAIL_MIN_WIDTH = 240;
+export const OUTLINE_RAIL_MAX_WIDTH = 560;
+export const OUTLINE_RAIL_STORAGE_KEY = "omp-outline-rail-width";
+/** The transcript keeps at least this many pixels while the rail grows. */
+const OUTLINE_TRANSCRIPT_MIN_WIDTH = 420;
+
+/** Read-before-paint: the stored rail width is applied on the first render. */
+export function readStoredRailWidth(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = window.localStorage.getItem(OUTLINE_RAIL_STORAGE_KEY);
+    if (stored === null) return null;
+    const parsed = Number.parseInt(stored, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface SessionOutlineProps {
   entries: SessionOutlineEntry[];
@@ -21,7 +49,23 @@ export interface SessionOutlineProps {
   onClose: () => void;
   /** Drawer only: focus returns here on close. */
   triggerRef?: React.RefObject<HTMLButtonElement | null>;
+  /** #137: live subagent snapshots — detail lookup + per-job live status. */
+  subagents?: SubagentSnapshot[];
+  /** #137: session whose subagent transcripts the drill-down reads. */
+  sessionId?: string | null;
+  /** #137: cwd handed to the subagent transcript renderer. */
+  cwd?: string;
+  /** #137: detail-header action — jump to the row's transcript anchor. */
+  onLocateInChat?: (entryId: string) => void;
 }
+
+/** #137: outline drill-down state machine. `jobs` and `detail` replace the
+ * list body inside the SAME surface (rail or drawer); back returns to the
+ * list with its scroll position restored. */
+type OutlineView =
+  | { kind: "list" }
+  | { kind: "jobs"; entry: SessionOutlineEntry }
+  | { kind: "detail"; entry: SessionOutlineEntry; jobId: string; snapshot: SubagentSnapshot };
 
 type OutlineRow =
   | { kind: "entry"; entry: SessionOutlineEntry }
@@ -189,9 +233,18 @@ function RoleGlyph({ role }: { role: SessionOutlineEntry["role"] | "tools" }) {
   );
 }
 
-function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, targetEntryId, navigating, onJump }: Omit<SessionOutlineProps, "variant" | "onClose" | "triggerRef">) {
+function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, targetEntryId, navigating, onActivate, scrollRef, busyEntryId }: Omit<SessionOutlineProps, "variant" | "onClose" | "triggerRef"> & {
+  /** #137: async rows route here instead of jumping; other rows jump. */
+  onActivate: (entry: SessionOutlineEntry, jumpId: string) => void;
+  /** #137: the list's scroll container, owned by SessionOutline so the
+   * drill-down views can preserve its position across back navigation. */
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
+  /** #137: row whose subagent snapshot is being resolved (aria-busy). */
+  busyEntryId?: string | null;
+}) {
   const { t } = useI18n();
-  const listRef = useRef<HTMLDivElement | null>(null);
+  const localListRef = useRef<HTMLDivElement | null>(null);
+  const listRef = scrollRef ?? localListRef;
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   // #135: tool-group expansion is local component state, keyed by the group's
   // first member id; collapsed by default.
@@ -212,7 +265,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
     if (itemTop < viewTop || itemBottom > viewBottom) {
       list.scrollTop = Math.max(0, itemTop - Math.round(list.clientHeight / 3));
     }
-  }, [readingEntryId, targetEntryId]);
+  }, [readingEntryId, targetEntryId, listRef]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -266,8 +319,9 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                 data-outline-subdued={subdued ? "true" : undefined}
                 data-outline-group-member={inGroup ? "true" : undefined}
                 aria-current={isReading ? "location" : undefined}
+                aria-busy={busyEntryId === item.entryId ? "true" : undefined}
                 aria-label={t("outline.jumpLabel", { index: item.ordinal + 1, preview: item.preview })}
-                onClick={() => onJump(jumpId)}
+                onClick={() => onActivate(item, jumpId)}
                 className="mb-1 block w-full min-w-0 rounded-lg border px-2 py-1.5 text-left transition-colors"
                 style={{
                   borderColor: isTarget || isReading ? "var(--accent)" : "transparent",
@@ -334,7 +388,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
               data-outline-subdued="true"
               aria-current={isReading ? "location" : undefined}
               aria-label={t("outline.jumpLabel", { index: entry.ordinal + 1, preview: entry.preview })}
-              onClick={() => onJump(entry.entryId)}
+              onClick={() => onActivate(entry, entry.entryId)}
               className="block min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-left transition-colors"
               style={{
                 borderColor: isTarget || isReading ? "var(--accent)" : "transparent",
@@ -424,14 +478,184 @@ function OutlineHeader({ count, onClose, showClose }: { count: number; onClose: 
   );
 }
 
+/** #137: per-job list for a multi-job spawn row. Live snapshots upgrade the
+ * parsed status/duration; a job without a live snapshot still opens its
+ * detail — the dead-session fallback resolves the snapshot on demand. */
+export function OutlineJobsView({ entry, liveById, busyJobId, onBack, onOpenJob }: {
+  entry: SessionOutlineEntry;
+  liveById: Map<string, SubagentSnapshot>;
+  busyJobId: string | null;
+  onBack: () => void;
+  onOpenJob: (jobId: string) => void;
+}) {
+  const { t } = useI18n();
+  const jobs = entry.jobs ?? [];
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="outline-jobs-view">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-border bg-bg-panel px-3 py-2">
+        <button
+          type="button"
+          data-testid="outline-back"
+          title={t("subagents.back")}
+          aria-label={t("subagents.back")}
+          onClick={onBack}
+          className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg hover:text-text"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M10.5 3 5.5 8l5 5" />
+          </svg>
+        </button>
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text">{entry.preview}</span>
+        <span className="flex-shrink-0 text-[10px] tabular-nums text-text-dim">{t("outline.jobCount", { count: jobs.length })}</span>
+      </div>
+      <div role="list" aria-label={t("outline.jobs")} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
+        {jobs.map((job) => {
+          const live = liveById.get(job.id);
+          const status = live?.status ?? job.status;
+          return (
+            <button
+              key={job.id}
+              type="button"
+              role="listitem"
+              data-outline-job={job.id}
+              aria-busy={busyJobId === job.id ? "true" : undefined}
+              aria-label={t("outline.openJob", { name: job.name })}
+              onClick={() => onOpenJob(job.id)}
+              className="mb-1 flex w-full min-w-0 items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left transition-colors hover:border-border hover:bg-bg-panel"
+            >
+              <JobStatusBadge status={status} label={jobStatusLabel(status, t)} />
+              <span className="min-w-0 flex-1 truncate text-xs text-text">{job.name}</span>
+              {live?.progress?.durationMs !== undefined && (
+                <span className="flex-shrink-0 text-[10px] tabular-nums text-text-dim">{formatSubagentDuration(live.progress.durationMs)}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 export function SessionOutline(props: SessionOutlineProps) {
-  const { variant, onClose, triggerRef } = props;
+  const { variant, onClose, triggerRef, subagents = [], sessionId = null, cwd, onLocateInChat, onJump } = props;
   const { t } = useI18n();
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const isDrawer = variant === "drawer";
+
+  // #137: rail width is a per-browser preference (localStorage), read before
+  // the first paint so a stored width never flashes the 320px default.
+  const railWidthRef = useRef(OUTLINE_RAIL_DEFAULT_WIDTH);
+  const getRailMaxWidth = useCallback(
+    () => typeof window === "undefined"
+      ? OUTLINE_RAIL_MAX_WIDTH
+      : Math.max(OUTLINE_RAIL_MIN_WIDTH, window.innerWidth - OUTLINE_TRANSCRIPT_MIN_WIDTH),
+    [],
+  );
+  const getRailInitialWidth = useCallback(
+    () => clampPanelWidth(readStoredRailWidth() ?? OUTLINE_RAIL_DEFAULT_WIDTH, OUTLINE_RAIL_MIN_WIDTH, OUTLINE_RAIL_MAX_WIDTH),
+    [],
+  );
+  const railResizer = useResizablePanel<HTMLElement>({
+    ariaLabel: t("outline.resizeRail"),
+    cssVariable: "--outline-rail-width",
+    defaultWidth: OUTLINE_RAIL_DEFAULT_WIDTH,
+    getInitialWidth: getRailInitialWidth,
+    getMaxWidth: getRailMaxWidth,
+    growthDirection: "left",
+    maxWidth: OUTLINE_RAIL_MAX_WIDTH,
+    minWidth: OUTLINE_RAIL_MIN_WIDTH,
+    storageKey: OUTLINE_RAIL_STORAGE_KEY,
+    widthRef: railWidthRef,
+  });
+
+  // #137: drill-down state machine — list → jobs → detail, all inside this
+  // same surface. The list stays MOUNTED (hidden) while a sub-view is open so
+  // its scroll position survives back navigation.
+  const [view, setView] = useState<OutlineView>({ kind: "list" });
+  const [fetched, setFetched] = useState<{ sessionId: string; byId: Map<string, SubagentSnapshot> } | null>(null);
+  const [resolving, setResolving] = useState<{ entryId: string; jobId: string } | null>(null);
+  const fetchingRef = useRef<string | null>(null);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const savedScrollRef = useRef(0);
+
+  const liveById = useMemo(() => new Map(subagents.map((subagent) => [subagent.id, subagent])), [subagents]);
+
+  // A session switch invalidates the view and the dead-session snapshot cache.
+  useEffect(() => {
+    setView({ kind: "list" });
+    setFetched(null);
+    setResolving(null);
+    fetchingRef.current = null;
+  }, [sessionId]);
+
+  const backToList = useCallback(() => setView({ kind: "list" }), []);
+
+  // Restore the list scroll position captured when the sub-view opened.
+  useEffect(() => {
+    if (view.kind !== "list") return;
+    const list = listScrollRef.current;
+    if (list) list.scrollTop = savedScrollRef.current;
+  }, [view.kind]);
+
+  const resolveSnapshot = useCallback((jobId: string): SubagentSnapshot | null => {
+    const live = liveById.get(jobId);
+    if (live) return live;
+    if (fetched && fetched.sessionId === sessionId) return fetched.byId.get(jobId) ?? null;
+    return null;
+  }, [fetched, liveById, sessionId]);
+
+  /** Open a job's detail. Live snapshot → straight in. Otherwise the host is
+   * asked once (`get_subagents`, which also returns the bounded history
+   * snapshot of evicted subagents) so FINISHED subagents keep working after a
+   * reload; bash/eval jobs never resolve and fall back to the plain jump. */
+  const openJob = useCallback((entry: SessionOutlineEntry, jobId: string) => {
+    const resolved = resolveSnapshot(jobId);
+    if (resolved) {
+      setView({ kind: "detail", entry, jobId, snapshot: resolved });
+      return;
+    }
+    if (!sessionId) {
+      onJump(entry.entryId);
+      return;
+    }
+    if (fetchingRef.current === sessionId) return;
+    fetchingRef.current = sessionId;
+    setResolving({ entryId: entry.entryId, jobId });
+    void sendAgentCommand<{ subagents?: SubagentSnapshot[] }>(sessionId, { type: "get_subagents" })
+      .then((result) => {
+        const list = Array.isArray(result?.subagents) ? result.subagents : [];
+        const byId = new Map(list.map((subagent) => [subagent.id, subagent]));
+        setFetched({ sessionId, byId });
+        const match = byId.get(jobId);
+        if (match) setView({ kind: "detail", entry, jobId, snapshot: match });
+        else onJump(entry.entryId);
+      })
+      .catch(() => onJump(entry.entryId))
+      .finally(() => {
+        fetchingRef.current = null;
+        setResolving(null);
+      });
+  }, [onJump, resolveSnapshot, sessionId]);
+
+  /** Row activation: async subagent rows drill down, everything else jumps.
+   * The list scroll position is captured on the way in (the list is hidden,
+   * not unmounted, while a sub-view is open) and restored on back. */
+  const handleActivate = useCallback((entry: SessionOutlineEntry, jumpId: string) => {
+    const target = resolveOutlineDrillTarget(entry);
+    if (target.kind === "jump") {
+      onJump(jumpId);
+      return;
+    }
+    savedScrollRef.current = listScrollRef.current?.scrollTop ?? 0;
+    if (target.kind === "jobs") {
+      setView({ kind: "jobs", entry });
+      return;
+    }
+    openJob(entry, target.jobId);
+  }, [onJump, openJob]);
 
   // Drawer only: Escape from INSIDE the drawer must never reach the global
   // window keydown handler that aborts the running agent. A window CAPTURE
@@ -494,23 +718,79 @@ export function SessionOutline(props: SessionOutlineProps) {
     }
   }, []);
 
+  const detailSnapshot = view.kind === "detail" ? liveById.get(view.jobId) ?? view.snapshot : null;
+
   const body = (
     <>
-      <OutlineHeader count={props.entries.length} onClose={onClose} showClose={isDrawer} />
-      <OutlineBody {...props} />
+      {view.kind === "list" && <OutlineHeader count={props.entries.length} onClose={onClose} showClose={isDrawer} />}
+      <div className="flex min-h-0 flex-1 flex-col" style={{ display: view.kind === "list" ? undefined : "none" }}>
+        <OutlineBody
+          {...props}
+          onActivate={handleActivate}
+          scrollRef={listScrollRef}
+          busyEntryId={resolving?.entryId ?? null}
+        />
+      </div>
+      {view.kind === "jobs" && (
+        <OutlineJobsView
+          entry={view.entry}
+          liveById={liveById}
+          busyJobId={resolving?.jobId ?? null}
+          onBack={backToList}
+          onOpenJob={(jobId) => openJob(view.entry, jobId)}
+        />
+      )}
+      {view.kind === "detail" && detailSnapshot && sessionId && (
+        <SubagentDetail
+          sessionId={sessionId}
+          cwd={cwd}
+          subagent={detailSnapshot}
+          onBack={backToList}
+          // Locate-in-chat keeps the detail open in the rail (the jump happens
+          // behind it); in the drawer the existing jump closes the drawer.
+          onLocateInChat={onLocateInChat ? () => onLocateInChat(view.entry.entryId) : undefined}
+        />
+      )}
+      {view.kind === "detail" && !detailSnapshot && (
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center text-xs text-text-muted">
+          <span>{t("outline.subagentUnavailable")}</span>
+          <button
+            type="button"
+            data-testid="outline-back"
+            onClick={backToList}
+            className="rounded-full border border-border bg-bg px-3 py-1 text-[11px] text-text-muted transition-colors hover:text-text"
+          >
+            {t("subagents.back")}
+          </button>
+        </div>
+      )}
     </>
   );
 
   if (!isDrawer) {
     return (
-      <aside
-        id="session-outline-panel"
-        data-testid="session-outline-rail"
-        aria-label={t("outline.title")}
-        className="flex h-full w-[260px] flex-shrink-0 flex-col border-l border-border bg-bg"
-      >
-        {body}
-      </aside>
+      <>
+        <div
+          {...railResizer.separatorProps}
+          aria-controls="session-outline-panel"
+          data-resize-handle="outline-rail"
+          className={`panel-resize-handle outline-rail-resize-handle${railResizer.isResizing ? " is-resizing" : ""}`}
+          title={`${t("outline.resizeRail")}: ${t("layout.resizeHint")}`}
+        />
+        <aside
+          ref={railResizer.panelRef}
+          id="session-outline-panel"
+          data-testid="session-outline-rail"
+          aria-label={t("outline.title")}
+          className="flex h-full flex-shrink-0 flex-col border-l border-border bg-bg"
+          style={{
+            width: "var(--outline-rail-width)",
+            "--outline-rail-width": `${railResizer.width}px`,
+          } as React.CSSProperties}
+        >
+          {body}
+        </aside>
+      </>
     );
   }
 

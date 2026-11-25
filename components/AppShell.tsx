@@ -3,7 +3,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, ToolbarIconButton } from "./SessionSidebar";
-import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
 import { AskDialogContent, type AskDialogResponse, type SidePanelDialogRequest, type SidePanelDialogResponder } from "./AskDialogContent";
 import { AskDrawer } from "./AskDrawer";
@@ -293,7 +292,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
 
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
-  const [subagents, setSubagents] = useState<SubagentSnapshot[]>([]);
+  // #137: the standalone subagent column is gone — the session outline inside
+  // ChatWindow is the only subagent surface now. The live list itself is owned
+  // by useAgentSession; this write-through stays so the shell-level state (and
+  // its clear-on-unmount) keeps working for any future surface.
+  const [, setSubagents] = useState<SubagentSnapshot[]>([]);
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
@@ -1075,7 +1078,6 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
-  const showSubagentPanel = !isMobile && selectedSession !== null && subagents.length > 0;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   const showPlaceholder = !showChat;
 
@@ -2209,15 +2211,6 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
             )
           ) : null}
           </div>
-          {showSubagentPanel && (
-            <div className="subagent-column">
-              <SubagentPanel
-                sessionId={selectedSession?.id ?? null}
-                cwd={selectedSession?.cwd ?? effectiveNewSessionCwd ?? undefined}
-                subagents={subagents}
-              />
-            </div>
-          )}
         </div>
       </div>
 

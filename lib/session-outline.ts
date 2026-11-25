@@ -132,3 +132,20 @@ export function applyLiveOutlineJobStatus(
   });
   return changed ? next : entries;
 }
+
+/** #137: what a primary click on an outline row does. Async subagent rows
+ * drill down (multi-job rows expand to their job list, single-job rows open
+ * the detail directly); every other row — and async rows with no resolvable
+ * job (bash/eval background deliveries) — keeps the plain transcript jump. */
+export type OutlineDrillTarget =
+  | { kind: "jump" }
+  | { kind: "jobs" }
+  | { kind: "detail"; jobId: string };
+
+export function resolveOutlineDrillTarget(entry: SessionOutlineEntry): OutlineDrillTarget {
+  if (entry.role !== "subagent") return { kind: "jump" };
+  const jobs = entry.jobs ?? [];
+  if (jobs.length > 1) return { kind: "jobs" };
+  if (jobs.length === 1) return { kind: "detail", jobId: jobs[0].id };
+  return { kind: "jump" };
+}
