@@ -1,7 +1,7 @@
 "use client";
 
 import { useI18n } from "@/hooks/useI18n";
-import type { ModelHealth, ModelHealthState } from "./types";
+import type { ModelHealth, ModelHealthState, ProviderHealth } from "./types";
 
 /**
  * Availability dot for a model or provider row.
@@ -9,6 +9,9 @@ import type { ModelHealth, ModelHealthState } from "./types";
  * Health comes from the background scanner (`modelHealth`, keyed
  * `provider/modelId`); when it has no entry for a model the row reads
  * "unverified" rather than claiming the model works.
+ *
+ * A provider's `expiring` state is a badge of its own: an access token close
+ * to expiry is still a working credential, not a disabled one (#144).
  */
 
 const STATE_COLORS: Record<ModelHealthState | "missing" | "expiring", string> = {
@@ -28,7 +31,7 @@ const STATE_LABEL_KEYS: Record<ModelHealthState | "missing" | "expiring", string
 };
 
 export function HealthBadge({ health, label, title }: {
-  health?: ModelHealth;
+  health?: ModelHealth | ProviderHealth;
   label?: string;
   title?: string;
 }) {

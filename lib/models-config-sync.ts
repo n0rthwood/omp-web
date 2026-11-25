@@ -58,6 +58,15 @@ export interface SyncDiff {
   unchanged: string[];
 }
 
+/**
+ * One preflight finding, structured so the wizard can word it in the UI
+ * language (issue #145). `SyncApplyResult.warnings` carries the same findings
+ * as fixed English lines for cross-version wire compatibility.
+ */
+export type SyncIssue =
+  | { kind: "missing_key"; provider: string; envVar: string }
+  | { kind: "not_logged_in"; provider: string };
+
 export interface SyncApplyResult {
   dryRun: boolean;
   schemaVersion: number;
@@ -68,6 +77,7 @@ export interface SyncApplyResult {
     enabledModels: { added: string[]; removed: string[]; unchanged: string[] };
     fallbackChains: SyncDiff;
   };
+  issues: SyncIssue[];
   warnings: string[];
   backupPaths: string[];
 }
@@ -345,8 +355,8 @@ function diffRecord(before: Record<string, unknown>, after: Record<string, unkno
   return diff;
 }
 
-function collectWarnings(sections: readonly SyncSection[], payload: SyncExportPayload, deps: SyncDeps): string[] {
-  const warnings: string[] = [];
+function collectIssues(sections: readonly SyncSection[], payload: SyncExportPayload, deps: SyncDeps): SyncIssue[] {
+  const issues: SyncIssue[] = [];
   const envKeys = new Set(deps.envKeyNames);
   const oauth = new Set(deps.oauthProviderIds);
 
@@ -354,7 +364,7 @@ function collectWarnings(sections: readonly SyncSection[], payload: SyncExportPa
     for (const [id, block] of Object.entries(payload.providers)) {
       const apiKey = block.apiKey;
       if (typeof apiKey === "string" && apiKey.length > 0 && !envKeys.has(apiKey)) {
-        warnings.push(`${apiKey} missing — provider ${id} will sync but run degraded`);
+        issues.push({ kind: "missing_key", provider: id, envVar: apiKey });
       }
     }
   }
@@ -374,10 +384,10 @@ function collectWarnings(sections: readonly SyncSection[], payload: SyncExportPa
   }
   for (const provider of [...referenced].sort()) {
     if (oauth.has(provider) && !deps.hasOAuthCredential(provider)) {
-      warnings.push(`${provider} not logged in — roles/allow-list entries fall back through retry.fallbackChains`);
+      issues.push({ kind: "not_logged_in", provider });
     }
   }
-  return warnings;
+  return issues;
 }
 
 /**
@@ -467,7 +477,12 @@ export function applyDeclarationLayer(request: ParsedSyncRequest, deps: SyncDeps
     || (wantRoles && roleChanges > 0)
     || (wantEnabled && allowListChanges > 0);
 
-  const warnings = collectWarnings(sections, request.payload, deps);
+  const issues = collectIssues(sections, request.payload, deps);
+  // `warnings` stays the cross-version wire form (an older gateway or target
+  // only understands the English line); the wizard words `issues` itself.
+  const warnings = issues.map((issue) => issue.kind === "missing_key"
+    ? `${issue.envVar} missing — provider ${issue.provider} will sync but run degraded`
+    : `${issue.provider} not logged in — roles/allow-list entries fall back through retry.fallbackChains`);
   const backupPaths: string[] = [];
 
   if (!request.dryRun && changed) {
@@ -514,6 +529,7 @@ export function applyDeclarationLayer(request: ParsedSyncRequest, deps: SyncDeps
     schemaVersion: SYNC_SCHEMA_VERSION,
     changed,
     applied,
+    issues,
     warnings,
     backupPaths,
   };

@@ -110,7 +110,7 @@ function stopServer(server) {
 
 /** A stand-in target: a real second instance's apply route, backed by its own
  *  isolated agent dir, so the push exercises the genuine wire contract. */
-async function startTarget(t, { failWith } = {}) {
+async function startTarget(t, { failWith, replyWith } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "omp141-target-"));
   const agentDir = join(dir, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -122,6 +122,11 @@ async function startTarget(t, { failWith } = {}) {
     if (failWith) {
       res.writeHead(failWith.status, { "content-type": "application/json" });
       res.end(JSON.stringify(failWith.body));
+      return;
+    }
+    if (replyWith) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(replyWith));
       return;
     }
     const chunks = [];
@@ -207,6 +212,10 @@ test("gateway pushes the declaration layer to each target serially and reports p
   assert.equal(dryBody.results.length, 1);
   assert.equal(dryBody.results[0].status, "skipped");
   assert.equal(dryBody.results[0].changed, true);
+  // #145: the content diff and the structured findings ride along for the wizard.
+  assert.deepEqual(dryBody.results[0].applied.providers.added, ["zhipu-coding-plan"]);
+  assert.deepEqual(dryBody.results[0].applied.roles.added, ["default"]);
+  assert.deepEqual(dryBody.results[0].issues, [{ kind: "missing_key", provider: "zhipu-coding-plan", envVar: "ZHIPU_API_KEY" }]);
   assert.equal(readFileSync(join(target.agentDir, "models.yml"), "utf8"), "providers:\n  remote-only:\n    apiKey: REMOTE_KEY\n");
 
   const pushed = await POST(request({ targets: [machine.id], sections: ["providers", "roles"] }, { cookie }));
@@ -249,6 +258,7 @@ test("one failing target never blocks the others and local is never a target", a
   assert.equal(byId.get("local").status, "skipped");
   assert.equal(byId.get(bad.id).status, "failed");
   assert.equal(byId.get(bad.id).detail, "target exploded");
+  assert.equal(byId.get(bad.id).applied, undefined, "a failed target brings no diff");
   assert.equal(byId.get(good.id).status, "applied", "the healthy target is still applied");
   assert.ok(readFileSync(join(healthy.agentDir, "models.yml"), "utf8").includes("zhipu-coding-plan"));
 });
@@ -307,4 +317,33 @@ test("the exported payload never carries a credential value", async (t) => {
   const body = await response.json();
   assert.ok(!JSON.stringify(body).includes(secret), "the credential value must never cross the gateway");
   assert.deepEqual(body.excludedOAuthProviders, ["anthropic"], "the OAuth block is withheld");
+});
+
+test("a target answering a malformed diff or unknown findings yields none instead of garbage (issue #145)", async (t) => {
+  const dir = freshStores(t);
+  await seedUsers();
+  const agentDir = join(dir, "agent");
+  writeFileSync(join(agentDir, "models.yml"), "providers: {}\n");
+  writeFileSync(join(agentDir, "config.yml"), "modelRoles: {}\n");
+  const odd = await startTarget(t, {
+    replyWith: {
+      changed: true,
+      applied: { providers: "not-the-documented-shape" },
+      issues: [
+        { kind: "mystery", provider: "x" },
+        { kind: "not_logged_in" },
+        { kind: "missing_key", provider: "joyai", envVar: "JOYAI_API_KEY" },
+      ],
+      warnings: [],
+    },
+  });
+  const { createMachine } = await jiti.import("@/lib/machines/machine-store.ts");
+  const machine = createMachine({ name: "Odd Box", baseUrl: odd.url, authMode: "none" });
+  const { POST } = await jiti.import("./route.ts");
+
+  const response = await POST(request({ targets: [machine.id], sections: ["providers"] }, { cookie: await loginAs("root") }));
+  const { results: [result] } = await response.json();
+  assert.equal(result.status, "applied");
+  assert.equal(result.applied, undefined, "an unusable diff is dropped, not forwarded");
+  assert.deepEqual(result.issues, [{ kind: "missing_key", provider: "joyai", envVar: "JOYAI_API_KEY" }]);
 });

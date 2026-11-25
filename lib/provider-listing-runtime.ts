@@ -64,6 +64,10 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
     if (type) credentialTypes.set(id, type);
   }
 
+  // A credential that was disabled — a failed refresh, a deleted key — stays
+  // behind as a tombstone. The summaries carry no secret: provider and cause.
+  const tombstoned = new Set((await authStorage.credentials.listDisabled()).map((row) => row.provider));
+
   return [...ids].sort().map((id) => {
     const oauth = oauthByProvider.get(id);
     const origin = authStorage.keys.source(id);
@@ -77,8 +81,10 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
       status: {
         configured: Boolean(origin?.concrete),
         ...(origin?.kind ? { source: origin.kind } : {}),
+        ...(origin?.envVar ? { envVar: origin.envVar } : {}),
       },
       ...(credentialTypes.has(id) ? { credentialType: credentialTypes.get(id) } : {}),
+      ...(tombstoned.has(id) ? { hasCredentialHistory: true } : {}),
       modelCount: modelCounts.get(id) ?? 0,
       ...catalogById.get(id),
     };

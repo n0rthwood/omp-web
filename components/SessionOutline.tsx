@@ -8,11 +8,22 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/hooks/useI18n";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { SubagentDetail, formatSubagentDuration } from "./SubagentDetail";
+import { localizedToolPreview } from "@/lib/tool-name-i18n";
+import { stripIrcEnvelope } from "@/lib/irc-message";
 
 // #104: journal outline panel. Rendered either as a persistent rail beside the
 // transcript (wide containers) or as a modal drawer (narrow containers / side
 // panels). The drawer traps focus, closes on backdrop click, restores focus to
 // its trigger, and isolates Escape from the global agent-abort shortcut.
+
+/** #143: outline previews are server-built text. Tool rows carry the raw tool
+ *  id list (`toolNames`), system rows can carry an `irc:incoming` envelope —
+ *  localize the former and strip the latter so no literal `<irc>` shows. */
+function outlinePreviewText(entry: SessionOutlineEntry, t: (key: string, params?: Record<string, string | number>) => string): string {
+  return entry.toolNames && entry.toolNames.length > 0
+    ? localizedToolPreview(entry.preview, t)
+    : stripIrcEnvelope(entry.preview);
+}
 
 /** #137: resizable rail geometry. The width is a per-browser preference
  * (localStorage), never machine/fleet data. */
@@ -310,6 +321,15 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
             const jobsTooltip = item.jobs && item.jobs.length > 0
               ? item.jobs.map((job) => `${job.name}: ${jobStatusLabel(job.status, t)}`).join("\n")
               : undefined;
+            // #142: name the subagent INSTANCE(S) on the row face. A single
+            // job shows its name; a multi-job row shows the first name +n with
+            // the full list in the tooltip (the per-job chips below already
+            // enumerate the rest).
+            const jobNames = item.jobs && item.jobs.length > 0
+              ? item.jobs.length === 1
+                ? item.jobs[0].name
+                : `${item.jobs[0].name} +${item.jobs.length - 1}`
+              : undefined;
             return (
               <div key={item.entryId} role="listitem">
               <button
@@ -320,7 +340,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                 data-outline-group-member={inGroup ? "true" : undefined}
                 aria-current={isReading ? "location" : undefined}
                 aria-busy={busyEntryId === item.entryId ? "true" : undefined}
-                aria-label={t("outline.jumpLabel", { index: item.ordinal + 1, preview: item.preview })}
+                aria-label={t("outline.jumpLabel", { index: item.ordinal + 1, preview: outlinePreviewText(item, t) })}
                 onClick={() => onActivate(item, jumpId)}
                 className="mb-1 block w-full min-w-0 rounded-lg border px-2 py-1.5 text-left transition-colors"
                 style={{
@@ -345,14 +365,15 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                       className="block overflow-hidden text-xs leading-snug text-text"
                       style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflowWrap: "anywhere" }}
                     >
-                      {item.preview}
+                      {outlinePreviewText(item, t)}
                     </span>
                     <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-dim">
                       <span className="flex-shrink-0 tabular-nums">#{item.ordinal + 1}</span>
                       <span className="flex-shrink-0">{roleLabel(item.role, t)}</span>
                       {item.jobStatus && <JobStatusBadge status={item.jobStatus} label={jobStatusLabel(item.jobStatus, t)} />}
+                      {jobNames && <span className="min-w-0 truncate" title={jobsTooltip}>{jobNames}</span>}
                       {item.jobs && item.jobs.length > 1 && (
-                        <span className="flex flex-shrink-0 items-center gap-0.5" title={jobsTooltip}>
+                        <span className="flex flex-shrink-0 items-center gap-0.5" title={jobsTooltip} data-outline-jobs={item.jobs.length}>
                           {item.jobs.slice(0, 8).map((job) => (
                             <JobStatusBadge key={job.id} status={job.status} label={`${job.name}: ${jobStatusLabel(job.status, t)}`} />
                           ))}
@@ -387,7 +408,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
               data-outline-entry={entry.entryId}
               data-outline-subdued="true"
               aria-current={isReading ? "location" : undefined}
-              aria-label={t("outline.jumpLabel", { index: entry.ordinal + 1, preview: entry.preview })}
+              aria-label={t("outline.jumpLabel", { index: entry.ordinal + 1, preview: outlinePreviewText(entry, t) })}
               onClick={() => onActivate(entry, entry.entryId)}
               className="block min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-left transition-colors"
               style={{
@@ -409,7 +430,7 @@ function OutlineBody({ entries, loading, error, onRetryLoad, readingEntryId, tar
                     className="block overflow-hidden text-xs leading-snug text-text"
                     style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflowWrap: "anywhere" }}
                   >
-                    {entry.preview}
+                    {outlinePreviewText(entry, t)}
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-dim">
                     <span className="flex-shrink-0 tabular-nums">#{entry.ordinal + 1}</span>
@@ -505,7 +526,7 @@ export function OutlineJobsView({ entry, liveById, busyJobId, onBack, onOpenJob 
             <path d="M10.5 3 5.5 8l5 5" />
           </svg>
         </button>
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text">{entry.preview}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text">{outlinePreviewText(entry, t)}</span>
         <span className="flex-shrink-0 text-[10px] tabular-nums text-text-dim">{t("outline.jobCount", { count: jobs.length })}</span>
       </div>
       <div role="list" aria-label={t("outline.jobs")} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">

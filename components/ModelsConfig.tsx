@@ -5,12 +5,14 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { DiscoveredModel } from "@/lib/model-discovery";
 import { apiPath, LOCAL_MACHINE_ID } from "@/lib/api-path";
+import { loadHiddenProviders, saveHiddenProviders } from "@/lib/hidden-providers";
 import { useMachines } from "@/lib/machine-context";
 import type { SyncSection } from "@/lib/models-config-sync";
 import { refreshProviderModels } from "./models-config-helpers";
 import { AddProviderFlow } from "./models-config/AddProviderFlow";
 import { AllowListTab } from "./models-config/AllowListTab";
 import { HealthStrip } from "./models-config/HealthStrip";
+import { withModelOverride } from "./models-config/model-override";
 import { ProvidersTab } from "./models-config/ProvidersTab";
 import { RolesTab } from "./models-config/RolesTab";
 import { SyncWizard } from "./models-config/SyncWizard";
@@ -18,6 +20,7 @@ import type {
   ApiKeyProvider,
   ModelHealthMap,
   ModelOption,
+  ModelOverridePatch,
   ModelsHealthResponse,
   ModelsJson,
   OAuthProvider,
@@ -33,9 +36,14 @@ const TABS: { id: TabId; labelKey: string }[] = [
   { id: "providers", labelKey: "models.providersTab" },
 ];
 
+// Re-read the health snapshot as often as the background scan runs
+// (`MODELS_HEALTH_SCAN_BASE_MS`), so the strip's age stays the scan's.
+const HEALTH_POLL_MS = 60_000;
+
 interface ModelsResponse {
   modelList?: ModelOption[];
   modelHealth?: ModelHealthMap;
+  thinkingLevels?: Record<string, string[]>;
 }
 
 /**
@@ -61,12 +69,19 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
   const [savedOk, setSavedOk] = useState(false);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
-  const [modelList, setModelList] = useState<ModelOption[]>([]);
   // Every configured model, including ones the current `enabledModels` scope
   // hides: the allow-list picker must be able to suggest a pattern that widens
-  // the scope (`q4m` → `qwen4-max-preview`).
+  // the scope (`q4m` → `qwen4-max-preview`), and the provider table lists a
+  // provider's models untrimmed (#144).
   const [allModelList, setAllModelList] = useState<ModelOption[]>([]);
+  // Health and supported efforts of that same untrimmed list. The provider
+  // table shows those models, so it reads their health from the same response
+  // rather than from the scope-filtered one.
+  const [allModelHealth, setAllModelHealth] = useState<ModelHealthMap | undefined>(undefined);
+  const [allThinkingLevels, setAllThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelHealth, setModelHealth] = useState<ModelHealthMap | undefined>(undefined);
+  // Provider ids this browser hides from the list on this machine (#144).
+  const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(() => new Set<string>());
   const [health, setHealth] = useState<ModelsHealthResponse | null>(null);
   const [healthToken, setHealthToken] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -82,6 +97,10 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
       .map((machine) => ({ id: machine.id, name: machine.name })),
     [machines],
   );
+
+  useEffect(() => {
+    setHiddenProviders(loadHiddenProviders());
+  }, []);
 
   const loadAuthProviders = useCallback(() => {
     fetch(apiPath("/api/auth/providers"))
@@ -108,14 +127,15 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     const allQuery = cwd ? `?all=1&cwd=${encodeURIComponent(cwd)}` : "?all=1";
     fetch(apiPath(`/api/models${query}`), signal ? { signal } : undefined)
       .then((res) => res.json())
-      .then((data: ModelsResponse) => {
-        setModelList(data.modelList ?? []);
-        setModelHealth(data.modelHealth);
-      })
+      .then((data: ModelsResponse) => setModelHealth(data.modelHealth))
       .catch(() => {});
     fetch(apiPath(`/api/models${allQuery}`), signal ? { signal } : undefined)
       .then((res) => res.json())
-      .then((data: ModelsResponse) => setAllModelList(data.modelList ?? []))
+      .then((data: ModelsResponse) => {
+        setAllModelList(data.modelList ?? []);
+        setAllModelHealth(data.modelHealth);
+        setAllThinkingLevels(data.thinkingLevels ?? {});
+      })
       .catch(() => {});
   }, [cwd]);
 
@@ -139,9 +159,13 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
 
   // The background health scan is a separate service; a 404 (not deployed yet)
   // or any failure simply leaves the strip hidden.
+  //
+  // The snapshot is re-read on the scan's own cadence for as long as the panel
+  // is mounted. The strip's "N min ago" is the age of this snapshot, so read
+  // once it reports a scan that keeps running as ever staler.
   useEffect(() => {
     const controller = new AbortController();
-    void (async () => {
+    const load = async () => {
       try {
         const res = await fetch(apiPath("/api/models/health"), { signal: controller.signal });
         if (!res.ok) {
@@ -154,8 +178,13 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
         if ((error as Error).name === "AbortError") return;
         setHealth(null);
       }
-    })();
-    return () => controller.abort();
+    };
+    void load();
+    const timer = setInterval(() => void load(), HEALTH_POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
   }, [healthToken]);
   const addProviderEntry = useCallback((id: string, entry: ProviderEntry) => {
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [id]: entry } }));
@@ -202,6 +231,32 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     });
   }, []);
 
+  // An edited catalog row becomes a sparse `modelOverrides` patch: only the
+  // fields that changed are written, the rest keeps following the catalog.
+  const overrideCatalogModel = useCallback((providerName: string, modelId: string, changed: ModelOverridePatch) => {
+    setConfig((prev) => withModelOverride(prev, providerName, modelId, changed));
+  }, []);
+
+  const hideProvider = useCallback((id: string) => {
+    setHiddenProviders((current) => {
+      if (current.has(id)) return current;
+      const next = new Set(current);
+      next.add(id);
+      saveHiddenProviders(next);
+      return next;
+    });
+  }, []);
+
+  const showProvider = useCallback((id: string) => {
+    setHiddenProviders((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      saveHiddenProviders(next);
+      return next;
+    });
+  }, []);
+
   const addDiscoveredModels = useCallback((providerName: string, discovered: DiscoveredModel[]) => {
     setConfig((prev) => {
       const provider = prev.providers?.[providerName] ?? {};
@@ -225,7 +280,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     setProviderRefresh({ phase: "loading", providerName });
     try {
       const result = await refreshProviderModels(providerName, onModelsChanged);
-      setProviderRefresh({ phase: "success", providerName, warning: result.warning, diff: result.diff });
+      setProviderRefresh({ phase: "success", providerName, warning: result.warning, diff: result.diff, completedAt: Date.now() });
     } catch (error) {
       setProviderRefresh({ phase: "error", providerName, message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -251,6 +306,9 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
         setSavedProviderNames(Object.keys(config.providers ?? {}));
         setSavedOk(true);
         onModelsChanged?.();
+        // The provider table's rows are registry rows, which are rebuilt from
+        // the saved file: re-read them so the table shows what was saved.
+        loadModels();
         setTimeout(() => setSavedOk(false), 2000);
       }
     } catch (error) {
@@ -258,7 +316,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     } finally {
       setSaving(false);
     }
-  }, [config, onModelsChanged]);
+  }, [config, loadModels, onModelsChanged]);
 
   const refreshBusy = providerRefresh.phase === "loading";
 
@@ -317,8 +375,10 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
                 savedProviderNames={savedProviderNames}
                 oauthProviders={oauthProviders}
                 apiKeyProviders={apiKeyProviders}
-                models={modelList}
-                modelHealth={modelHealth}
+                models={allModelList}
+                modelHealth={allModelHealth}
+                thinkingLevels={allThinkingLevels}
+                hiddenProviders={hiddenProviders}
                 providerHealth={health?.providers}
                 focusProviderId={focusProviderId}
                 refreshState={providerRefresh}
@@ -328,9 +388,12 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
                 onUpdateProvider={updateProvider}
                 onRenameProvider={renameProvider}
                 onDeleteProvider={deleteProvider}
+                onOverrideModel={overrideCatalogModel}
                 onAddDiscoveredModels={addDiscoveredModels}
                 onAuthChanged={refreshAuthProviders}
                 onModelsChanged={onModelsChanged}
+                onHideProvider={hideProvider}
+                onShowProvider={showProvider}
                 onAddProvider={() => setPickerOpen(true)}
                 onSync={() => setSyncSections(["providers", "roles", "enabledModels"])}
               />

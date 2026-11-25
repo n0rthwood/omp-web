@@ -41,10 +41,12 @@ export interface ProviderListingInput {
   hasOAuth: boolean;
   /** Label of the OAuth method, e.g. "Anthropic (Claude Pro/Max)". */
   oauthName?: string;
-  /** Result of `ModelRuntime.getProviderAuthStatus()`. */
-  status: { configured: boolean; source?: string };
+  /** Result of `ModelRuntime.getProviderAuthStatus()`: where the key comes from. */
+  status: { configured: boolean; source?: string; envVar?: string };
   /** Type of the credential stored for this provider, when there is one. */
   credentialType?: ProviderCredentialType;
+  /** True when the provider's only stored credential is a disabled one — a login or key that failed and can be redone. */
+  hasCredentialHistory?: boolean;
   modelCount: number;
   /** Catalog defaults the add-provider flow prefills a models.yml entry with. */
   baseUrl?: string;
@@ -57,6 +59,8 @@ export interface ApiKeyProviderListing {
   displayName: string;
   configured: boolean;
   source?: string;
+  /** The environment variable backing an env-sourced key, when a single named one does. */
+  sourceEnvVar?: string;
   modelCount: number;
   /** True when the same provider can also be authenticated with OAuth. */
   supportsOAuth: boolean;
@@ -75,6 +79,8 @@ export interface OAuthProviderListing {
   loggedIn: boolean;
   /** True when the same provider can also be authenticated with an API key. */
   supportsApiKey: boolean;
+  /** True when a credential of this provider was disabled (a failed refresh, a deleted key), so the login can be redone. */
+  hasCredentialHistory: boolean;
 }
 
 function dedupeById(providers: readonly ProviderListingInput[]): ProviderListingInput[] {
@@ -110,6 +116,7 @@ export function buildApiKeyProviderList(
       displayName: provider.name,
       configured,
       ...(configured && provider.status.source ? { source: provider.status.source } : {}),
+      ...(configured && provider.status.source === "env" && provider.status.envVar ? { sourceEnvVar: provider.status.envVar } : {}),
       modelCount: provider.modelCount,
       supportsOAuth: provider.hasOAuth,
       ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
@@ -133,6 +140,7 @@ export function buildOAuthProviderList(
       usesCallbackServer: false,
       loggedIn: provider.credentialType === "oauth",
       supportsApiKey: provider.hasApiKeyLogin,
+      hasCredentialHistory: Boolean(provider.hasCredentialHistory),
     });
   }
   return result;

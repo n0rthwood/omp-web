@@ -19,16 +19,19 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { getAssistantErrorMessage, getDisplayableAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
+import { localizedToolName } from "@/lib/tool-name-i18n";
 import { MessageView } from "./MessageView";
 import { SessionOutline } from "./SessionOutline";
 import type { SidePanelDialogRequest, SidePanelDialogResponder } from "./AskDialogContent";
 import { ChatInput, resolveImageMimeType, type ChatInputHandle } from "./ChatInput";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
+import { ProviderStatusStrip } from "./ProviderStatusStrip";
 import { OmpWordmark } from "./OmpWordmark";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import type { SessionStatsInfo } from "@/lib/omp-types";
+import type { ProviderStatusSnapshot } from "@/lib/provider-status";
 
 interface Props {
   session: SessionInfo | null;
@@ -50,6 +53,10 @@ interface Props {
   onRespondSideDialog?: (respond: SidePanelDialogResponder | null) => void;
   onRevealSideDialog?: () => void;
   onSubagentsChange?: (subagents: SubagentSnapshot[]) => void;
+  /** Provider status line above the composer (issue #145). The shell owns the
+   *  poll, so a session switch never resets it. */
+  providerStatus?: ProviderStatusSnapshot | null;
+  onOpenModels?: () => void;
   /** Completion sound state + controls, owned by AppShell so tasks finishing in
    *  a non-active workspace can still ring. */
   soundEnabled?: boolean;
@@ -60,7 +67,8 @@ interface Props {
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string | null {
   if (phase?.kind === "running_tools") {
-    const names = phase.tools.map((t) => t.name);
+    // #143: the hint shows localized tool names, falling back to the raw id.
+    const names = phase.tools.map((tool) => localizedToolName(tool.name, t));
     if (names.length === 0) return t("chat.runningTool");
     if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
     if (names.length <= 3) return t("chat.runningTools", { names: names.join(", ") });
@@ -102,7 +110,7 @@ function isGroupAnchor(message: AgentMessage): boolean {
   return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, providerStatus, onOpenModels, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -569,6 +577,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
+  // Provider status sits directly above the composer in both layouts. The
+  // shell owns the poll, so a session switch (this component is re-keyed)
+  // never blanks it.
+  const providerStatusElement = providerStatus && onOpenModels ? (
+    <ProviderStatusStrip snapshot={providerStatus} onOpenModels={onOpenModels} />
+  ) : null;
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center text-text-muted">
@@ -696,6 +711,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
               </div>
             </div>
             <NoticeShelf notices={notices} align="right" />
+            {providerStatusElement}
             {chatInputElement}
           </div>
         </div>
@@ -1128,6 +1144,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
         </div>
+        {providerStatusElement && (
+          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px`, flexShrink: 0 }}>
+            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+              {providerStatusElement}
+            </div>
+          </div>
+        )}
         {chatInputElement}
         <ExtensionStatusBar statuses={extensionStatuses} />
       </div>

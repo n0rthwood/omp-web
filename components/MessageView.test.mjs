@@ -143,7 +143,9 @@ test("shows an operation icon beside every standard tool label", () => {
 
     const iconPosition = html.indexOf(`data-tool-icon="${iconKind}"`);
     const iconEnd = html.indexOf(">", iconPosition);
-    const toolPosition = html.indexOf(`>${toolName}</span>`);
+    // #143: namespaced ids render their trailing segment (`functions.task` → `task`).
+    const label = toolName.split(".").pop();
+    const toolPosition = html.indexOf(`>${label}</span>`);
     assert.ok(iconPosition >= 0, `expected ${iconKind} icon for ${toolName}`);
     assert.ok(html.slice(iconPosition, iconEnd).includes(`color:${themeColor}`), `expected ${toolName} icon to use ${themeColor}`);
     assert.ok(iconPosition < toolPosition, `expected ${iconKind} icon before ${toolName}`);

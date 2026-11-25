@@ -1406,6 +1406,15 @@ span.linenumber {
   min-height: 0;
   overflow: hidden;
 }
+
+/* Provider status strip (#145): one line above the composer. Headline text
+   shrinks with an ellipsis instead of wrapping; at the mobile breakpoint it is
+   dropped so every provider keeps its icon + status dot. */
+@media (max-width: 640px) {
+  .provider-status-headline {
+    display: none;
+  }
+}
 /* Keep the panel border as the idle separator; this element only expands the hit target. */
 .panel-resize-handle {
   position: relative;

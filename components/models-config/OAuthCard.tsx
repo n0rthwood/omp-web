@@ -138,13 +138,14 @@ export function OAuthCard({ provider, health, onRefresh }: {
   const progressMessage = loginState.phase === "progress" ? loginState.message : (inputRequest?.progress ?? null);
   const showProgress = verifying || Boolean(inputRequest?.progress);
   const expiresAt = health?.expiresAt ? new Date(health.expiresAt).toLocaleString() : null;
+  const lastRefreshAt = health?.lastRefreshAt ? new Date(health.lastRefreshAt).toLocaleString() : null;
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <SectionTitle>{t("models.oauthCardTitle")}</SectionTitle>
         <HealthBadge
-          health={health ? { state: health.state === "ok" ? "ok" : health.state === "expiring" ? "disabled" : health.state === "missing" ? "disabled" : "unverified", cause: health.cause } : undefined}
+          health={health}
           label={health ? undefined : provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
         />
       </div>
@@ -152,6 +153,7 @@ export function OAuthCard({ provider, health, onRefresh }: {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 11, color: "var(--text-muted)" }}>
         <span>{t("models.oauthAccount")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{health?.account ?? "—"}</code></span>
         <span>{t("models.oauthExpires")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{expiresAt ?? "—"}</code></span>
+        <span title={t("models.oauthLastRefreshHint")}>{t("models.oauthLastRefresh")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{lastRefreshAt ?? "—"}</code></span>
       </div>
 
       {health?.cause && (
