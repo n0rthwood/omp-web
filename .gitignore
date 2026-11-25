@@ -66,3 +66,6 @@ release/seeds/config.yml
 release/seeds/models.yml
 release/seeds/omp-web-secrets.env.xorb64
 release/seeds/omp-web-xor.key
+
+# local verification screenshots (never committed)
+.verify-shots/
