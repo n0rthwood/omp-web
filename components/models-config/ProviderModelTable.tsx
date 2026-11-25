@@ -61,7 +61,7 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
   canAddModel: boolean;
   /** Why it cannot, shown on the disabled control. */
   addModelBlockedReason?: string;
-  /** An OAuth provider with no login: every row is dimmed — the catalog still lists them, but nothing can run. */
+  /** An OAuth provider with neither a login nor a key (`providerLoggedOut`): every row is dimmed — the catalog still lists them, but nothing can run. */
   loggedOut?: boolean;
   onUpdateModel: (index: number, model: ModelEntry) => void;
   onOverrideModel: (modelId: string, changed: ModelOverridePatch) => void;

@@ -9,7 +9,7 @@ import { ProviderConfigForm } from "./ProviderConfigForm";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderModelTable } from "./ProviderModelTable";
 import { buildProviderModelRows } from "./provider-model-rows";
-import { mergeProviderRows, providerRowGroup } from "./provider-merge";
+import { mergeProviderRows, providerLoggedOut, providerRowGroup } from "./provider-merge";
 import { RefreshDiffPanel } from "./RefreshDiffPanel";
 import type {
   ApiKeyProvider,
@@ -323,7 +323,7 @@ export function ProvidersTab({
               health={modelHealth}
               canAddModel={canAddModel}
               addModelBlockedReason={t("models.addModelNeedsHost")}
-              loggedOut={selected.oauth ? !selected.oauth.loggedIn : false}
+              loggedOut={providerLoggedOut(selected, providerHealth?.[selected.id])}
               onUpdateModel={updateModelAt}
               onOverrideModel={(modelId, changed) => onOverrideModel(selected.id, modelId, changed)}
               onCreateModel={createModel}

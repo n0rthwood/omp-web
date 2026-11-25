@@ -1,5 +1,5 @@
 import type { ProviderSource } from "./types";
-import type { ApiKeyProvider, OAuthProvider, ProviderEntry } from "./types";
+import type { ApiKeyProvider, OAuthProvider, ProviderEntry, ProviderHealth } from "./types";
 
 /** One provider in the left column, merged across the three config layers. */
 export interface ProviderRow {
@@ -21,6 +21,18 @@ export function providerRowGroup(row: ProviderRow): ProviderSource {
   if (row.config) return "config";
   if (row.loggedIn) return "oauth";
   return "api_key";
+}
+
+/**
+ * An OAuth-capable provider with no login and no key either (mockup `oauthOut`):
+ * nothing in its table can run, so every row is dimmed.
+ *
+ * The scan's `missing` is the test. The row's own flags cannot answer it:
+ * OpenRouter, xAI and Zhipu are listed as OAuth-capable while they run on an
+ * API key, and a key declared in models.yml never shows up as `configured`.
+ */
+export function providerLoggedOut(row: ProviderRow, health: ProviderHealth | undefined): boolean {
+  return row.oauth !== undefined && !row.oauth.loggedIn && health?.state === "missing";
 }
 
 /**

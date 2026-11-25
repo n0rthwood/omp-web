@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeProviderRows, providerRowGroup } from "./provider-merge.ts";
+import { mergeProviderRows, providerLoggedOut, providerRowGroup } from "./provider-merge.ts";
 
 const oauth = (id, overrides = {}) => ({ id, name: id, usesCallbackServer: false, loggedIn: true, ...overrides });
 const apiKey = (id, overrides = {}) => ({ id, displayName: id, configured: true, modelCount: 3, ...overrides });
@@ -59,4 +59,44 @@ test("an OAuth provider that also has a models.yml entry keeps both sources on o
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0].sources, ["oauth", "config"]);
   assert.equal(providerRowGroup(rows[0]), "config");
+});
+
+test("an OAuth-capable provider running on its API key is not logged out", () => {
+  // OpenRouter, xAI and Zhipu sit in the OAuth listing while they run on a key.
+  const [row] = mergeProviderRows([oauth("openrouter", { loggedIn: false })], [apiKey("openrouter")], {});
+  assert.equal(providerLoggedOut(row, { state: "ok" }), false);
+});
+
+test("a key declared in models.yml is a credential even though the row is not `configured`", () => {
+  const [row] = mergeProviderRows(
+    [oauth("alibaba-token-plan", { loggedIn: false })],
+    [],
+    { "alibaba-token-plan": { baseUrl: "https://dashscope.aliyuncs.com", api: "openai-completions" } },
+  );
+
+  assert.equal(row.configured, false);
+  assert.equal(providerLoggedOut(row, { state: "ok" }), false);
+});
+
+test("an OAuth provider with no login and no key is logged out", () => {
+  const [row] = mergeProviderRows(
+    [oauth("anthropic", { loggedIn: false })],
+    [],
+    { anthropic: { baseUrl: "https://api.anthropic.com" } },
+  );
+
+  assert.equal(providerLoggedOut(row, { state: "missing", cause: "No credentials configured" }), true);
+});
+
+test("a failed login or a pending scan does not grey the table", () => {
+  const [row] = mergeProviderRows(
+    [oauth("anthropic", { loggedIn: false })],
+    [],
+    { anthropic: { baseUrl: "https://api.anthropic.com" } },
+  );
+
+  // A tombstone is the red "credential invalid" badge, not a dimmed table.
+  assert.equal(providerLoggedOut(row, { state: "disabled", cause: "oauth refresh failed" }), false);
+  // Before the first scan nothing is known; dimming everything would flash.
+  assert.equal(providerLoggedOut(row, undefined), false);
 });
