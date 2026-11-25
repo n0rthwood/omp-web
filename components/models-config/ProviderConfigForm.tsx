@@ -42,9 +42,12 @@ export function ProviderConfigForm({ name, provider, onChange, onRename, onDelet
   const set = <K extends keyof ProviderEntry>(key: K, value: ProviderEntry[K]) => onChange({ ...provider, [key]: value });
 
   useEffect(() => {
-    if (!provider.api) onChange({ ...provider, api: "openai-completions" });
+    // Only a block that declares an endpoint defines models in this dialect. A
+    // catalog provider's block — an override patch, a bare key — keeps the
+    // catalog's own API: defaulting it here rewrote the provider's transport.
+    if (!provider.api && provider.baseUrl) onChange({ ...provider, api: "openai-completions" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider.api]);
+  }, [provider.api, provider.baseUrl]);
 
   useEffect(() => {
     discoveryRequestIdRef.current += 1;
