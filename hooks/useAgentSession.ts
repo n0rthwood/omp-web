@@ -884,7 +884,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const live = subagents.map((subagent) => ({
       id: subagent.id,
       status: subagent.status,
-      name: subagent.agent,
+      // #142: the row must name the agent INSTANCE (ScoutModelListTiming),
+      // not the agent TYPE (scout/task) — id is the instance name.
+      name: subagent.id,
       parentToolCallId: subagent.parentToolCallId,
     }));
     return applyLiveOutlineJobStatus(outline, live);

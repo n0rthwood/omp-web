@@ -430,6 +430,57 @@ function taskToolCallIds(content: unknown[]): string[] {
   return ids;
 }
 
+/**
+ * #142: cross-row reconciliation. A task spawn receipt's details.progress[] is
+ * a FROZEN spawn-time snapshot (every job pending forever); the completion
+ * frames live on OTHER rows — a `wait` toolResult's details.jobs[] (keyed by
+ * agent NAME, bash/eval jobs by jobId) and async-result deliveries (keyed by
+ * agentId). Merge those settlements back onto the spawn rows by job id, with
+ * a terminal status always overriding a pending/running one. Bash/eval jobs
+ * (no spawn receipt) never match a task row's job ids, so they cannot leak in.
+ * First terminal write wins so a later regressed snapshot cannot re-open a
+ * settled job.
+ */
+function reconcileOutlineJobs(
+  entries: SessionOutlineEntry[],
+  display: JournalRecordMeta[],
+): SessionOutlineEntry[] {
+  const settlements: Record<string, OutlineJobStatus> = {};
+  let settlementCount = 0;
+  for (const meta of display) {
+    if (meta.jobs) {
+      for (const job of meta.jobs) {
+        if (job.status === "pending" || job.status === "running") continue;
+        if (settlements[job.id] !== undefined) continue;
+        settlements[job.id] = job.status;
+        settlementCount++;
+      }
+    }
+    // Receipt-only rows (no per-job rows) still carry a usable aggregate.
+    const id = meta.jobStatus ? meta.toolCallId ?? meta.id : undefined;
+    if (!id || !meta.jobStatus || meta.jobStatus === "pending" || meta.jobStatus === "running") continue;
+    if (settlements[id] !== undefined) continue;
+    settlements[id] = meta.jobStatus;
+    settlementCount++;
+  }
+  if (settlementCount === 0) return entries;
+  let changed = false;
+  const next = entries.map((entry) => {
+    if (entry.role !== "subagent" || !entry.jobs || entry.jobs.length === 0) return entry;
+    let rowChanged = false;
+    const jobs = entry.jobs.map((job) => {
+      const terminal = settlements[job.id];
+      if (terminal === undefined || (job.status !== "pending" && job.status !== "running")) return job;
+      rowChanged = true;
+      return { ...job, status: terminal };
+    });
+    if (!rowChanged) return entry;
+    changed = true;
+    return { ...entry, jobs, jobStatus: aggregateOutlineJobStatus(jobs) ?? entry.jobStatus };
+  });
+  return changed ? next : entries;
+}
+
 /** Normalize raw job statuses; cancelled (job manager) folds into aborted. */
 function normalizeJobStatus(value: unknown): OutlineJobStatus | undefined {
   if (typeof value !== "string") return undefined;
@@ -489,9 +540,11 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
 }
 
 /**
- * Per-job lifecycle from an async-result delivery's details.jobs[] (covers
- * bash/eval background jobs too). Task jobs key by agentId — the id live
- * subagent snapshots carry — falling back to jobId; bash/eval jobs keep jobId.
+ * Per-job lifecycle from a jobs[] payload — an async-result delivery's
+ * details.jobs[] or a `wait` toolResult's details.jobs[] (both cover bash/eval
+ * background jobs). Task jobs key by id/agentId (the name live subagent
+ * snapshots and spawn receipts carry), falling back to jobId; bash/eval jobs
+ * keep jobId.
  */
 function asyncResultJobs(details: unknown): OutlineJobInfo[] {
   if (!isPlainRecord(details) || !Array.isArray(details.jobs)) return [];
@@ -500,11 +553,12 @@ function asyncResultJobs(details: unknown): OutlineJobInfo[] {
     if (!isPlainRecord(item)) continue;
     const status = normalizeJobStatus(item.status);
     if (!status) continue;
-    const id = typeof item.agentId === "string" && item.agentId ? item.agentId : item.jobId;
+    const key = typeof item.id === "string" && item.id ? item.id
+      : typeof item.agentId === "string" && item.agentId ? item.agentId : item.jobId;
     // bash/eval labels are the raw command line — the job id (bg_N) is the
-    // human handle; task deliveries carry a real agent name in agentId.
-    const name = item.type === "task" ? (item.label ?? item.agentId ?? item.jobId) : (item.jobId ?? item.label);
-    collectOutlineJob(jobs, id, name, status);
+    // human handle; task jobs carry a real agent name in id/agentId.
+    const name = item.type === "task" ? (item.label ?? key) : (item.jobId ?? item.label);
+    collectOutlineJob(jobs, key, name, status);
   }
   return jobs;
 }
@@ -691,6 +745,15 @@ function metaFromEntry(entry: Record<string, unknown>, offset: number, end: numb
         const { jobs, jobStatus } = taskResultJobs(message.details);
         if (jobs.length > 0) meta.jobs = jobs;
         if (jobStatus) meta.jobStatus = jobStatus;
+      } else if (typeof message.toolName === "string" && isWaitToolName(message.toolName)) {
+        // #142: a wait result carries the completion frames the spawn receipt
+        // froze as pending — per-job settlements keyed by agent name (bash/eval
+        // jobs by jobId). reconcileOutlineJobs merges them onto spawn rows.
+        const jobs = asyncResultJobs(message.details);
+        if (jobs.length > 0) {
+          meta.jobs = jobs;
+          meta.jobStatus = aggregateOutlineJobStatus(jobs);
+        }
       }
     }
     if (preview) meta.preview = preview;
@@ -1832,7 +1895,7 @@ export async function readSessionOutline(
         const entry = outlineEntryFromMeta(display[positions[ordinal]], ordinal, receipts);
         if (entry) entries.push(entry);
       }
-      return { anchor, leafId, entries: spliceOutlineTitleEntries(entries, display, positions) };
+      return { anchor, leafId, entries: reconcileOutlineJobs(spliceOutlineTitleEntries(entries, display, positions), display) };
     }
 
     const replayedLeaf = resolveLeafFromMeta(visible, visibleById);
@@ -1849,7 +1912,7 @@ export async function readSessionOutline(
       const entry = outlineEntryFromMeta(display[positions[ordinal]], ordinal, receipts);
       if (entry) entries.push(entry);
     }
-    return { anchor, leafId, entries: spliceOutlineTitleEntries(entries, display, positions) };
+    return { anchor, leafId, entries: reconcileOutlineJobs(spliceOutlineTitleEntries(entries, display, positions), display) };
   } finally {
     closeSync(fd);
   }
