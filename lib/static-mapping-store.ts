@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { withFileLockSync, writePrivateFileAtomicSync } from "./atomic-file";
+import { resolveProject } from "./worktree";
 import {
   STATIC_MAPPING_LIFECYCLES,
   STATIC_MAPPING_STATES,
@@ -32,6 +33,7 @@ const MACHINE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 const ENTRY_SEGMENT_RE = /^[^\\/\u0000]+$/;
 const MAX_LABEL_LENGTH = 200;
 const MAX_SESSION_ID_LENGTH = 256;
+const MAX_PROJECT_ROOT_LENGTH = 4096;
 
 export const LOCAL_STATIC_MACHINE_ID = "local";
 
@@ -40,6 +42,11 @@ export interface StaticMappingRecord {
   label: string;
   lifecycle: StaticMappingLifecycle;
   state: StaticMappingState;
+  /**
+   * Normalized absolute main-project root (issue #136). Absent on
+   * historical rows; those are admin-only in discovery and management.
+   */
+  projectRoot?: string;
   /** Provenance only. Never use this value for authorization. */
   sessionId?: string;
   entryFile: string;
@@ -60,6 +67,27 @@ export class StaticMappingError extends Error {
     this.status = status;
     this.field = field;
   }
+}
+
+/**
+ * Structural type guard for {@link StaticMappingError}.
+ *
+ * Route handlers and this store can be loaded through different module
+ * identities (e.g. Jiti in tests vs. the bundled runtime), so a plain
+ * `instanceof` check fails across realms and misclassifies a real mapping
+ * error as an unknown 500. Recognize the error by its class identity OR by the
+ * stable shape it always carries — `name`, numeric `status`, optional string
+ * `field` — so intended 4xx responses survive without weakening the
+ * unknown-error path for arbitrary errors.
+ */
+export function isStaticMappingError(error: unknown): error is StaticMappingError {
+  if (error instanceof StaticMappingError) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { name?: unknown; status?: unknown; field?: unknown };
+  if (candidate.name !== "StaticMappingError") return false;
+  if (typeof candidate.status !== "number" || !Number.isFinite(candidate.status)) return false;
+  if (candidate.field !== undefined && typeof candidate.field !== "string") return false;
+  return true;
 }
 
 
@@ -175,6 +203,53 @@ function normalizeSessionId(input: unknown): string | undefined {
   return input;
 }
 
+/**
+ * Shape check for an already-normalized absolute project-root string.
+ * Persisted rows that fail this check are treated as historical rows without
+ * a project key, rather than being allowed into non-admin discovery.
+ */
+export function isStaticProjectRootShape(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= MAX_PROJECT_ROOT_LENGTH
+    && value.startsWith("/")
+    && !/[\\\u0000]/.test(value)
+    && (value === "/" || !value.endsWith("/"))
+    && !value.includes("//")
+    && !value.split("/").some((segment) => segment === "." || segment === "..");
+}
+
+/** Normalize and validate one explicit create-time project root. */
+export function normalizeStaticProjectRoot(input: unknown): string {
+  if (typeof input !== "string" || input.trim().length === 0) {
+    throw new StaticMappingError("projectRoot is required and must be an absolute path", 400, "projectRoot");
+  }
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/") || /[\\\u0000]/.test(trimmed)) {
+    throw new StaticMappingError("projectRoot must be an absolute path", 400, "projectRoot");
+  }
+  const normalized = resolve(trimmed);
+  if (!isStaticProjectRootShape(normalized)) {
+    throw new StaticMappingError("projectRoot is not a valid absolute path", 400, "projectRoot");
+  }
+  return normalized;
+}
+
+/**
+ * Resolve an explicit root to the canonical project identity used by session
+ * visibility. Always delegates through `resolveProject` so linked-worktree
+ * top-levels collapse to their main checkout AND removed
+ * `<repo>-worktrees/<branch>` paths (which no longer exist on disk) collapse
+ * via `resolveProject`'s existing `inferRemovedWorktree` inference. The final
+ * `normalizeStaticProjectRoot` re-validates the shape, so a transformed
+ * result can never bypass input validation.
+ */
+export async function resolveStaticProjectRoot(input: unknown): Promise<string> {
+  const normalized = normalizeStaticProjectRoot(input);
+  const project = await resolveProject(normalized);
+  return normalizeStaticProjectRoot(project.projectRoot);
+}
+
 function parseIsoDate(input: unknown, field: string): string {
   if (typeof input !== "string" || !Number.isFinite(Date.parse(input))) {
     throw new StaticMappingError(`${field} must be an ISO date`, 400, field);
@@ -233,6 +308,12 @@ function parseStoredRecord(value: unknown): StaticMappingRecord | null {
   const sessionId = typeof record.sessionId === "string" && record.sessionId.length > 0
     ? record.sessionId.slice(0, MAX_SESSION_ID_LENGTH)
     : undefined;
+  let projectRoot: string | undefined;
+  try {
+    projectRoot = normalizeStaticProjectRoot(record.projectRoot);
+  } catch {
+    projectRoot = undefined;
+  }
   return {
     id: record.id,
     label: typeof record.label === "string" && record.label.length > 0
@@ -241,6 +322,7 @@ function parseStoredRecord(value: unknown): StaticMappingRecord | null {
     lifecycle,
     state,
     ...(sessionId ? { sessionId } : {}),
+    ...(projectRoot ? { projectRoot } : {}),
     entryFile,
     createdAt,
     updatedAt,
@@ -487,7 +569,7 @@ export function getStaticMapping(id: string): StaticMappingRecord | null {
   return mapping ? cloneRecord(mapping) : null;
 }
 
-export function createStaticMapping(input: StaticMappingCreateInput = {}): StaticMappingRecord {
+export function createStaticMapping(input: StaticMappingCreateInput): StaticMappingRecord {
   const nowMs = Date.now();
   const id = input.id === undefined ? randomUUID().replace(/_/g, "-") : input.id;
   validateStaticMappingId(id);
@@ -496,6 +578,7 @@ export function createStaticMapping(input: StaticMappingCreateInput = {}): Stati
   const label = normalizeLabel(input.label, id);
   const entryFile = normalizeEntryFile(input.entryFile);
   const sessionId = normalizeSessionId(input.sessionId);
+  const projectRoot = normalizeStaticProjectRoot(input.projectRoot);
   const expiresAt = parseCreateExpiry(input, lifecycle, nowMs);
   return withFileLockSync(mappingLockPath(), () => {
     const mappings = readMappingsFile();
@@ -510,6 +593,7 @@ export function createStaticMapping(input: StaticMappingCreateInput = {}): Stati
       lifecycle,
       state: "active",
       ...(sessionId ? { sessionId } : {}),
+      projectRoot,
       entryFile,
       createdAt: now,
       updatedAt: now,

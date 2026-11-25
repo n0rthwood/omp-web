@@ -1,20 +1,28 @@
 ---
 name: static-content
-description: "Publish generated static files through the machine-wide omp-web static-content API and return their public link."
+description: "Publish generated static files through the omp-web static-content API and return their public link."
 ---
 
 # Static content
 
 Use this skill when the user needs generated HTML, CSS, JavaScript, images, or
-other static bytes served by omp-web. Static mappings are **machine-wide and
-project-independent**. They are not scoped to the current repository, cwd,
-session, or project ACL. Any authenticated user who can access the machine can
-manage all of that machine's mappings.
+other static bytes served by omp-web. Every new mapping registers the explicit
+normalized **main-project `projectRoot`** it belongs to. Discovery (the
+`/static` landing page, the Home Static content tab, and the management list)
+is project-aware: a signed-in user sees only mappings whose machine they are
+granted AND whose `projectRoot` is inside their project grants. Direct serving
+of a known mapping URL deliberately stays authentication + machine-grant only
+— it does not check the project grant.
 
 ## Rules
 
-- Serve static bytes only. Never expose server-side code, invoke generated
-  files as code, or assume a project visible-root/file ACL applies.
+- Serve static bytes only. Never expose server-side code or invoke generated
+  files as code.
+- Register every new mapping with `projectRoot`: the absolute path of the
+  main project the output belongs to. If you are working in a git worktree,
+  pass the worktree path or the main checkout path — the CLI collapses a
+  worktree to its canonical main-project root. Never omit it; creates without
+  a valid absolute `projectRoot` are rejected.
 - Do not construct a host name, origin, machine ID, mapping ID, or public URL
   yourself. Use the `publicPath` returned by the CLI exactly. It is a complete
   origin-relative public path, normally `/static/<machine-id>/<mapping-id>/index.html`.
@@ -53,7 +61,7 @@ can fail to resolve `@oh-my-pi`.
 The optional override is for source/worktree or custom deployment operation.
 
 ```sh
-printf '%s\n' '{"command":"create","label":"report","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
+printf '%s\n' '{"command":"create","label":"report","projectRoot":"/opt/workspace/designer","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
   | bun --bun "$STATIC_CONTENT_CLI"
 ```
 
@@ -67,6 +75,7 @@ accepted as the nested mutation object. Create and update responses include
   "mapping": {
     "id": "...",
     "label": "...",
+    "projectRoot": "/opt/workspace/designer",
     "lifecycle": "temporary",
     "state": "active",
     "entryFile": "index.html",
@@ -87,7 +96,12 @@ domain exit without cross-domain re-authentication.
 
 ### Create
 
-The complete optional create fields are `label`, `persistent`, `ttlSeconds`,
+`projectRoot` is **required**: an absolute path naming the main project the
+mapping belongs to. The CLI normalizes it — a git worktree checkout resolves
+to its main repository root, any other directory stays itself — and persists
+the result. Relative paths and backslash/NUL-containing values are rejected;
+dot segments, duplicate separators, and trailing slashes are normalized. The
+remaining create fields are optional: `label`, `persistent`, `ttlSeconds`,
 `expiresAt`, `sessionId`, `entryFile`, and `id`; `lifecycle` is optional and
 must be `temporary` or `persistent` when supplied. If omitted, the service
 defaults to a temporary mapping. Use either `ttlSeconds` or an explicit ISO
@@ -95,7 +109,7 @@ defaults to a temporary mapping. Use either `ttlSeconds` or an explicit ISO
 specifically needed.
 
 ```json
-{"command":"create","label":"report","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}
+{"command":"create","label":"report","projectRoot":"/opt/workspace/designer","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}
 ```
 
 Choose the lifecycle deliberately:
@@ -107,18 +121,19 @@ Choose the lifecycle deliberately:
 
 The `persistent` boolean is accepted as an alias for `lifecycle`; when
 present, keep it consistent with `lifecycle`. `sessionId` is provenance only;
-it does not turn a mapping into a project-private resource.
+it is never an authorization boundary.
 
 ### Inspect, update, and revoke
 
-List all machine-wide mappings:
+List this machine's mappings (same-user local surface; no filtering):
 
 ```json
 {"command":"list"}
 ```
 
 Update a mapping by `id`. The patch accepts `label`, `lifecycle`, `persistent`,
-`entryFile`, `ttlSeconds`, and `expiresAt`:
+`entryFile`, `ttlSeconds`, and `expiresAt` (`projectRoot` is fixed at
+registration and is not patchable):
 
 ```json
 {"command":"update","id":"report","input":{"lifecycle":"temporary","ttlSeconds":7200}}
@@ -143,18 +158,26 @@ the metadata and directory. The response contains a deletion snapshot and
 
 ## HTTP API for UI and Gateway
 
-The authenticated HTTP API remains available to the Settings UI and Gateway.
-It is not the session-host API above. Do not instruct a session to call an
-unauthenticated endpoint or to guess an origin; HTTP callers must already know
-the current authenticated origin and use its normal auth/session path.
+The authenticated HTTP API serves the Settings UI, the `/static` landing page,
+the Home Static content tab, and the Gateway. It is not the session-host API
+above. Do not instruct a session to call an unauthenticated endpoint or to
+guess an origin; HTTP callers must already know the current authenticated
+origin and use its normal auth/session path.
 
-- `GET /api/static-mappings` returns `{ "machineId": "...", "mappings": [...] }`.
+- `GET /api/static-mappings` returns `{ "machineId": "...", "mappings": [...] }`
+  for this machine, filtered to the signed-in user's project grants.
+  Historical rows without a `projectRoot` appear only for administrators.
+- The `/static` landing page and Home Static content tab aggregate the
+  project-filtered per-machine responses. Remote reads use the machine's own
+  credential at the Gateway; browser cookies/authorization are never
+  forwarded.
 - `POST /api/static-mappings` creates a mapping with the same JSON fields as
-  the local CLI.
-- `PATCH /api/static-mappings/:id` updates lifecycle, expiry, label, or entry
-  file.
-- `DELETE /api/static-mappings/:id?content=retain|delete` performs explicit
-  revoke with the retain/delete behavior above.
+  the local CLI, including the required `projectRoot`. Non-admin callers may
+  only register under a project root they can see.
+- `GET/PATCH /api/static-mappings/:id` and
+  `DELETE /api/static-mappings/:id?content=retain|delete` read, update, and
+  revoke. Non-admin callers need the mapping's `projectRoot` to be visible;
+  hidden and legacy rows read as 404. Administrators retain full access.
 - `GET /api/static/:mappingId/:asset...` serves local internal content and is
   the remote target used by the Gateway.
 - `GET /static/:machineId/:mappingId/:asset...` serves the authenticated
@@ -169,5 +192,8 @@ Generated HTML, SVG, and XML documents have a restrictive CSP: scripts and
 network connections are disabled while same-origin local styles, images, fonts,
 and media remain available for ordinary reports.
 
-Expired or revoked mappings stop serving immediately. Never rely on repository
-permissions or cwd filtering to protect a mapping.
+Expired or revoked mappings stop serving immediately. Direct serving of a
+known mapping URL requires authentication plus the machine grant only — it
+deliberately does not require the project grant. Discovery and management are
+the project-gated surfaces; never rely on them to protect bytes already
+published at a known URL.

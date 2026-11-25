@@ -13,45 +13,15 @@ import type {
 } from "@/lib/static-mappings";
 import { useI18n } from "@/hooks/useI18n";
 import { AccessNotice, type AccessNoticeVariant } from "./AccessNotice";
+import { accessVariant, aggregatePublicHref, formatDate, request, type StaticApiError } from "./static-content-helpers";
 import styles from "./SettingsConfig.module.css";
 
-type ApiError = Error & { status?: number };
 type RevokeChoice = "delete" | "retain";
 
 type MappingDraft = {
   lifecycle: StaticMappingLifecycle;
   expiresAt: string;
 };
-
-
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: init?.body ? { "Content-Type": "application/json", ...(init.headers ?? {}) } : init?.headers,
-  });
-  const body = await response.json().catch(() => ({})) as T & { error?: string };
-  if (!response.ok || body.error) {
-    const error = new Error(body.error ?? `HTTP ${response.status}`) as ApiError;
-    error.status = response.status;
-    throw error;
-  }
-  return body;
-}
-
-function accessVariant(status: number | undefined): AccessNoticeVariant | null {
-  if (status === 403) return "no-permission";
-  if (status === 404) return "not-found";
-  if (status === 502 || status === 503 || status === 504) return "offline";
-  return null;
-}
-
-function formatDate(value: string | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
-}
 
 function toDateTimeLocal(value: string | undefined): string {
   if (!value) return "";
@@ -70,10 +40,6 @@ function fromDateTimeLocal(value: string): string | null {
 
 function defaultExpiry(): string {
   return toDateTimeLocal(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
-}
-
-function publicPath(value: string): string {
-  return `/${value.replace(/^\/+/, "")}`;
 }
 
 function initialDraft(mapping: StaticMapping): MappingDraft {
@@ -111,7 +77,7 @@ export function StaticContentConfig() {
       setDrafts(Object.fromEntries(result.mappings.map((mapping) => [mapping.id, initialDraft(mapping)])));
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
-      const status = (caught as ApiError).status;
+      const status = (caught as StaticApiError).status;
       setAccessError(accessVariant(status));
       setError(caught instanceof Error ? caught.message : String(caught));
       setMappings(null);
@@ -235,10 +201,11 @@ export function StaticContentConfig() {
 
                   <div className={styles.staticMappingPath}>
                     <span className={styles.settingLabel}>{t("staticContent.publicPath")}</span>
-                    <a href={publicPath(mapping.publicPath)} target="_blank" rel="noreferrer">{publicPath(mapping.publicPath)}</a>
+                    <a href={aggregatePublicHref({ machineId, mapping })} target="_blank" rel="noreferrer">{aggregatePublicHref({ machineId, mapping })}</a>
                   </div>
 
                   <dl className={styles.staticMappingMeta}>
+                    {mapping.projectRoot && <div><dt>{t("staticContent.project")}</dt><dd title={mapping.projectRoot}>{mapping.projectRoot}</dd></div>}
                     <div><dt>{t("staticContent.created")}</dt><dd>{formatDate(mapping.createdAt)}</dd></div>
                     <div><dt>{t("staticContent.updated")}</dt><dd>{formatDate(mapping.updatedAt)}</dd></div>
                     <div><dt>{t("staticContent.expiry")}</dt><dd>{mapping.lifecycle === "persistent" ? t("staticContent.noExpiry") : formatDate(mapping.expiresAt)}</dd></div>

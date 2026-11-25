@@ -74,4 +74,4 @@ export async function proxy(request: NextRequest) {
   return NextResponse.next();
 }
 
-export const config = { matcher: ["/", "/api/:path*", "/m/:path*", "/p/:path*", "/static/:path*"] };
+export const config = { matcher: ["/", "/api/:path*", "/m/:path*", "/p/:path*", "/static", "/static/:path*"] };

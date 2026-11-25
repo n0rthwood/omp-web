@@ -53,6 +53,10 @@ function optionalLifecycle(body: Record<string, unknown>): "persistent" | "tempo
 
 export function parseStaticMappingCreateInput(body: Record<string, unknown>): StaticMappingCreateInput {
   const expiresAt = optionalString(body, "expiresAt");
+  const projectRoot = optionalString(body, "projectRoot");
+  if (projectRoot === undefined) {
+    throw new StaticMappingError("projectRoot is required and must be an absolute path", 400, "projectRoot");
+  }
   return {
     id: optionalString(body, "id"),
     label: optionalString(body, "label"),
@@ -62,6 +66,7 @@ export function parseStaticMappingCreateInput(body: Record<string, unknown>): St
     expiresAt,
     sessionId: optionalNullableString(body, "sessionId"),
     entryFile: optionalString(body, "entryFile"),
+    projectRoot,
   };
 }
 

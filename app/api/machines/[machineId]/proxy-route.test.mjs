@@ -487,3 +487,244 @@ test("provider refresh forwards the JSON body for admins but denies granted non-
   assert.equal(forwarded.calls[0].init.headers.get("content-type"), "application/json");
   assert.deepEqual(JSON.parse(await new Response(forwarded.calls[0].init.body).text()), { providerName: "my-provider" });
 });
+
+const REMOTE_STATIC_LIST = {
+  machineId: "gpu-1",
+  mappings: [
+    { id: "m-visible", projectRoot: "/opt/granted/a", publicPath: "/static/gpu-1/m-visible/index.html" },
+    { id: "m-hidden", projectRoot: "/opt/other", publicPath: "/static/gpu-1/m-hidden/index.html" },
+    { id: "m-legacy", publicPath: "/static/gpu-1/m-legacy/index.html" },
+  ],
+};
+
+test("limited user's proxied static list drops hidden and legacy rows without forwarding browser credentials", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+
+  const { result, calls } = await withStubbedSessionList(REMOTE_STATIC_LIST, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/static-mappings", { cookie }), params({ machineId: "gpu-1", path: ["api", "static-mappings"] })),
+  );
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.deepEqual(body.mappings.map((m) => m.id), ["m-visible"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://gpu-1.local/api/static-mappings");
+  const outbound = new Headers(calls[0].init.headers);
+  assert.equal(outbound.get("cookie"), null);
+  assert.equal(outbound.get("authorization"), null);
+});
+
+test("admin's proxied static list is byte-identical; '*' user keeps rooted rows but not legacy", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { GET } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings"] });
+  const rootCookie = await loginAs("root");
+  const admin = await withStubbedSessionList(REMOTE_STATIC_LIST, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/static-mappings", { cookie: rootCookie }), context),
+  );
+  assert.deepEqual((await admin.result.json()).mappings.map((m) => m.id), ["m-visible", "m-hidden", "m-legacy"]);
+
+  const starCookie = await loginAs("granted");
+  const star = await withStubbedSessionList(REMOTE_STATIC_LIST, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/static-mappings", { cookie: starCookie }), context),
+  );
+  assert.deepEqual((await star.result.json()).mappings.map((m) => m.id), ["m-visible", "m-hidden"]);
+});
+
+test("proxied static item read hides non-granted rows as 404 for limited users", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { GET } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings", "m-hidden"] });
+
+  const hidden = await withStubbedSessionList({ mapping: { id: "m-hidden", projectRoot: "/opt/other" } }, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/static-mappings/m-hidden", { cookie }), context),
+  );
+  assert.equal(hidden.result.status, 404);
+
+  const visible = await withStubbedSessionList({ mapping: { id: "m-visible", projectRoot: "/opt/granted/a" } }, () =>
+    GET(apiRequest("/api/machines/gpu-1/api/static-mappings/m-visible", { cookie }), params({ machineId: "gpu-1", path: ["api", "static-mappings", "m-visible"] })),
+  );
+  assert.equal(visible.result.status, 200);
+});
+
+test("proxied static PATCH is project-gated before forwarding; hidden rows never reach the remote mutation", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { PATCH } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings", "m-hidden"] });
+  const patchRequest = new Request("http://localhost/api/machines/gpu-1/api/static-mappings/m-hidden", {
+    method: "PATCH",
+    headers: { host: "localhost", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ label: "nope" }),
+  });
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (init.method === "GET") {
+      return new Response(JSON.stringify({ mapping: { id: "m-hidden", projectRoot: "/opt/other" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const denied = await PATCH(patchRequest, context);
+    assert.equal(denied.status, 404);
+    assert.equal(calls.length, 1, "only the read probe runs; the mutation is never forwarded");
+    assert.equal(calls[0].init.method, "GET");
+    assert.equal(calls[0].url, "http://gpu-1.local/api/static-mappings/m-hidden");
+    const outbound = new Headers(calls[0].init.headers);
+    assert.equal(outbound.get("cookie"), null);
+    assert.equal(outbound.get("authorization"), null);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("proxied static PATCH for a visible row probes then forwards; admin skips the probe", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { PATCH } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings", "m-visible"] });
+  const makeRequest = (cookie) => new Request("http://localhost/api/machines/gpu-1/api/static-mappings/m-visible", {
+    method: "PATCH",
+    headers: { host: "localhost", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ label: "ok" }),
+  });
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (init.method === "GET") {
+      return new Response(JSON.stringify({ mapping: { id: "m-visible", projectRoot: "/opt/granted/a" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ mapping: { id: "m-visible", label: "ok" } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const limited = await PATCH(makeRequest(await loginAs("limited")), context);
+    assert.equal(limited.status, 200);
+    assert.deepEqual(calls.map((call) => call.init.method), ["GET", "PATCH"]);
+
+    calls.length = 0;
+    const admin = await PATCH(makeRequest(await loginAs("root")), context);
+    assert.equal(admin.status, 200);
+    assert.deepEqual(calls.map((call) => call.init.method), ["PATCH"]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("proxied static create is project-gated before forwarding; invisible root never reaches the remote", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { POST } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings"] });
+  const makeRequest = (projectRoot) => new Request("http://localhost/api/machines/gpu-1/api/static-mappings", {
+    method: "POST",
+    headers: { host: "localhost", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ id: "m-new", persistent: true, projectRoot }),
+  });
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ mapping: { id: "m-new" } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    // Invisible root: rejected before any upstream fetch.
+    const denied = await POST(makeRequest("/opt/other"), context);
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).field, "projectRoot");
+    assert.equal(calls.length, 0, "invisible root is rejected before forwarding");
+
+    // Visible root with a messy form: normalized and forwarded, no browser creds.
+    const ok = await POST(makeRequest("/opt//granted/./a/"), context);
+    assert.equal(ok.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://gpu-1.local/api/static-mappings");
+    const outbound = new Headers(calls[0].init.headers);
+    assert.equal(outbound.get("cookie"), null);
+    assert.equal(outbound.get("authorization"), null);
+    const forwarded = JSON.parse(await new Response(calls[0].init.body).text());
+    assert.equal(forwarded.projectRoot, "/opt/granted/a");
+
+    // Admin forwards unchanged (no gate, no rewrite).
+    calls.length = 0;
+    const adminCookie = await loginAs("root");
+    const adminReq = new Request("http://localhost/api/machines/gpu-1/api/static-mappings", {
+      method: "POST",
+      headers: { host: "localhost", cookie: adminCookie, "content-type": "application/json" },
+      body: JSON.stringify({ id: "m-admin", persistent: true, projectRoot: "/opt/elsewhere" }),
+    });
+    const admin = await POST(adminReq, context);
+    assert.equal(admin.status, 200);
+    assert.equal(calls.length, 1);
+    const adminForwarded = JSON.parse(await new Response(calls[0].init.body).text());
+    assert.equal(adminForwarded.projectRoot, "/opt/elsewhere");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("proxied static create rejects a malformed projectRoot before forwarding", async (t) => {
+  t.after(restoreEnv);
+  const dir = freshStores();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("limited");
+  const { POST } = await loadRoute();
+  const context = params({ machineId: "gpu-1", path: ["api", "static-mappings"] });
+  const request = new Request("http://localhost/api/machines/gpu-1/api/static-mappings", {
+    method: "POST",
+    headers: { host: "localhost", cookie, "content-type": "application/json" },
+    body: JSON.stringify({ id: "m-bad", persistent: true, projectRoot: "relative/path" }),
+  });
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const denied = await POST(request, context);
+    assert.equal(denied.status, 400);
+    assert.equal((await denied.json()).field, "projectRoot");
+    assert.equal(calls.length, 0, "malformed root never reaches the remote");
+  } finally {
+    globalThis.fetch = original;
+  }
+});

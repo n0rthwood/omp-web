@@ -4,7 +4,9 @@ import {
   revokeStaticMapping,
   staticMappingResponse,
   StaticMappingError,
+  isStaticMappingError,
   createStaticMapping,
+  resolveStaticProjectRoot,
   updateStaticMapping,
 } from "../../lib/static-mapping-store";
 import { parseStaticMappingCreateInput, parseStaticMappingPatchInput } from "../../lib/static-mapping-http";
@@ -32,6 +34,7 @@ const CREATE_FIELDS: Record<string, true> = {
   expiresAt: true,
   sessionId: true,
   entryFile: true,
+  projectRoot: true,
 };
 const PATCH_FIELDS: Record<string, true> = {
   label: true,
@@ -146,9 +149,10 @@ function revokeContent(request: StaticContentCommandRequest): "delete" | "retain
 
 /**
  * Execute one same-user local command without HTTP, cookies, or browser state.
- * The store itself resolves the host's normal agent directory and profile env.
+ * The store resolves and validates the explicit project root before the
+ * mapping is persisted.
  */
-export function executeStaticContentCommand(value: unknown): Record<string, unknown> {
+export async function executeStaticContentCommand(value: unknown): Promise<Record<string, unknown>> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new StaticMappingError("command must be a JSON object", 400, "command");
   }
@@ -165,7 +169,9 @@ export function executeStaticContentCommand(value: unknown): Record<string, unkn
 
   if (command === "create") {
     const input = mutationInput(request, CREATE_FIELDS);
-    const mapping = staticMappingResponse(createStaticMapping(parseStaticMappingCreateInput(input)));
+    const parsed = parseStaticMappingCreateInput(input);
+    const projectRoot = await resolveStaticProjectRoot(parsed.projectRoot);
+    const mapping = staticMappingResponse(createStaticMapping({ ...parsed, projectRoot }));
     return { mapping, writeDir: mapping.writeDir, publicPath: mapping.publicPath };
   }
 
@@ -220,10 +226,10 @@ async function readRequest(): Promise<unknown> {
 
 async function main(): Promise<void> {
   try {
-    const result = executeStaticContentCommand(await readRequest());
+    const result = await executeStaticContentCommand(await readRequest());
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    const status = error instanceof StaticMappingError ? error.status : error instanceof SyntaxError ? 400 : 500;
+    const status = isStaticMappingError(error) ? error.status : error instanceof SyntaxError ? 400 : 500;
     const message = error instanceof SyntaxError ? "command must contain valid JSON" : error instanceof Error ? error.message : String(error);
     process.stdout.write(`${JSON.stringify({ error: message, status })}\n`);
     process.exitCode = status >= 500 ? 1 : 2;

@@ -16,6 +16,12 @@ export interface StaticMapping {
   lifecycle: StaticMappingLifecycle;
   persistent: boolean;
   state: StaticMappingState;
+  /**
+   * Normalized absolute main-project root registered at creation (issue
+   * #136). Worktrees collapse to the main checkout root. Absent on
+   * historical rows; those are admin-only in discovery and management.
+   */
+  projectRoot?: string;
   /** Session provenance only; it is never an authorization boundary. */
   sessionId?: string;
   /** Relative entry file used to form `publicPath`. */
@@ -63,6 +69,8 @@ export interface StaticMappingCreateInput {
   expiresAt?: string;
   sessionId?: string | null;
   entryFile?: string;
+  /** Required: absolute main-project root; worktree roots collapse to the main checkout. */
+  projectRoot: string;
 }
 
 export interface StaticMappingPatchInput {

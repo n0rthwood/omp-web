@@ -19,6 +19,7 @@ import { useMachines } from "@/lib/machine-context";
 import { useSessionList } from "@/lib/session-list-context";
 import { HomeCalendar } from "./HomeCalendar";
 import { HomeSessionRow, type HomeSessionRowEntry } from "./HomeSessionRow";
+import { StaticContentList } from "./StaticContentList";
 import { useNavigation } from "./NavigationProvider";
 
 const RECENT_LIMIT = 6;
@@ -122,6 +123,7 @@ export function HomePage() {
   const [viewMode, setViewMode] = useState<"aggregate" | "single-machine">("aggregate");
   const expandedGroupStorageKey = machineStorageKey(EXPANDED_PROJECT_GROUPS_STORAGE_KEY);
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string> | null>(null);
+  const [contentTab, setContentTab] = useState<"conversations" | "static">("conversations");
   const [shownAllGroupKeys, setShownAllGroupKeys] = useState<Set<string>>(() => new Set<string>());
   const aggregateGroupRefs = useRef(new Map<string, HTMLElement>());
   const [expandedGroupsStorageKey, setExpandedGroupsStorageKey] = useState<string | null>(null);
@@ -422,6 +424,35 @@ export function HomePage() {
           </h1>
           <div style={{ flex: 1 }} />
           <div
+            role="tablist"
+            aria-label={t("home.contentTab")}
+            title={t("home.contentTab")}
+            style={{ display: "flex", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden", flexShrink: 0 }}
+          >
+            {(["conversations", "static"] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={contentTab === tab}
+                onClick={() => setContentTab(tab)}
+                style={{
+                  height: 28,
+                  padding: "0 10px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  border: "none",
+                  background: contentTab === tab ? "var(--accent)" : "var(--bg-hover)",
+                  color: contentTab === tab ? "#fff" : "var(--text-muted)",
+                  fontWeight: contentTab === tab ? 600 : 500,
+                }}
+              >
+                {t(tab === "conversations" ? "home.tabConversations" : "home.tabStatic")}
+              </button>
+            ))}
+          </div>
+          {contentTab === "conversations" && (
+          <div
             role="group"
             aria-label={t("home.viewMode")}
             title={t("home.viewMode")}
@@ -448,6 +479,7 @@ export function HomePage() {
               </button>
             ))}
           </div>
+          )}
           <div ref={languageWrapperRef} style={{ position: "relative", flexShrink: 0 }}>
             <button
               type="button"
@@ -551,6 +583,7 @@ export function HomePage() {
               {refreshing ? <LoaderIcon size={16} /> : t("home.refresh")}
             </button>
         </div>
+        {contentTab === "conversations" && (
         <div style={chipRowStyle}>
           {groups?.map((group) => (
             <div
@@ -608,7 +641,8 @@ export function HomePage() {
           ))}
           {groups === null && <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "8px 0", width: "100%" }}><LoaderIcon size={16} /></span>}
         </div>
-        {viewMode === "single-machine" && (
+        )}
+        {contentTab === "conversations" && viewMode === "single-machine" && (
         <div style={{ ...chipRowStyle, marginTop: 6 }}>
           {selectedGroup && projectRoots.length > 0 && projectRoots.map((root) => {
             const count = selectedGroup.projects.get(root)?.length ?? 0;
@@ -643,6 +677,10 @@ export function HomePage() {
         )}
       </header>
       <main style={{ flex: 1, overflowY: "auto", width: "100%", maxWidth: 1440, margin: "0 auto", padding: "16px 20px 60px" }}>
+        {contentTab === "static" ? (
+          <StaticContentList reloadKey={reloadKey} />
+        ) : (
+        <>
         {newConvError && (
           <div
             role="alert"
@@ -980,6 +1018,8 @@ export function HomePage() {
           <div style={{ color: "var(--text-dim)", fontSize: 13, padding: "24px 0" }}>
             {groups === null ? <div style={{ display: "flex", justifyContent: "center" }}><LoaderIcon size={18} /></div> : t("home.noProjects")}
           </div>
+        )}
+        </>
         )}
       </main>
     </div>
