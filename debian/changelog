@@ -1,3 +1,14 @@
+omp-web (0.5.45) jammy; urgency=medium
+
+  * Outline subagent drill-down (#137): async outline rows open the subagent's
+    live transcript inside the outline (multi-job rows expand to a job list),
+    the standalone subagent panel is removed, finished subagents stay drillable
+    after a host restart via the on-disk sub-session layout, and the outline
+    rail defaults to 320px with a drag-resizable width (240-560) persisted per
+    browser in localStorage.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 25 Nov 2026 14:00:00 +0000
+
 omp-web (0.5.44) jammy; urgency=medium
 
   * Static discovery (#136): require an explicit project root for mappings,
