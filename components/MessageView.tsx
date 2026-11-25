@@ -16,6 +16,9 @@ import { FALLBACK_MODEL_ROLE } from "@/lib/fallback-events";
 import { resolveLocalFilePath } from "@/lib/file-links";
 import { getFileName } from "@/lib/file-paths";
 import { apiPath } from "@/lib/api-path";
+import { localizedToolName } from "@/lib/tool-name-i18n";
+import { parseIrcEnvelope } from "@/lib/irc-message";
+import { classifyCustomType } from "@/lib/injection-sources";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import type {
@@ -943,6 +946,7 @@ function AskToolCallView({ block, result }: { block: ToolCallContent; result?: T
 }
 
 function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
+  const { t } = useI18n();
   const normalizedToolName = block.toolName.toLowerCase();
   const isEditTool = normalizedToolName === "edit" ||
     normalizedToolName.startsWith("edit_") ||
@@ -1037,7 +1041,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
 
 
         <span style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-          {block.toolName}
+          {localizedToolName(block.toolName, t)}
         </span>
         <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
           {headerPreview}
@@ -2077,15 +2081,20 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const text = getMessageText(message.content);
+  // #143: `irc:incoming` bodies carry a literal `<irc>` envelope from the SDK
+  // template; render the sender in the header and the bare body as markdown.
+  const irc = message.customType === "irc:incoming" ? parseIrcEnvelope(text) : null;
+  const ircFrom = irc ? irc.from || (isRecord(message.details) && typeof message.details.from === "string" ? message.details.from : "") : "";
+  const body = irc ? irc.body : text;
   const images = getMessageImages(message.content);
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
-  const title = formatCustomType(message.customType);
+  const title = irc ? t("injection.source.irc-incoming") : formatCustomType(message.customType, t);
   const time = formatTime(message.timestamp);
   const isSystemPrelude = message.customType === "eager-task-prelude";
 
   const copyContent = () => {
-    copyText(text || detailsText).then(() => {
+    copyText(body || detailsText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -2123,6 +2132,8 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           <span style={{ color: isSystemPrelude ? "#0d9488" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {title}
           </span>
+          {irc && ircFrom && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.ircFromAgent", { name: ircFrom })}</span>}
+          {irc?.replyTo && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.ircReplyTo", { name: irc.replyTo })}</span>}
            {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </div>
@@ -2130,7 +2141,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
         {contentExpanded ? (
           <div style={{ padding: "6px 9px" }}>
             {images.length > 0 && (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: text ? 8 : 0 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: body ? 8 : 0 }}>
                 {images.map((img, i) => {
                   const src = imageSource(img);
                   if (!src) return null;
@@ -2146,7 +2157,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                 })}
               </div>
             )}
-             {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
+             {body ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{body}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
           </div>
         ) : (
           <button
@@ -2163,7 +2174,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               textAlign: "left",
             }}
           >
-             {text ? previewText(text) : t("i18n.showExtensionMessage")}
+             {body ? previewText(body) : t("i18n.showExtensionMessage")}
           </button>
         )}
 
@@ -2276,13 +2287,16 @@ function safeJson(value: unknown): string {
   }
 }
 
-function formatCustomType(type: string): string {
-  return type || "extension";
+/** #143: custom_message header label — injection-sources label when known. */
+function formatCustomType(type: string, t: (key: string) => string): string {
+  const normalized = type.trim();
+  if (!normalized) return t("injection.source.extension");
+  const source = classifyCustomType(normalized, "");
+  return source.sourceId === "unknown" ? normalized : t(`injection.source.${source.sourceId}`);
 }
 
 function previewText(text: string): string {
   const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return "Show extension message";
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 

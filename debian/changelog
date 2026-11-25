@@ -1,3 +1,22 @@
+omp-web (0.5.46) jammy; urgency=medium
+
+  * Model-config overhaul: cross-model fallback is now visible in chat (#138)
+    with an amber banner (applied/succeeded, turn-scoped, stale-run guarded)
+    and a durable transcript model_change row; the model list reflects
+    external credential/config changes (#139) via credential-pool reload and
+    registry mtime hot-reload, plus a 60s merged-model health scan exposed at
+    GET /api/models/health and per-model modelHealth; the models dialog is
+    rebuilt into three tabs (#140) — roles with editable fallback chains,
+    chip-based fuzzy-search allow list, and merged providers with source
+    badges, real refresh diffs, OAuth auth cards (login/paste/disconnect),
+    modality icon toggles, a model edit drawer, catalog-autofill add-provider
+    flow, and a health strip; fleet declarative config sync (#141) adds
+    sync/export + sync/apply APIs (OAuth subscriptions excluded, idempotent
+    merge, .bak backups, dryRun preflight) with a gateway orchestrator and a
+    three-step wizard reachable from every tab.
+
+ -- JoySort Release Bot <release@joysort.cc>  Wed, 25 Nov 2026 18:05:00 +0000
+
 omp-web (0.5.45) jammy; urgency=medium
 
   * Outline subagent drill-down (#137): async outline rows open the subagent's

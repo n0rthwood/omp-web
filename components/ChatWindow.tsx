@@ -19,6 +19,7 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { getAssistantErrorMessage, getDisplayableAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
+import { localizedToolName } from "@/lib/tool-name-i18n";
 import { MessageView } from "./MessageView";
 import { SessionOutline } from "./SessionOutline";
 import type { SidePanelDialogRequest, SidePanelDialogResponder } from "./AskDialogContent";
@@ -60,7 +61,8 @@ interface Props {
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string | null {
   if (phase?.kind === "running_tools") {
-    const names = phase.tools.map((t) => t.name);
+    // #143: the hint shows localized tool names, falling back to the raw id.
+    const names = phase.tools.map((tool) => localizedToolName(tool.name, t));
     if (names.length === 0) return t("chat.runningTool");
     if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
     if (names.length <= 3) return t("chat.runningTools", { names: names.join(", ") });
