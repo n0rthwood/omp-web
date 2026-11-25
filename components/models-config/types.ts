@@ -102,7 +102,7 @@ export interface ModelOption {
 export type ProviderRefreshState =
   | { phase: "idle" }
   | { phase: "loading"; providerName: string }
-  | { phase: "success"; providerName: string; warning?: string; diff?: ProviderModelDiff }
+  | { phase: "success"; providerName: string; warning?: string; diff?: ProviderModelDiff; /** Epoch ms the refresh finished; stamps the diff header. */ completedAt?: number }
   | { phase: "error"; providerName: string; message: string };
 
 export function modelHealthKey(provider: string, modelId: string): string {

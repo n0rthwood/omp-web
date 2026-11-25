@@ -17,12 +17,12 @@ import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { ServiceControlModal } from "./ServiceControlModal";
 import { OmpVersionBadge } from "./OmpVersionBadge";
-import { ProviderStatusStrip } from "./ProviderStatusStrip";
 import { HomePage } from "./HomePage";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
@@ -143,6 +143,10 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines" | "prompts">("models");
   const [settingsPromptView, setSettingsPromptView] = useState<"defaults" | "current">("defaults");
+  // The provider-status poll is owned here, not by the strip: ChatWindow is
+  // re-keyed per session, and the strip above its composer must not reset.
+  const providerStatus = useProviderStatus();
+  const openModelsSettings = useCallback(() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }, []);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -1187,14 +1191,9 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpVersionBadge />
       </div>
-      <div style={{ padding: "0 8px", flexShrink: 0 }}>
-        <ProviderStatusStrip
-          onOpenModels={() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }}
-        />
-      </div>
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", gap: 8 }}>
         <button
-          onClick={() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }}
+          onClick={openModelsSettings}
           title={translate("common.settings")}
           style={{
             flex: 1, height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
@@ -2181,6 +2180,8 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onSubagentsChange={setSubagents}
+              providerStatus={providerStatus}
+              onOpenModels={openModelsSettings}
               onOpenFile={handleOpenLinkedFile}
               onSideDialogChange={handleSideDialogChange}
               onRespondSideDialog={handleRespondSideDialog}

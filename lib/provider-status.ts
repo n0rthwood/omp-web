@@ -46,6 +46,8 @@ export interface ProviderStatusWindow {
   usedPercent?: number;
   resetsAt?: number;
   status: UsageStatus;
+  /** SDK window id when the report carried one ("5h", "7d", …); names a window compactly. */
+  windowId?: string;
 }
 
 /** One OpenRouter key's own view of its account counter (labels only). */
@@ -69,6 +71,19 @@ export interface ProviderStatusEntry {
   /** OpenRouter only: distinct accounts after dedup + per-key breakdown. */
   accountCount?: number;
   keys?: OpenRouterKeyInfo[];
+  /**
+   * Epoch ms the numbers in `windows` were measured (issue #145). The SDK
+   * keeps serving a cached / last-good report after an upstream failure, so
+   * this can be far older than the cycle's `fetchedAt`; absent when the entry
+   * was computed in the cycle itself (presence, OpenRouter REST).
+   */
+  recordedAt?: number;
+  /**
+   * Epoch ms of the provider's newest successful usage probe — the keepalive
+   * that rotates an OAuth token when due (see `keepaliveTime`). The OAuth card
+   * reports it as the credential's last refresh; absent without a report.
+   */
+  refreshedAt?: number;
 }
 
 export interface ProviderStatusSnapshot {
@@ -124,8 +139,38 @@ export function toStatusWindow(limit: UsageLimit) {
     ...(amount.limit !== undefined ? { limit: amount.limit } : {}),
     ...(fraction !== undefined ? { usedPercent: Math.round(fraction * 1000) / 10 } : {}),
     ...(limit.window?.resetsAt !== undefined ? { resetsAt: limit.window.resetsAt } : {}),
+    ...(limit.window?.id !== undefined ? { windowId: limit.window.id } : {}),
     status: limit.status ?? usageStatus(fraction),
   };
+}
+
+/**
+ * Oldest `fetchedAt` among the reports that contributed limits: the merged
+ * windows are never fresher than this, so it is the honest "as of" time.
+ */
+function dataTime(reports: UsageReport[]): number | undefined {
+  let oldest: number | undefined;
+  for (const report of reports) {
+    if (report.limits.length === 0 || !Number.isFinite(report.fetchedAt) || report.fetchedAt <= 0) continue;
+    if (oldest === undefined || report.fetchedAt < oldest) oldest = report.fetchedAt;
+  }
+  return oldest;
+}
+
+/**
+ * Newest `fetchedAt` across all of a provider's reports: the last successful
+ * keepalive probe. The SDK's usage fetch is what rotates an OAuth token when
+ * it is due, and it keeps replaying an older report after an upstream failure,
+ * so this time stops advancing exactly when the credential stops being
+ * refreshed. The OAuth card shows it as the credential's last refresh.
+ */
+function keepaliveTime(reports: UsageReport[]): number | undefined {
+  let newest: number | undefined;
+  for (const report of reports) {
+    if (!Number.isFinite(report.fetchedAt) || report.fetchedAt <= 0) continue;
+    if (newest === undefined || report.fetchedAt > newest) newest = report.fetchedAt;
+  }
+  return newest;
 }
 
 const STATUS_RANK: Record<UsageStatus, number> = { unknown: 0, ok: 1, warning: 2, exhausted: 3 };
@@ -370,6 +415,8 @@ export async function collectProviderStatus(deps: ProviderStatusDeps) {
       status = "error";
       error = "no usage data";
     }
+    const recordedAt = dataTime(providerReports);
+    const refreshedAt = keepaliveTime(providerReports);
     entries.set(provider, {
       id: provider,
       displayName: deps.displayName(provider),
@@ -377,6 +424,8 @@ export async function collectProviderStatus(deps: ProviderStatusDeps) {
       status,
       windows,
       keyCount: rows.length,
+      ...(recordedAt !== undefined ? { recordedAt } : {}),
+      ...(refreshedAt !== undefined ? { refreshedAt } : {}),
       ...(error ? { error } : {}),
     });
   }
@@ -386,12 +435,16 @@ export async function collectProviderStatus(deps: ProviderStatusDeps) {
   for (const [provider, providerReports] of byProvider) {
     if (entries.has(provider) || provider === "openrouter") continue;
     const windows = dedupeWindows(providerReports.flatMap((report) => report.limits));
+    const recordedAt = dataTime(providerReports);
+    const refreshedAt = keepaliveTime(providerReports);
     entries.set(provider, {
       id: provider,
       displayName: deps.displayName(provider),
       kind: "oauth-usage",
       status: windows.length > 0 ? rollupStatus(windows) : "error",
       windows,
+      ...(recordedAt !== undefined ? { recordedAt } : {}),
+      ...(refreshedAt !== undefined ? { refreshedAt } : {}),
       ...(windows.length === 0 ? { error: "no usage data" } : {}),
     });
   }

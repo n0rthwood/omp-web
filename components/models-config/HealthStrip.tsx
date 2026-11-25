@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
-import type { ModelsHealthResponse } from "./types";
+import type { ModelsHealthResponse, ProviderHealth } from "./types";
 
 /**
  * Background model-health strip: when the scan last ran, how many credentials
@@ -16,11 +16,20 @@ import type { ModelsHealthResponse } from "./types";
 export function HealthStrip({ health }: { health: ModelsHealthResponse | null }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  const [now] = useState(() => Date.now());
+  // The clock behind "N min ago" keeps moving however long the settings stay
+  // open: frozen at mount, the label never left its first reading.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   if (!health) return null;
 
-  const failing = Object.entries(health.providers).filter(([, entry]) => entry.state !== "ok");
+  // Only credentials that actually failed (`disabled` tombstones). A provider
+  // that was never configured (`missing`) is not a broken credential — the
+  // catalog lists dozens of those on every machine.
+  const failing = Object.entries(health.providers).filter(([, entry]) => entry.state === "disabled");
   const scannedMinutesAgo = Math.max(0, Math.round((now - health.scannedAt) / 60_000));
 
   return (
@@ -68,22 +77,53 @@ export function HealthStrip({ health }: { health: ModelsHealthResponse | null })
             fontSize: 12,
           }}
         >
-          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.04em", marginBottom: 6 }}>
-            {t("models.healthFailingTitle", { count: failing.length })}
-          </div>
-          {failing.length === 0 ? (
-            <div style={{ color: "var(--text-dim)" }}>{t("models.healthNoneFailing")}</div>
-          ) : failing.map(([provider, entry]) => (
-            <div key={provider} style={{ display: "flex", gap: 10, padding: "6px 0", borderTop: "1px solid var(--border)" }}>
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--danger, #f85149)", flexShrink: 0 }}>{provider}</span>
-              <code style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", wordBreak: "break-all" }}>{entry.cause ?? entry.state}</code>
-            </div>
-          ))}
-          <div style={{ marginTop: 8, color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.45 }}>
-            {t("models.healthNote", { disabled: health.disabledModelCount })}
-          </div>
+          <HealthDetails health={health} failing={failing} />
         </div>
       )}
     </div>
+  );
+}
+
+/** Open panel: the credentials that failed, the providers still usable, the scan note. */
+export function HealthDetails({ health, failing }: {
+  health: ModelsHealthResponse;
+  failing: ReadonlyArray<readonly [string, ProviderHealth]>;
+}) {
+  const { t } = useI18n();
+  // Usable = the provider's models pass the scan; `expiring` still works today.
+  const availableProviders = Object.entries(health.providers)
+    .filter(([, entry]) => entry.state === "ok" || entry.state === "expiring")
+    .map(([provider]) => provider);
+
+  return (
+    <>
+      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.04em", marginBottom: 6 }}>
+        {t("models.healthFailingTitle", { count: failing.length })}
+      </div>
+      {failing.length === 0 ? (
+        <div style={{ color: "var(--text-dim)" }}>{t("models.healthNoneFailing")}</div>
+      ) : failing.map(([provider, entry]) => (
+        <div key={provider} style={{ display: "flex", gap: 10, padding: "6px 0", borderTop: "1px solid var(--border)" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "var(--danger, #f85149)", flexShrink: 0 }}>{provider}</span>
+          <code style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", wordBreak: "break-all" }}>{entry.cause ?? entry.state}</code>
+        </div>
+      ))}
+      <div
+        data-testid="health-available-providers"
+        style={{ display: "flex", gap: 10, alignItems: "baseline", padding: "6px 0", borderTop: "1px solid var(--border)" }}
+      >
+        <span style={{ color: "var(--success, #3fb950)", flexShrink: 0 }}>
+          ● {t("models.healthAvailable", { count: health.availableModelCount })}
+        </span>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)", wordBreak: "break-word" }}>
+          {t("models.healthAvailableProviders", {
+            providers: availableProviders.length > 0 ? availableProviders.join(" · ") : "—",
+          })}
+        </span>
+      </div>
+      <div style={{ marginTop: 8, color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.45 }}>
+        {t("models.healthNote", { disabled: health.disabledModelCount })}
+      </div>
+    </>
   );
 }

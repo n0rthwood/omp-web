@@ -225,7 +225,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     setProviderRefresh({ phase: "loading", providerName });
     try {
       const result = await refreshProviderModels(providerName, onModelsChanged);
-      setProviderRefresh({ phase: "success", providerName, warning: result.warning, diff: result.diff });
+      setProviderRefresh({ phase: "success", providerName, warning: result.warning, diff: result.diff, completedAt: Date.now() });
     } catch (error) {
       setProviderRefresh({ phase: "error", providerName, message: error instanceof Error ? error.message : String(error) });
     } finally {

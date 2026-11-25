@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { exportDeclarationLayer, defaultSyncDeps, SYNC_SCHEMA_VERSION, type SyncExportPayload } from "@/lib/models-config-sync";
+import { exportDeclarationLayer, defaultSyncDeps, SYNC_SCHEMA_VERSION, type SyncApplyResult, type SyncDiff, type SyncExportPayload, type SyncIssue } from "@/lib/models-config-sync";
 import { getMachine } from "@/lib/machines/machine-store";
 import { isProxyablePath, proxyToMachine } from "@/lib/machines/remote-request";
 import { hasJsonContentType } from "@/lib/request-security";
@@ -29,6 +29,10 @@ interface TargetResult {
   changed?: boolean;
   warnings?: string[];
   backupPaths?: string[];
+  /** Content-level diff from the target; absent on failure or an older target. */
+  applied?: SyncApplyResult["applied"];
+  /** Structured preflight findings; absent on failure or an older target. */
+  issues?: SyncIssue[];
 }
 
 async function readCappedText(upstream: Response): Promise<string> {
@@ -60,6 +64,64 @@ function describeFailure(status: number, text: string): string {
     // fall through to the status line
   }
   return `HTTP ${status}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringList(value: unknown): string[] | null {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : null;
+}
+
+/**
+ * Shape-guarded pass-through of a target's content diff (issue #145): the
+ * wizard renders a per-machine summary from it. `undefined` when the target is
+ * older, failed, or answered something that is not the documented shape.
+ */
+function readApplied(value: unknown): SyncApplyResult["applied"] | undefined {
+  const outer = asRecord(value);
+  if (!outer) return undefined;
+  const readDiff = (key: "providers" | "roles" | "fallbackChains"): SyncDiff | null => {
+    const diff = asRecord(outer[key]);
+    const added = stringList(diff?.added);
+    const updated = stringList(diff?.updated);
+    const removed = stringList(diff?.removed);
+    return added && updated && removed
+      ? { added, updated, removed, unchanged: stringList(diff?.unchanged) ?? [] }
+      : null;
+  };
+  const providers = readDiff("providers");
+  const roles = readDiff("roles");
+  const fallbackChains = readDiff("fallbackChains");
+  const allow = asRecord(outer.enabledModels);
+  const added = stringList(allow?.added);
+  const removed = stringList(allow?.removed);
+  if (!providers || !roles || !fallbackChains || !added || !removed) return undefined;
+  return {
+    providers,
+    roles,
+    fallbackChains,
+    enabledModels: { added, removed, unchanged: stringList(allow?.unchanged) ?? [] },
+  };
+}
+
+/** Same guard for the structured preflight findings; unknown entries are dropped. */
+function readIssues(value: unknown): SyncIssue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const issues: SyncIssue[] = [];
+  for (const entry of value) {
+    const issue = asRecord(entry);
+    if (typeof issue?.provider !== "string") continue;
+    if (issue.kind === "missing_key" && typeof issue.envVar === "string") {
+      issues.push({ kind: "missing_key", provider: issue.provider, envVar: issue.envVar });
+    } else if (issue.kind === "not_logged_in") {
+      issues.push({ kind: "not_logged_in", provider: issue.provider });
+    }
+  }
+  return issues;
 }
 
 export async function POST(req: Request) {
@@ -156,6 +218,8 @@ export async function POST(req: Request) {
     const backupPaths = Array.isArray(parsed.backupPaths)
       ? parsed.backupPaths.filter((entry): entry is string => typeof entry === "string")
       : [];
+    const applied = readApplied(parsed.applied);
+    const issues = readIssues(parsed.issues);
     const changed = parsed.changed === true;
     results.push({
       machineId,
@@ -167,6 +231,8 @@ export async function POST(req: Request) {
       changed,
       warnings,
       backupPaths,
+      ...(applied ? { applied } : {}),
+      ...(issues ? { issues } : {}),
     });
   }
 
