@@ -26,7 +26,7 @@ import { useWebUser } from "@/hooks/useWebUser";
 import type { HistoryBoundary, HistoryPage, JournalAnchor } from "@/lib/session-history";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
-import { applyLiveOutlineJobStatus, type OutlineJobStatus, type SessionOutline, type SessionOutlineEntry } from "@/lib/session-outline";
+import { applyLiveOutlineJobStatus, type SessionOutline, type SessionOutlineEntry } from "@/lib/session-outline";
 import {
   EARLIER_PAGE_SIZE,
   INITIAL_HISTORY_WINDOW,
@@ -872,12 +872,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // #135: merge live subagent snapshots into outline async rows so lifecycle
   // badges flip without a reload (live snapshot > async-result > spawn receipt).
-  // The same snapshot map feeds SubagentPanel; identity is preserved when
-  // nothing changed so the outline rail does not re-render per progress frame.
+  // parentToolCallId lets receipt-less spawn rows synthesize jobs from the
+  // same snapshots that feed SubagentPanel; identity is preserved when nothing
+  // changed so the outline rail does not re-render per progress frame.
   const outlineEntries = useMemo(() => {
     if (subagents.length === 0) return outline;
-    const live = new Map<string, OutlineJobStatus>();
-    for (const subagent of subagents) live.set(subagent.id, subagent.status);
+    const live = subagents.map((subagent) => ({
+      id: subagent.id,
+      status: subagent.status,
+      name: subagent.agent,
+      parentToolCallId: subagent.parentToolCallId,
+    }));
     return applyLiveOutlineJobStatus(outline, live);
   }, [outline, subagents]);
 

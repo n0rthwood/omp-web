@@ -440,8 +440,10 @@ function normalizeJobStatus(value: unknown): OutlineJobStatus | undefined {
   return undefined;
 }
 
-function pushOutlineJob(jobs: OutlineJobInfo[], id: unknown, name: unknown, status: OutlineJobStatus): void {
-  if (jobs.length >= OUTLINE_JOB_CAP || typeof id !== "string" || id.length === 0) return;
+/** Collect every job (uncapped) so the aggregate never hides a late failure;
+ * the display list is capped separately at row-assembly time. */
+function collectOutlineJob(jobs: OutlineJobInfo[], id: unknown, name: unknown, status: OutlineJobStatus): void {
+  if (typeof id !== "string" || id.length === 0) return;
   jobs.push({
     id: id.slice(0, OUTLINE_JOB_ID_CAP),
     name: (typeof name === "string" && name ? name : id).slice(0, OUTLINE_JOB_NAME_CAP),
@@ -454,6 +456,7 @@ function pushOutlineJob(jobs: OutlineJobInfo[], id: unknown, name: unknown, stat
  * (pending/running at spawn time, settled for inline subsets), upgraded by
  * details.results[] where present. details.async.state is the fallback when
  * no per-agent rows exist. The parent assistant stopReason is never consulted.
+ * jobStatus aggregates the FULL set; jobs stays uncapped here (capped later).
  */
 function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus } {
   if (!isPlainRecord(details)) return { jobs: [] };
@@ -462,7 +465,7 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
     for (const item of details.progress) {
       if (!isPlainRecord(item)) continue;
       const status = normalizeJobStatus(item.status);
-      if (status) pushOutlineJob(jobs, item.id, item.agent, status);
+      if (status) collectOutlineJob(jobs, item.id, item.agent, status);
     }
   }
   if (Array.isArray(details.results)) {
@@ -473,7 +476,7 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
         : item.exitCode === 0 && !item.error ? "completed" : "failed";
       const existing = jobs.find((job) => job.id === id.slice(0, OUTLINE_JOB_ID_CAP));
       if (existing) existing.status = status;
-      else pushOutlineJob(jobs, id, item.agent, status);
+      else collectOutlineJob(jobs, id, item.agent, status);
     }
   }
   let jobStatus = aggregateOutlineJobStatus(jobs);
@@ -485,7 +488,8 @@ function taskResultJobs(details: unknown): { jobs: OutlineJobInfo[]; jobStatus?:
 
 /**
  * Per-job lifecycle from an async-result delivery's details.jobs[] (covers
- * bash/eval background jobs too). The envelope status is the fallback.
+ * bash/eval background jobs too). Task jobs key by agentId — the id live
+ * subagent snapshots carry — falling back to jobId; bash/eval jobs keep jobId.
  */
 function asyncResultJobs(details: unknown): OutlineJobInfo[] {
   if (!isPlainRecord(details) || !Array.isArray(details.jobs)) return [];
@@ -493,7 +497,9 @@ function asyncResultJobs(details: unknown): OutlineJobInfo[] {
   for (const item of details.jobs) {
     if (!isPlainRecord(item)) continue;
     const status = normalizeJobStatus(item.status);
-    if (status) pushOutlineJob(jobs, item.jobId, item.label ?? item.agentId, status);
+    if (!status) continue;
+    const id = typeof item.agentId === "string" && item.agentId ? item.agentId : item.jobId;
+    collectOutlineJob(jobs, id, item.label ?? item.agentId ?? item.jobId, status);
   }
   return jobs;
 }
@@ -1118,15 +1124,16 @@ function renderedPositions(display: JournalRecordMeta[]): number[] {
 }
 
 /**
- * #135: task toolCallId → spawn receipt jobs, from display metadata only.
+ * #135: task toolCallId → spawn receipt lifecycle, from display metadata only.
  * The receipt is the toolResult paired to the assistant's task call (same
- * index-time pairing the ask answers use); unpaired calls get no jobs.
+ * index-time pairing the ask answers use). Receipts with only an
+ * details.async.state (no per-agent rows) still register their status.
  */
 function taskReceiptsByCallId(display: JournalRecordMeta[]): Map<string, { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus }> {
   const receipts = new Map<string, { jobs: OutlineJobInfo[]; jobStatus?: OutlineJobStatus }>();
   for (const meta of display) {
-    if (meta.type === "message" && meta.role === "toolResult" && meta.toolCallId && meta.jobs && meta.jobs.length > 0) {
-      receipts.set(meta.toolCallId, { jobs: meta.jobs, jobStatus: meta.jobStatus });
+    if (meta.type === "message" && meta.role === "toolResult" && meta.toolCallId && ((meta.jobs && meta.jobs.length > 0) || meta.jobStatus)) {
+      receipts.set(meta.toolCallId, { jobs: meta.jobs ?? [], jobStatus: meta.jobStatus });
     }
   }
   return receipts;
@@ -1134,9 +1141,11 @@ function taskReceiptsByCallId(display: JournalRecordMeta[]): Map<string, { jobs:
 
 /**
  * #135: outline row for a rendered display record at its rendered ordinal.
- * Spawn rows merge their paired receipts' per-job statuses; delivery rows
- * carry the parsed envelope/details lifecycle. Old payloads without the new
- * fields simply omit them.
+ * Spawn rows merge their paired receipts' per-job statuses; receipt-less
+ * spawns default to running (a task call is in flight until proven otherwise;
+ * live snapshots upgrade it via taskCallIds). Delivery rows carry the parsed
+ * envelope/details lifecycle. jobStatus always aggregates the FULL job set;
+ * only the display list is capped. Old payloads omit the new fields.
  */
 function outlineEntryFromMeta(
   meta: JournalRecordMeta,
@@ -1158,21 +1167,29 @@ function outlineEntryFromMeta(
   }
   if (role === "subagent") {
     if (meta.type === "message" && meta.taskCallIds && meta.taskCallIds.length > 0) {
+      entry.taskCallIds = meta.taskCallIds;
       const jobs: OutlineJobInfo[] = [];
+      const receiptStatuses: OutlineJobStatus[] = [];
       for (const callId of meta.taskCallIds) {
         const receipt = receipts.get(callId);
         if (!receipt) continue;
+        if (receipt.jobStatus) receiptStatuses.push(receipt.jobStatus);
         for (const job of receipt.jobs) {
-          if (jobs.length >= OUTLINE_JOB_CAP) break;
           if (!jobs.some((existing) => existing.id === job.id)) jobs.push(job);
         }
       }
       if (jobs.length > 0) {
-        entry.jobs = jobs;
+        entry.jobs = jobs.length > OUTLINE_JOB_CAP ? jobs.slice(0, OUTLINE_JOB_CAP) : jobs;
         entry.jobStatus = aggregateOutlineJobStatus(jobs);
+      } else if (receiptStatuses.length > 0) {
+        entry.jobStatus = aggregateOutlineJobStatus(receiptStatuses.map((status, index) => ({ id: String(index), name: "", status })));
+      } else {
+        entry.jobStatus = "running";
       }
     } else {
-      if (meta.jobs && meta.jobs.length > 0) entry.jobs = meta.jobs;
+      if (meta.jobs && meta.jobs.length > 0) {
+        entry.jobs = meta.jobs.length > OUTLINE_JOB_CAP ? meta.jobs.slice(0, OUTLINE_JOB_CAP) : meta.jobs;
+      }
       if (meta.jobStatus) entry.jobStatus = meta.jobStatus;
     }
   }

@@ -36,10 +36,16 @@ export interface SessionOutlineEntry {
   toolOnly?: boolean;
   /** #135: tool-call names for tool/write/wait rows (group glyph mix). */
   toolNames?: string[];
-  /** #135: aggregate lifecycle badge for async rows (spawn + delivery). */
+  /** #135: aggregate lifecycle badge for async rows (spawn + delivery);
+   * aggregates the FULL job set at parse time, never the display cap. */
   jobStatus?: OutlineJobStatus;
-  /** #135: per-job breakdown for multi-task spawn rows / batch deliveries. */
+  /** #135: per-job breakdown for multi-task spawn rows / batch deliveries
+   * (display-capped). */
   jobs?: OutlineJobInfo[];
+  /** #135: task toolCall ids on spawn rows — lets the client synthesize jobs
+   * from live snapshots whose parentToolCallId matches, even before the
+   * receipt lands (sync task calls only journal their result at completion). */
+  taskCallIds?: string[];
   /** #135: title_change rows jump to the nearest FOLLOWING rendered entry
    * (falling back to the nearest preceding one when the rename is the last
    * record); absent when the transcript has no rendered entry at all. */
@@ -73,27 +79,56 @@ export function aggregateOutlineJobStatus(jobs: readonly OutlineJobInfo[]): Outl
   return worst;
 }
 
-/** #135: merge live subagent snapshot statuses into outline rows without a
- * reload. Precedence: live snapshot > async-result delivery > spawn receipt.
- * Pure: returns the input array untouched when nothing changed. */
+/** #135: live subagent state for the outline merge (from SubagentSnapshot). */
+export interface LiveOutlineJob {
+  id: string;
+  status: OutlineJobStatus;
+  name?: string;
+  parentToolCallId?: string;
+}
+
+/** Display bound mirrors the server's per-row job cap. */
+const LIVE_JOB_DISPLAY_CAP = 16;
+
+/** #135: merge live subagent snapshots into outline rows without a reload.
+ * Precedence: live snapshot > async-result delivery > spawn receipt.
+ * Spawn rows also SYNTHESIZE jobs from snapshots whose parentToolCallId
+ * matches the row's task calls — covering receipt-less in-flight spawns and
+ * recovering jobs beyond the display cap (aggregation stays uncapped).
+ * Rows with no matching live state keep their durable parse-time status
+ * (which aggregates the full, uncapped job set). Pure: returns the input
+ * array untouched when nothing changed. */
 export function applyLiveOutlineJobStatus(
   entries: SessionOutlineEntry[],
-  live: ReadonlyMap<string, OutlineJobStatus>,
+  live: readonly LiveOutlineJob[],
 ): SessionOutlineEntry[] {
-  if (live.size === 0) return entries;
+  if (live.length === 0) return entries;
+  const byId = new Map(live.map((job) => [job.id, job]));
   let changed = false;
   const next = entries.map((entry) => {
-    if (entry.role !== "subagent" || !entry.jobs || entry.jobs.length === 0) return entry;
-    let jobsChanged = false;
-    const jobs = entry.jobs.map((job) => {
-      const status = live.get(job.id);
-      if (status === undefined || status === job.status) return job;
-      jobsChanged = true;
-      return { ...job, status };
+    if (entry.role !== "subagent") return entry;
+    const callIds = entry.taskCallIds && entry.taskCallIds.length > 0 ? new Set(entry.taskCallIds) : null;
+    const matched = callIds ? live.filter((job) => job.parentToolCallId !== undefined && callIds.has(job.parentToolCallId)) : [];
+    const jobs = entry.jobs ?? [];
+    if (matched.length === 0 && !jobs.some((job) => byId.has(job.id))) return entry;
+    // Upgrade known jobs; synthesize matched snapshots missing from the row.
+    const merged: OutlineJobInfo[] = jobs.map((job) => {
+      const state = byId.get(job.id);
+      return state && state.status !== job.status ? { ...job, status: state.status } : job;
     });
-    if (!jobsChanged) return entry;
+    const known = new Set(merged.map((job) => job.id));
+    for (const state of matched) {
+      if (known.has(state.id)) continue;
+      known.add(state.id);
+      merged.push({ id: state.id, name: state.name ?? state.id, status: state.status });
+    }
+    // Aggregate over ALL merged jobs (uncapped); cap only the display list.
+    const jobStatus = aggregateOutlineJobStatus(merged) ?? entry.jobStatus;
+    const display = merged.length > LIVE_JOB_DISPLAY_CAP ? merged.slice(0, LIVE_JOB_DISPLAY_CAP) : merged;
+    const jobsChanged = display.length !== jobs.length || display.some((job, index) => job !== jobs[index]);
+    if (!jobsChanged && jobStatus === entry.jobStatus) return entry;
     changed = true;
-    return { ...entry, jobs, jobStatus: aggregateOutlineJobStatus(jobs) ?? entry.jobStatus };
+    return { ...entry, jobs: display, jobStatus };
   });
   return changed ? next : entries;
 }
