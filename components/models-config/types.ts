@@ -63,6 +63,8 @@ export interface OAuthProvider {
   loggedIn: boolean;
   /** Provider also accepts an API key, so it appears in both picker sections. */
   supportsApiKey?: boolean;
+  /** A credential of this provider was disabled and never replaced: the card is where the login is redone. */
+  hasCredentialHistory?: boolean;
 }
 
 export interface ApiKeyProvider {

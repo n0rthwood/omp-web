@@ -45,6 +45,8 @@ export interface ProviderListingInput {
   status: { configured: boolean; source?: string; envVar?: string };
   /** Type of the credential stored for this provider, when there is one. */
   credentialType?: ProviderCredentialType;
+  /** True when the provider's only stored credential is a disabled one — a login or key that failed and can be redone. */
+  hasCredentialHistory?: boolean;
   modelCount: number;
   /** Catalog defaults the add-provider flow prefills a models.yml entry with. */
   baseUrl?: string;
@@ -77,6 +79,8 @@ export interface OAuthProviderListing {
   loggedIn: boolean;
   /** True when the same provider can also be authenticated with an API key. */
   supportsApiKey: boolean;
+  /** True when a credential of this provider was disabled (a failed refresh, a deleted key), so the login can be redone. */
+  hasCredentialHistory: boolean;
 }
 
 function dedupeById(providers: readonly ProviderListingInput[]): ProviderListingInput[] {
@@ -136,6 +140,7 @@ export function buildOAuthProviderList(
       usesCallbackServer: false,
       loggedIn: provider.credentialType === "oauth",
       supportsApiKey: provider.hasApiKeyLogin,
+      hasCredentialHistory: Boolean(provider.hasCredentialHistory),
     });
   }
   return result;

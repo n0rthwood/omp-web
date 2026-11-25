@@ -100,3 +100,27 @@ test("a failed login or a pending scan does not grey the table", () => {
   // Before the first scan nothing is known; dimming everything would flash.
   assert.equal(providerLoggedOut(row, undefined), false);
 });
+
+test("an OAuth provider left with only a disabled credential stays listed, with the logins", () => {
+  // An expired subscription must stay reachable: its card is where the login is redone.
+  const [row] = mergeProviderRows([oauth("xai-oauth", { loggedIn: false, hasCredentialHistory: true })], [], {});
+
+  assert.equal(row.id, "xai-oauth");
+  assert.equal(providerRowGroup(row), "oauth");
+});
+
+test("a catalog provider that never held a credential is still not listed", () => {
+  const rows = mergeProviderRows([oauth("xai-oauth", { loggedIn: false })], [], {});
+
+  assert.equal(rows.length, 0);
+});
+
+test("a provider running on its API key stays under API key despite an old failed login", () => {
+  const [row] = mergeProviderRows(
+    [oauth("openrouter", { loggedIn: false, hasCredentialHistory: true })],
+    [apiKey("openrouter")],
+    {},
+  );
+
+  assert.equal(providerRowGroup(row), "api_key");
+});
