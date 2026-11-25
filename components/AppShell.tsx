@@ -18,6 +18,7 @@ import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { ServiceControlModal } from "./ServiceControlModal";
 import { OmpVersionBadge } from "./OmpVersionBadge";
+import { ProviderStatusStrip } from "./ProviderStatusStrip";
 import { HomePage } from "./HomePage";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
@@ -1183,6 +1184,11 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpVersionBadge />
+      </div>
+      <div style={{ padding: "0 8px", flexShrink: 0 }}>
+        <ProviderStatusStrip
+          onOpenModels={() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }}
+        />
       </div>
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", gap: 8 }}>
         <button
