@@ -48,6 +48,8 @@ const ALLOWED_ROUTES: readonly RouteRule[] = [
   { template: "/api/models-config/catalog", methods: ["GET"] },
   { template: "/api/models-config/discover", methods: ["POST"] },
   { template: "/api/models-config/refresh-provider", methods: ["POST"] },
+  { template: "/api/models-config/sync/apply", methods: ["POST"] },
+  { template: "/api/models-config/sync/export", methods: ["GET"] },
   { template: "/api/models-config/test", methods: ["POST"] },
   { template: "/api/models-config", methods: ["GET", "PUT"] },
   { template: "/api/models", methods: ["GET"] },
@@ -89,7 +91,7 @@ const ALLOWED_ROUTES: readonly RouteRule[] = [
 ];
 
 /** Never proxied, no matter what any future route table says. */
-const DENIED_PREFIXES = ["/api/machines", "/api/web-users"] as const;
+const DENIED_PREFIXES = ["/api/machines", "/api/web-users", "/api/fleet"] as const;
 const DENIED_EXACT: Record<string, true> = {
   "/api/auth/web-login": true,
   "/api/auth/web-logout": true,

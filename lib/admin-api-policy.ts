@@ -28,6 +28,7 @@ export const ADMIN_ONLY_API_PREFIXES = [
   "/api/prompts",
   "/api/updates",
   "/api/models-config",
+  "/api/fleet",
   "/api/git",
   // skills install/update are admin-only at both layers: `update` reinstalls
   // with `force` (install power), and the settings UI already marks the
