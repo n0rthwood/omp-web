@@ -1145,7 +1145,18 @@ export function createWebCompat(options: WebCompatOptions): WebCompat {
       // Terminal subagents evicted from the live registry keep their file in
       // the bounded history snapshot (old wrapper parity).
       const remembered = subagentId ? subagentHistory.get(subagentId)?.sessionFile : undefined;
-      const fallback = remembered ?? sessionFile;
+      let fallback = remembered ?? sessionFile;
+      if (!fallback && subagentId) {
+        // #137: a RESTARTED host has neither registry nor history, but every
+        // subagent transcript persists on disk next to the parent journal:
+        // <parentDir>/<parentStem>/<AgentId>.jsonl (SDK sub-sessions layout).
+        // Resolve it so finished subagents stay drillable after reload/reap.
+        const parentFile = sessionManager.getSessionFile() ?? session.sessionFile;
+        if (parentFile?.endsWith(".jsonl")) {
+          const candidate = `${parentFile.slice(0, -6)}/${subagentId}.jsonl`;
+          if (await Bun.file(candidate).exists()) fallback = candidate;
+        }
+      }
       if (!fallback) throw error;
       transcriptFile = fallback;
     }

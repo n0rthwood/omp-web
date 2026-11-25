@@ -630,8 +630,33 @@ export function SessionOutline(props: SessionOutlineProps) {
         const byId = new Map(list.map((subagent) => [subagent.id, subagent]));
         setFetched({ sessionId, byId });
         const match = byId.get(jobId);
-        if (match) setView({ kind: "detail", entry, jobId, snapshot: match });
-        else onJump(entry.entryId);
+        if (match) {
+          setView({ kind: "detail", entry, jobId, snapshot: match });
+          return;
+        }
+        // #137: a restarted host has no registry/history snapshot, but the
+        // transcript persists on disk and get_subagent_messages resolves it
+        // by the SDK sub-sessions layout. Synthesize a minimal settled
+        // snapshot from the outline's own job row so the detail can open;
+        // a transcript read failure surfaces the detail's error banner.
+        const job = (entry.jobs ?? []).find((candidate) => candidate.id === jobId);
+        if (job && entry.role === "subagent" && job.status !== "pending" && job.status !== "running") {
+          setView({
+            kind: "detail",
+            entry,
+            jobId,
+            snapshot: {
+              id: jobId,
+              index: 0,
+              agent: "task",
+              agentSource: "bundled",
+              status: job.status,
+              lastUpdate: Date.parse(entry.timestamp) || Date.now(),
+            },
+          });
+          return;
+        }
+        onJump(entry.entryId);
       })
       .catch(() => onJump(entry.entryId))
       .finally(() => {
