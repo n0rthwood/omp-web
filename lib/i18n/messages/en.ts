@@ -583,7 +583,6 @@ export const enLocale: LocalePlugin = {
     "models.syncRoles": "Sync roles to Fleet…",
     "models.syncAllowList": "Sync allow-list to Fleet…",
     "models.syncConfig": "Sync configuration to Fleet…",
-    "models.syncComingSoon": "Fleet sync is coming soon.",
     "models.searchModels": "Search models",
     "models.searchModelsPlaceholder": "Search models (fuzzy: q4m → qwen4-max)",
     "models.searchHint": "Type a model or provider name to filter; click a result to add it.",

@@ -583,7 +583,6 @@ export const zhCNLocale: LocalePlugin = {
     "models.syncRoles": "同步角色到 Fleet…",
     "models.syncAllowList": "同步允许列表到 Fleet…",
     "models.syncConfig": "同步配置到 Fleet…",
-    "models.syncComingSoon": "同步功能即将上线。",
     "models.searchModels": "搜索模型",
     "models.searchModelsPlaceholder": "搜索模型（模糊匹配：q4m → qwen4-max）",
     "models.searchHint": "输入模型名 / provider 名过滤，点击结果即加入。",

@@ -1,16 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { DiscoveredModel } from "@/lib/model-discovery";
-import { apiPath } from "@/lib/api-path";
+import { apiPath, LOCAL_MACHINE_ID } from "@/lib/api-path";
+import { useMachines } from "@/lib/machine-context";
+import type { SyncSection } from "@/lib/models-config-sync";
 import { refreshProviderModels } from "./models-config-helpers";
 import { AddProviderFlow } from "./models-config/AddProviderFlow";
 import { AllowListTab } from "./models-config/AllowListTab";
 import { HealthStrip } from "./models-config/HealthStrip";
 import { ProvidersTab } from "./models-config/ProvidersTab";
 import { RolesTab } from "./models-config/RolesTab";
+import { SyncWizard } from "./models-config/SyncWizard";
 import type {
   ApiKeyProvider,
   ModelHealthMap,
@@ -64,8 +67,17 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
   const [healthToken, setHealthToken] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [focusProviderId, setFocusProviderId] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimerRef = useRef<number | undefined>(undefined);
+  // Fleet sync wizard (#141): `null` = closed, otherwise the sections the
+  // entry point preselected. Targets come from the shared machine store with
+  // this machine removed — a machine cannot sync to itself.
+  const [syncSections, setSyncSections] = useState<readonly SyncSection[] | null>(null);
+  const { machines } = useMachines();
+  const syncTargets = useMemo(
+    () => machines
+      .filter((machine) => machine.id !== LOCAL_MACHINE_ID)
+      .map((machine) => ({ id: machine.id, name: machine.name })),
+    [machines],
+  );
 
   const loadAuthProviders = useCallback(() => {
     fetch(apiPath("/api/auth/providers"))
@@ -136,17 +148,6 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
     })();
     return () => controller.abort();
   }, [healthToken]);
-
-  useEffect(() => () => {
-    clearTimeout(toastTimerRef.current);
-  }, []);
-
-  const showToast = useCallback((message: string) => {
-    setToast(message);
-    clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 2400);
-  }, []);
-
   const addProviderEntry = useCallback((id: string, entry: ProviderEntry) => {
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [id]: entry } }));
   }, []);
@@ -298,9 +299,9 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
             {loading ? (
               <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.loading")}</div>
             ) : tab === "roles" ? (
-              <RolesTab cwd={cwd ?? null} health={modelHealth} onModelsChanged={onModelsChanged} onSync={() => showToast(t("models.syncComingSoon"))} />
+              <RolesTab cwd={cwd ?? null} health={modelHealth} onModelsChanged={onModelsChanged} onSync={() => setSyncSections(["roles"])} />
             ) : tab === "allowList" ? (
-              <AllowListTab cwd={cwd ?? null} models={modelList} health={modelHealth} onSaved={onModelsChanged} onSync={() => showToast(t("models.syncComingSoon"))} />
+              <AllowListTab cwd={cwd ?? null} models={modelList} health={modelHealth} onSaved={onModelsChanged} onSync={() => setSyncSections(["enabledModels"])} />
             ) : (
               <ProvidersTab
                 config={config}
@@ -322,16 +323,13 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
                 onAuthChanged={refreshAuthProviders}
                 onModelsChanged={onModelsChanged}
                 onAddProvider={() => setPickerOpen(true)}
-                onSync={() => showToast(t("models.syncComingSoon"))}
+                onSync={() => setSyncSections(["providers", "roles", "enabledModels"])}
               />
             )}
           </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
             {saveError && <span style={{ fontSize: 12, color: "var(--danger, #f87171)", flex: 1 }}>{saveError}</span>}
-            {toast && (
-              <span role="status" style={{ fontSize: 12, color: "var(--text-muted)", flex: 1 }}>{toast}</span>
-            )}
             <button type="button" onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
               {t("i18n.cancel")}
             </button>
@@ -361,6 +359,14 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
           onAddApiKey={addCatalogProvider}
           onAddCustom={addCustomProvider}
           onClose={() => setPickerOpen(false)}
+        />
+      )}
+      {syncSections && (
+        <SyncWizard
+          open
+          onClose={() => setSyncSections(null)}
+          initialSections={syncSections}
+          machines={syncTargets}
         />
       )}
     </>
