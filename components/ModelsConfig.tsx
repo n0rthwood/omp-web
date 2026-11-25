@@ -62,6 +62,10 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [modelList, setModelList] = useState<ModelOption[]>([]);
+  // Every configured model, including ones the current `enabledModels` scope
+  // hides: the allow-list picker must be able to suggest a pattern that widens
+  // the scope (`q4m` → `qwen4-max-preview`).
+  const [allModelList, setAllModelList] = useState<ModelOption[]>([]);
   const [modelHealth, setModelHealth] = useState<ModelHealthMap | undefined>(undefined);
   const [health, setHealth] = useState<ModelsHealthResponse | null>(null);
   const [healthToken, setHealthToken] = useState(0);
@@ -101,12 +105,17 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
 
   const loadModels = useCallback((signal?: AbortSignal) => {
     const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
+    const allQuery = cwd ? `?all=1&cwd=${encodeURIComponent(cwd)}` : "?all=1";
     fetch(apiPath(`/api/models${query}`), signal ? { signal } : undefined)
       .then((res) => res.json())
       .then((data: ModelsResponse) => {
         setModelList(data.modelList ?? []);
         setModelHealth(data.modelHealth);
       })
+      .catch(() => {});
+    fetch(apiPath(`/api/models${allQuery}`), signal ? { signal } : undefined)
+      .then((res) => res.json())
+      .then((data: ModelsResponse) => setAllModelList(data.modelList ?? []))
       .catch(() => {});
   }, [cwd]);
 
@@ -301,7 +310,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }
             ) : tab === "roles" ? (
               <RolesTab cwd={cwd ?? null} health={modelHealth} onModelsChanged={onModelsChanged} onSync={() => setSyncSections(["roles"])} />
             ) : tab === "allowList" ? (
-              <AllowListTab cwd={cwd ?? null} models={modelList} health={modelHealth} onSaved={onModelsChanged} onSync={() => setSyncSections(["enabledModels"])} />
+              <AllowListTab cwd={cwd ?? null} models={allModelList} health={modelHealth} onSaved={onModelsChanged} onSync={() => setSyncSections(["enabledModels"])} />
             ) : (
               <ProvidersTab
                 config={config}

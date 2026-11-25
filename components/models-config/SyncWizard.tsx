@@ -111,7 +111,9 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
       }
       setResults(data.results ?? []);
       setSourceMachine(data.sourceMachine ?? null);
-      if (dryRun) setStep(3);
+      // Both a preflight and a real push end on the per-machine result step:
+      // staying on step 2 left the Push button live and Done unreachable.
+      setStep(3);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
