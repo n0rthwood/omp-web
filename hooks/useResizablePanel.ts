@@ -25,6 +25,9 @@ interface UseResizablePanelOptions {
   cssVariable: `--${string}`;
   defaultWidth: number;
   getDefaultWidth?: () => number;
+  /** #137: read-before-paint initial width (e.g. the persisted localStorage
+   *  value) so the first frame never flashes `defaultWidth`. */
+  getInitialWidth?: () => number | null;
   getMaxWidth: () => number;
   growthDirection: "left" | "right";
   maxWidth: number;
@@ -57,12 +60,13 @@ function writeStoredWidth(storageKey: string, width: number): void {
   }
 }
 
-export function useResizablePanel(options: UseResizablePanelOptions) {
+export function useResizablePanel<T extends HTMLElement = HTMLDivElement>(options: UseResizablePanelOptions) {
   const {
     ariaLabel,
     cssVariable,
     defaultWidth,
     getDefaultWidth,
+    getInitialWidth,
     getMaxWidth,
     growthDirection,
     maxWidth,
@@ -70,10 +74,12 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     storageKey,
     widthRef,
   } = options;
-  const panelRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<T>(null);
   const dragRef = useRef<DragState | null>(null);
   const restoredRef = useRef(false);
-  const [width, setWidth] = useState(defaultWidth);
+  // Lazy initializer: the persisted width is already applied on the FIRST
+  // render, so a stored rail/panel width never flashes the default.
+  const [width, setWidth] = useState(() => getInitialWidth?.() ?? defaultWidth);
   const [isResizing, setIsResizing] = useState(false);
 
   const effectiveMaxWidth = useCallback(

@@ -1,12 +1,25 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "bun:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { SessionOutline, groupOutlineEntries } = await import("./SessionOutline.tsx");
+const { SessionOutline, groupOutlineEntries, OutlineJobsView } = await import("./SessionOutline.tsx");
+const {
+  readStoredRailWidth,
+  OUTLINE_RAIL_DEFAULT_WIDTH,
+  OUTLINE_RAIL_MIN_WIDTH,
+  OUTLINE_RAIL_MAX_WIDTH,
+  OUTLINE_RAIL_STORAGE_KEY,
+} = await import("./SessionOutline.tsx");
+const { resolveOutlineDrillTarget } = await import("../lib/session-outline.ts");
 const { I18nProvider } = await import("../hooks/useI18n.tsx");
 const { enLocale } = await import("../lib/i18n/messages/en.ts");
 const { zhCNLocale } = await import("../lib/i18n/messages/zh-CN.ts");
+
+const outlineSource = readFileSync(new URL("./SessionOutline.tsx", import.meta.url), "utf8");
+const shellSource = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 
 function entry(ordinal, overrides = {}) {
   return {
@@ -328,8 +341,132 @@ test("all built-in locales translate the new outline labels", () => {
   assert.equal(zhCNLocale.messages["outline.roleWrite"], "编辑");
   assert.equal(zhCNLocale.messages["outline.roleWait"], "等待");
   assert.equal(zhCNLocale.messages["outline.roleTitle"], "标题");
-  for (const key of ["outline.expandTools", "outline.collapseTools", "outline.jobPending", "outline.jobRunning", "outline.jobCompleted", "outline.jobFailed", "outline.jobAborted"]) {
+  for (const key of ["outline.expandTools", "outline.collapseTools", "outline.jobPending", "outline.jobRunning", "outline.jobCompleted", "outline.jobFailed", "outline.jobAborted", "outline.jobs", "outline.jobCount", "outline.openJob", "outline.subagentUnavailable", "outline.resizeRail", "subagents.locateInChat"]) {
     assert.ok(enLocale.messages[key], `en ${key}`);
     assert.ok(zhCNLocale.messages[key], `zh-CN ${key}`);
   }
+});
+
+// --- #137: outline as the subagent home -----------------------------------
+
+function withStoredWidth(width, render) {
+  const previous = globalThis.window;
+  try {
+    globalThis.window = { localStorage: { getItem: (key) => (key === OUTLINE_RAIL_STORAGE_KEY ? width : null) } };
+    return render();
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+}
+
+test("#137 drill targets: async rows branch on their job count, everything else jumps", () => {
+  const spawn = (jobs) => entry(1, { role: "subagent", toolOnly: true, preview: "task", jobs });
+  assert.deepEqual(resolveOutlineDrillTarget(entry(0, { role: "user", toolOnly: undefined })), { kind: "jump" });
+  assert.deepEqual(resolveOutlineDrillTarget(spawn(undefined)), { kind: "jump" });
+  assert.deepEqual(resolveOutlineDrillTarget(spawn([])), { kind: "jump" });
+  assert.deepEqual(
+    resolveOutlineDrillTarget(spawn([{ id: "agent-1", name: "scout", status: "running" }])),
+    { kind: "detail", jobId: "agent-1" },
+  );
+  assert.deepEqual(
+    resolveOutlineDrillTarget(spawn([
+      { id: "agent-1", name: "scout", status: "completed" },
+      { id: "agent-2", name: "task", status: "failed" },
+    ])),
+    { kind: "jobs" },
+  );
+  // bash/eval deliveries carry a job id that never resolves to a snapshot.
+  assert.deepEqual(
+    resolveOutlineDrillTarget(entry(2, { role: "subagent", toolOnly: undefined, preview: "bg_3", jobs: [{ id: "bg_3", name: "bg_3", status: "completed" }] })),
+    { kind: "detail", jobId: "bg_3" },
+  );
+});
+
+for (const variant of ["rail", "drawer"]) {
+  test(`${variant} #137 renders the drill-down surface with a resizable rail only in rail mode`, () => {
+    const html = renderOutline([entry(4, { preview: "spawn" })], { variant });
+    assert.match(html, /data-outline-entry="entry-4"/);
+    if (variant === "rail") {
+      assert.match(html, /data-testid="session-outline-rail"/);
+      assert.match(html, /data-resize-handle="outline-rail"/);
+      assert.match(html, /role="separator"/);
+      assert.match(html, /aria-valuemin="240"/);
+      assert.match(html, /aria-valuemax="560"/);
+      assert.match(html, /aria-valuenow="320"/);
+      assert.match(html, /--outline-rail-width:320px/);
+    } else {
+      assert.match(html, /data-testid="session-outline-drawer"/);
+      assert.doesNotMatch(html, /data-resize-handle="outline-rail"/);
+      assert.doesNotMatch(html, /--outline-rail-width/);
+    }
+  });
+}
+
+test("#137 rail width is a per-browser preference read before the first paint", () => {
+  assert.equal(OUTLINE_RAIL_STORAGE_KEY, "omp-outline-rail-width");
+  assert.equal(OUTLINE_RAIL_DEFAULT_WIDTH, 320);
+  assert.equal(OUTLINE_RAIL_MIN_WIDTH, 240);
+  assert.equal(OUTLINE_RAIL_MAX_WIDTH, 560);
+  assert.equal(withStoredWidth("420", () => readStoredRailWidth()), 420);
+  assert.equal(withStoredWidth("garbage", () => readStoredRailWidth()), null);
+  assert.equal(withStoredWidth(null, () => readStoredRailWidth()), null);
+  const html = withStoredWidth("420", () => renderOutline([entry(0)], { variant: "rail" }));
+  assert.match(html, /--outline-rail-width:420px/);
+  assert.doesNotMatch(html, /--outline-rail-width:320px/);
+});
+
+test("#137 async rows drill down instead of jumping; the jump moved to the detail header", () => {
+  assert.match(outlineSource, /onClick=\{\(\) => onActivate\(item, jumpId\)\}/);
+  assert.match(outlineSource, /data-testid="outline-jobs-view"/);
+  assert.match(outlineSource, /data-testid="outline-back"/);
+  assert.match(outlineSource, /onLocateInChat=\{onLocateInChat \? \(\) => onLocateInChat\(view\.entry\.entryId\) : undefined\}/);
+  assert.match(outlineSource, /<SubagentDetail/);
+});
+
+test("#137 dead sessions resolve the snapshot once, then read the history transcript", () => {
+  assert.match(outlineSource, /type: "get_subagents"/);
+  assert.match(outlineSource, /fetchingRef\.current === sessionId/);
+  assert.match(outlineSource, /setFetched\(\{ sessionId, byId \}\)/);
+});
+
+test("#137 the standalone subagent column is gone without dead imports", () => {
+  assert.doesNotMatch(shellSource, /SubagentPanel/);
+  assert.doesNotMatch(shellSource, /subagent-column/);
+  assert.doesNotMatch(shellSource, /showSubagentPanel/);
+  assert.doesNotMatch(stylesSource, /\.subagent-column/);
+  assert.throws(() => readFileSync(new URL("./SubagentPanel.tsx", import.meta.url)));
+});
+
+test("#137 the rail keeps the list mounted so back restores the scroll position", () => {
+  assert.match(outlineSource, /savedScrollRef\.current = listScrollRef\.current\?\.scrollTop \?\? 0/);
+  assert.match(outlineSource, /list\.scrollTop = savedScrollRef\.current/);
+  assert.match(outlineSource, /style=\{\{ display: view\.kind === "list" \? undefined : "none" \}\}/);
+});
+
+test("#137 multi-job spawn rows expand to a per-job list with live status and duration", () => {
+  const html = renderToStaticMarkup(React.createElement(I18nProvider, null,
+    React.createElement(OutlineJobsView, {
+      entry: entry(1, {
+        role: "subagent", toolOnly: true, preview: "task, task",
+        jobs: [
+          { id: "agent-1", name: "scout", status: "completed" },
+          { id: "agent-2", name: "task", status: "failed" },
+        ],
+      }),
+      liveById: new Map([["agent-1", { id: "agent-1", status: "running", progress: { durationMs: 5000 } }]]),
+      busyJobId: null,
+      onBack() {},
+      onOpenJob() {},
+    })));
+  assert.match(html, /data-testid="outline-jobs-view"/);
+  assert.match(html, /data-outline-job="agent-1"/);
+  assert.match(html, /data-outline-job="agent-2"/);
+  assert.match(html, /aria-label="Open scout"/);
+  assert.match(html, /aria-label="Open task"/);
+  assert.match(html, />scout</);
+  assert.match(html, />5s</, "live snapshot supplies the duration");
+  assert.match(html, /stroke-dasharray="22 13"/, "live running status upgrades the parsed badge");
+  assert.match(html, />✗</, "a job without a live snapshot keeps its parsed status");
+  assert.match(html, /data-testid="outline-back"/);
 });

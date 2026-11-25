@@ -1406,22 +1406,6 @@ span.linenumber {
   min-height: 0;
   overflow: hidden;
 }
-.subagent-column {
-  display: flex;
-  flex: 0 0 clamp(280px, 28vw, 360px);
-  width: clamp(280px, 28vw, 360px);
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border-left: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-@media (max-width: 640px) {
-  .subagent-column {
-    display: none !important;
-  }
-}
-
 /* Keep the panel border as the idle separator; this element only expands the hit target. */
 .panel-resize-handle {
   position: relative;

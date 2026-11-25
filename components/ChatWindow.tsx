@@ -1088,7 +1088,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             targetEntryId={historyTargetEntryId}
             navigating={historyNavigationLoading}
             onJump={handleOutlineJump}
+            onLocateInChat={handleOutlineJump}
             onClose={closeOutline}
+            subagents={subagents}
+            sessionId={session?.id ?? sessionIdRef.current}
+            cwd={messageCwd}
           />
         )}
         {outlineOpen && !outlineRail && (
@@ -1102,8 +1106,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
             targetEntryId={historyTargetEntryId}
             navigating={historyNavigationLoading}
             onJump={handleOutlineJump}
+            onLocateInChat={handleOutlineJump}
             onClose={closeOutline}
             triggerRef={outlineTriggerRef}
+            subagents={subagents}
+            sessionId={session?.id ?? sessionIdRef.current}
+            cwd={messageCwd}
           />
         )}
         </div>
