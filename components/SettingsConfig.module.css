@@ -368,6 +368,17 @@
 .staticMappingRevoke { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 16px 15px; border-top: 1px solid var(--border); }
 .staticMappingActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .staticMappingActions .dangerButton { height: 30px; padding-inline: 9px; font-size: 10px; }
+
+/* Aggregate discovery list (issue #136) — /static landing + Home Static tab. */
+.staticAggregateBody { display: flex; flex-direction: column; gap: 14px; }
+.staticFailureList { display: flex; flex-direction: column; gap: 6px; }
+.staticFailureNote { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border)); border-radius: 8px; background: var(--bg-panel); color: var(--text-dim); font: 11px/1.5 var(--font-mono); }
+.staticFailureNote strong { color: var(--text-muted); font-weight: 600; }
+.staticAggregateFooter { display: flex; justify-content: flex-end; }
+.staticRefreshButton { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-hover); color: var(--text-muted); font: 12px var(--font-mono); cursor: pointer; }
+.staticRefreshButton:hover { color: var(--text); }
+.staticPendingNote { color: var(--text-dim); font: 12px/1.6 var(--font-mono); }
+.staticRefreshButton:disabled { cursor: progress; opacity: .5; }
 @media (max-width: 760px) {
   .backdrop { padding: 8px; }
   .window { width: calc(100vw - 16px); height: calc(100dvh - 16px); grid-template-columns: 82px minmax(0, 1fr); border-radius: 10px; }

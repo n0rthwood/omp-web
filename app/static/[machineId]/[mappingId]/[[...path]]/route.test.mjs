@@ -114,7 +114,9 @@ test("a granted user can read local static content without a project grant", asy
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await seed();
   const { mappings } = await loadLibs();
-  const mapping = mappings.createStaticMapping({ id: "local-report", lifecycle: "persistent" });
+  // Registered under a project the caller has NO grant for: direct serving
+  // is deliberately auth + machine-only (issue #136).
+  const mapping = mappings.createStaticMapping({ id: "local-report", lifecycle: "persistent", projectRoot: "/opt/elsewhere" });
   writeFileSync(join(mappings.getStaticMappingRoot(mapping.id), "index.html"), "<h1>local</h1>");
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");
@@ -125,6 +127,15 @@ test("a granted user can read local static content without a project grant", asy
   );
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+
+  // The same row is NOT discoverable through the project-filtered management
+  // list — discovery and direct serving are different boundaries.
+  const management = await jiti.import("../../../../../app/api/static-mappings/route.ts");
+  const list = await management.GET(new Request("http://localhost/api/static-mappings", {
+    headers: { host: "localhost", cookie },
+  }));
+  assert.equal(list.status, 200);
+  assert.deepEqual((await list.json()).mappings, []);
 });
 
 test("a machine-granted user streams remote static bytes without forwarding browser credentials", async (t) => {
@@ -173,7 +184,7 @@ test("a bare mapping URL serves index.html first and never lists the directory",
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await seed();
   const { mappings } = await loadLibs();
-  const mapping = mappings.createStaticMapping({ id: "bare-html", lifecycle: "persistent" });
+  const mapping = mappings.createStaticMapping({ id: "bare-html", lifecycle: "persistent", projectRoot: "/opt/projects/main" });
   const root = mappings.getStaticMappingRoot(mapping.id);
   writeFileSync(join(root, "index.html"), "<h1>html wins</h1>");
   writeFileSync(join(root, "index.htm"), "<h1>htm fallback</h1>");
@@ -211,7 +222,7 @@ test("a bare mapping URL falls back to index.htm when index.html is absent", asy
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await seed();
   const { mappings } = await loadLibs();
-  const mapping = mappings.createStaticMapping({ id: "bare-htm", lifecycle: "persistent" });
+  const mapping = mappings.createStaticMapping({ id: "bare-htm", lifecycle: "persistent", projectRoot: "/opt/projects/main" });
   writeFileSync(join(mappings.getStaticMappingRoot(mapping.id), "index.htm"), "<h1>htm only</h1>");
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");
@@ -231,7 +242,7 @@ test("a bare mapping URL with neither index file is 404 without a directory list
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await seed();
   const { mappings } = await loadLibs();
-  const mapping = mappings.createStaticMapping({ id: "bare-empty", lifecycle: "persistent" });
+  const mapping = mappings.createStaticMapping({ id: "bare-empty", lifecycle: "persistent", projectRoot: "/opt/projects/main" });
   writeFileSync(join(mappings.getStaticMappingRoot(mapping.id), "notes.txt"), "not an index");
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");

@@ -1,10 +1,13 @@
 # Static content operator notes
 
-Static mappings are machine-scoped and project-independent. The mapping metadata
-lives in the owning instance's agent directory at
+Static mappings register an explicit normalized main-project `projectRoot`.
+The mapping metadata lives in the owning instance's agent directory at
 `omp-web-static-mappings.json`; content lives below `static/<mapping-id>/`.
-A mapping is not an ACL boundary: any authenticated user granted the machine
-may manage its mappings.
+Discovery and management are project-aware: a signed-in user sees and manages
+only mappings whose machine they are granted AND whose `projectRoot` is inside
+their project grants; historical rows without a project key are admin-only.
+Direct serving of a known mapping URL deliberately stays authentication +
+machine-grant only — it does not check the project grant.
 
 ## Stable machine identity
 
@@ -51,7 +54,7 @@ the running omp-web service:
 
 ```sh
 STATIC_CONTENT_CLI="${OMP_WEB_STATIC_CONTENT_CLI:-/home/joysort/omp/ompweb/ops/static-content/cli.ts}"
-printf '%s\n' '{"command":"create","label":"report","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
+printf '%s\n' '{"command":"create","label":"report","projectRoot":"/opt/workspace/designer","lifecycle":"temporary","ttlSeconds":3600,"entryFile":"index.html"}' \
   | bun --bun "$STATIC_CONTENT_CLI"
 ```
 
@@ -67,6 +70,13 @@ JSON command from stdin (or one JSON argument). Commands are `create`, `list`,
 `update`, and `revoke`; `op` and `action` are accepted aliases for `command`.
 Create and update responses include `writeDir` and the origin-relative
 `publicPath`. Write generated files only below the returned `writeDir`.
+
+`create` requires `projectRoot`: an absolute path naming the main project the
+mapping belongs to. The CLI normalizes it — a git worktree checkout collapses
+to its main repository root, any other directory stays itself — and persists
+the result. Relative paths and backslash/NUL-containing values are rejected;
+dot segments, duplicate separators, and trailing slashes are normalized.
+`projectRoot` is fixed at registration and is not patchable.
 
 For source/worktree operation, set `OMP_WEB_STATIC_CONTENT_CLI` to the absolute
 worktree `ops/static-content/cli.ts` path. Do not guess a host name or prepend
@@ -104,11 +114,23 @@ and Gateway proxy. It is not the session skill's primary API, and callers must
 use the current instance's authenticated origin rather than an unknown or
 unauthenticated endpoint.
 
-- `GET /api/static-mappings` — list machine-wide mappings.
-- `POST /api/static-mappings` — create a mapping.
-- `PATCH /api/static-mappings/:id` — update lifecycle, expiry, label, or entry file.
+- `GET /api/static-mappings` — list this machine's mappings, filtered to the
+  signed-in user's project grants (legacy rows admin-only). Through the
+  Gateway proxy the same filter is applied to the remote response.
+- The `/static` landing page and Home Static content tab aggregate the
+  project-filtered per-machine responses. Remote reads use the machine's own
+  credential at the Gateway; browser cookies/authorization are never forwarded.
+  A response whose rows are not all browser-renderable (missing or mistyped
+  fields the list renders/links) counts as a per-machine failure: zero rows
+  plus a compact notice, never a blanked or crashed list. `projectRoot` is not
+  required client-side — legacy rows stay renderable and admin-gated.
+- `POST /api/static-mappings` — create a mapping; `projectRoot` is required.
+  Non-admin callers may only register under a project root they can see.
+- `GET/PATCH /api/static-mappings/:id` — read/update lifecycle, expiry, label,
+  or entry file. Non-admin callers need the mapping's `projectRoot` visible;
+  hidden and legacy rows read as 404.
 - `DELETE /api/static-mappings/:id?content=retain|delete` — explicit revoke with
-  the retain/delete behavior above.
+  the retain/delete behavior above; same project gate as PATCH.
 - `GET /api/static/:mappingId/:asset...` — authenticated internal content
   route used by the Gateway.
 - `GET /static/:machineId/:mappingId/:asset...` — authenticated public path;

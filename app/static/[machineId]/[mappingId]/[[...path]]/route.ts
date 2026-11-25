@@ -1,7 +1,7 @@
 import {
   isLocalStaticMachineId,
   LOCAL_STATIC_MACHINE_ID,
-  StaticMappingError,
+  isStaticMappingError,
   validateStaticAssetSegments,
   validateStaticMappingId,
 } from "@/lib/static-mapping-store";
@@ -37,7 +37,7 @@ export async function GET(request: Request, context: RouteContext) {
     validateStaticMappingId(mappingId);
     validateStaticAssetSegments(path);
   } catch (error) {
-    if (error instanceof StaticMappingError) return jsonError(error.status, error.message);
+    if (isStaticMappingError(error)) return jsonError(error.status, error.message);
     return jsonError(400, "Invalid static path");
   }
 

@@ -2,7 +2,7 @@ import { createReadStream, type Stats } from "node:fs";
 import { extname } from "node:path";
 import {
   resolveStaticMappingFile,
-  StaticMappingError,
+  isStaticMappingError,
   type StaticMappingRecord,
 } from "./static-mapping-store";
 
@@ -186,7 +186,7 @@ export function serveStaticMappingFile(request: Request, mappingId: string, segm
   try {
     resolved = resolveStaticMappingFile(mappingId, segments);
   } catch (error) {
-    if (error instanceof StaticMappingError) {
+    if (isStaticMappingError(error)) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: error.status,
         headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
