@@ -75,7 +75,7 @@ export function buildAllowListOverview(models: readonly ModelOption[], keyword =
     return {
       provider,
       hidden,
-      matches: needle ? hidden.filter((selector) => selector.toLowerCase().includes(needle)) : hidden,
+      matches: hidden.filter((selector) => matchesAllowListFilter(selector, needle)),
       visible: entry.visible,
       total: entry.total,
       collapsedByDefault: hidden.length > COLLAPSE_THRESHOLD,
@@ -100,6 +100,31 @@ export function buildAllowListOverview(models: readonly ModelOption[], keyword =
     matchedTotal += group.matches.length;
   }
   return { hasVerdicts: true, groups, hiddenTotal, visibleTotal, total: hiddenTotal + visibleTotal, matchedTotal };
+}
+
+/**
+ * Filter one hidden selector with the same syntax as `enabledModels`.
+ *
+ * A glob is matched against the full selector and the bare model id, just as
+ * omp's resolver does, but anchored to the provider named by the pattern so
+ * `Anthropic/*` cannot match another provider's re-sold model. Plain text keeps
+ * the old substring behaviour; an exact selector is a substring match by
+ * definition.
+ */
+export function matchesAllowListFilter(selector: string, needle: string): boolean {
+  if (!needle) return true;
+  const slash = selector.indexOf("/");
+  const modelId = slash >= 0 ? selector.slice(slash + 1) : selector;
+  // A pattern that names a provider is a statement about that provider only:
+  // `Anthropic/*` must not match a re-sold `openrouter/anthropic/...` row.
+  const provider = slash >= 0 ? selector.slice(0, slash) : undefined;
+  const anchored = provider !== undefined && needle.toLowerCase().startsWith(`${provider.toLowerCase()}/`)
+    ? needle.toLowerCase()
+    : undefined;
+  if (anchored !== undefined) return new Bun.Glob(anchored).match(selector.toLowerCase());
+  const glob = new Bun.Glob(needle);
+  if (glob.match(selector.toLowerCase()) || glob.match(modelId.toLowerCase())) return true;
+  return selector.toLowerCase().includes(needle);
 }
 
 export function AllowListOverview({ models, names }: { models: readonly ModelOption[]; names?: Record<string, string> }) {
@@ -175,7 +200,11 @@ export function OverviewGroup({ group, names, filterActive = false }: { group: A
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 8px", padding: "6px 12px" }}>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)" }}>{providerLabel(group.provider, names)}</span>
         {nothingHidden ? (
-          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("models.allowListOverviewVisible", { count: group.visible })}</span>
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            {group.visible === 0
+              ? t("models.allowListOverviewNoneConfigured")
+              : t("models.allowListOverviewVisible", { count: group.visible })}
+          </span>
         ) : (
           <>
             <span style={{ fontSize: 11, color: "var(--warning, #e3b341)" }}>{t("models.allowListOverviewHidden", { count: group.hidden.length })}</span>
