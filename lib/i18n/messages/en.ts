@@ -1087,7 +1087,6 @@ export const enLocale: LocalePlugin = {
     "models.allowListOverviewEmpty": "No hidden model matches “{query}”.",
     "models.allowListOverviewHidden": "{count} hidden",
     "models.allowListOverviewVisible": "{count} visible",
-    "models.allowListOverviewNoneConfigured": "No models configured",
     "models.allowListOverviewExpand": "Show all {count}",
     "models.allowListOverviewCollapse": "Collapse",
   },

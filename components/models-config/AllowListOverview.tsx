@@ -205,11 +205,7 @@ export function OverviewGroup({ group, names, filterActive = false }: { group: A
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 8px", padding: "6px 12px" }}>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)" }}>{providerLabel(group.provider, names)}</span>
         {nothingHidden ? (
-          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {group.visible === 0
-              ? t("models.allowListOverviewNoneConfigured")
-              : t("models.allowListOverviewVisible", { count: group.visible })}
-          </span>
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("models.allowListOverviewVisible", { count: group.visible })}</span>
         ) : (
           <>
             <span style={{ fontSize: 11, color: "var(--warning, #e3b341)" }}>{t("models.allowListOverviewHidden", { count: group.hidden.length })}</span>

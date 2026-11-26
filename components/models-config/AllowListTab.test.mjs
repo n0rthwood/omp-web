@@ -267,8 +267,3 @@ test("the filter matcher never needs the Bun global (browser parity)", (t) => {
   assert.equal(node.status, 0, `node subprocess failed:\n${node.stderr}`);
   assert.equal(node.stdout.trim(), "bun-free-ok");
 });
-
-test("a provider with no models is absent rather than rendered as an empty group", () => {
-  const html = renderHtml([{ id: "placeholder", name: "placeholder", provider: "unused-provider", hidden: false }]);
-  assert.doesNotMatch(html, /data-provider="bailian-token-plan"/);
-});

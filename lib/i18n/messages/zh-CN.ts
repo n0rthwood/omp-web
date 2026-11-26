@@ -1087,7 +1087,6 @@ export const zhCNLocale: LocalePlugin = {
     "models.allowListOverviewEmpty": "没有匹配 “{query}” 的被隐藏模型。",
     "models.allowListOverviewHidden": "隐藏 {count}",
     "models.allowListOverviewVisible": "可见 {count}",
-    "models.allowListOverviewNoneConfigured": "未配置模型",
     "models.allowListOverviewExpand": "展开全部 {count} 个",
     "models.allowListOverviewCollapse": "收起",
   },
