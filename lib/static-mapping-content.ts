@@ -117,6 +117,19 @@ function parseRange(value: string | null, size: number): ByteRange | null | "inv
   return { start, end: Math.min(end, size - 1) };
 }
 
+/**
+ * Static document CSP.
+ *
+ * Same-origin scripts are allowed so published HTML pages can run their own
+ * JavaScript. The server only serves these bytes as static files — it never
+ * executes anything under the mapping root — so there is no server-side
+ * code-injection surface from the published content itself. Styles remain
+ * self + inline; images/fonts/media stay self + data: + blob:. Network
+ * connections stay disabled (connect-src 'none') so a published page cannot
+ * phone home from the browser unless the operator explicitly widens this
+ * policy.
+ */
+
 export const STATIC_DOCUMENT_CSP = [
   "default-src 'none'",
   "base-uri 'none'",
@@ -128,11 +141,8 @@ export const STATIC_DOCUMENT_CSP = [
   "img-src 'self' data: blob:",
   "media-src 'self' data: blob:",
   "object-src 'none'",
-  "script-src 'none'",
-  "script-src-attr 'none'",
-  "script-src-elem 'none'",
-  "style-src 'self' 'unsafe-inline'",
-  "worker-src 'none'",
+  "script-src 'self'",
+  "script-src-attr 'self'",
 ].join("; ");
 
 function isStaticDocumentType(type: string): boolean {

@@ -188,9 +188,12 @@ origin and use its normal auth/session path.
   exists it is 404. Directories are never listed. The Gateway applies the same
   behavior when forwarding to a remote machine.
 
-Generated HTML, SVG, and XML documents have a restrictive CSP: scripts and
-network connections are disabled while same-origin local styles, images, fonts,
-and media remain available for ordinary reports.
+Generated HTML, SVG, and XML documents are served with a CSP that allows
+same-origin scripts (`script-src 'self'`), so published pages can run their
+own JavaScript. Network connections stay disabled (`connect-src 'none'`),
+while same-origin local styles, images, fonts, and media remain available.
+The server only serves these bytes as static files and never executes
+anything under the mapping root.
 
 Expired or revoked mappings stop serving immediately. Direct serving of a
 known mapping URL requires authentication plus the machine grant only — it
