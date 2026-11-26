@@ -55,10 +55,12 @@ interface ModelsResponse {
  * three separate providers. Writes go through the same endpoints as before
  * (`/api/model-roles*`, `/api/models-config`, `/api/auth/*`).
  */
-export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged }: { cwd?: string | null; onClose: () => void; embedded?: boolean; onModelsChanged?: () => void }) {
+export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged, initialTab = "roles" }: { cwd?: string | null; onClose: () => void; embedded?: boolean; onModelsChanged?: () => void; initialTab?: TabId }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
-  const [tab, setTab] = useState<TabId>("roles");
+  // The opener names the tab (#147); the state is seeded once, so a later
+  // ordinary open of Models settings still starts on `roles`.
+  const [tab, setTab] = useState<TabId>(initialTab);
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   const [savedProviderNames, setSavedProviderNames] = useState<string[]>([]);
   const [providerRefresh, setProviderRefresh] = useState<ProviderRefreshState>({ phase: "idle" });

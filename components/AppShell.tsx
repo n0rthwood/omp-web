@@ -143,10 +143,15 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<"models" | "machines" | "prompts">("models");
   const [settingsPromptView, setSettingsPromptView] = useState<"defaults" | "current">("defaults");
+  // Which Models tab the dialog opens on (#147). Each opener names its tab, so
+  // opening Models settings the ordinary way later still starts on `roles`.
+  const [settingsModelsTab, setSettingsModelsTab] = useState<"roles" | "allowList">("roles");
   // The provider-status poll is owned here, not by the strip: ChatWindow is
   // re-keyed per session, and the strip above its composer must not reset.
   const providerStatus = useProviderStatus();
-  const openModelsSettings = useCallback(() => { setSettingsInitialSection("models"); setSettingsConfigOpen(true); }, []);
+  const openModelsSettings = useCallback(() => { setSettingsInitialSection("models"); setSettingsModelsTab("roles"); setSettingsConfigOpen(true); }, []);
+  /** Opens Settings straight on Models → allow-list, the warning icon's action (#147). */
+  const openModelsAllowList = useCallback(() => { setSettingsInitialSection("models"); setSettingsModelsTab("allowList"); setSettingsConfigOpen(true); }, []);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -2182,6 +2187,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
               onSubagentsChange={setSubagents}
               providerStatus={providerStatus}
               onOpenModels={openModelsSettings}
+              onOpenAllowList={openModelsAllowList}
               onOpenFile={handleOpenLinkedFile}
               onSideDialogChange={handleSideDialogChange}
               onRespondSideDialog={handleRespondSideDialog}
@@ -2455,6 +2461,7 @@ function AppShellBody({ initialTarget, initialSession, resolutionRevision }: App
         sessionId={selectedSession?.id ?? null}
         initialSection={settingsInitialSection}
         initialPromptView={settingsPromptView}
+        initialModelsTab={settingsModelsTab}
         onClose={() => setSettingsConfigOpen(false)}
         onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onReloaded={() => setSessionKey((key) => key + 1)}
