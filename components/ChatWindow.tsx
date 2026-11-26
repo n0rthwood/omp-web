@@ -57,6 +57,8 @@ interface Props {
    *  poll, so a session switch never resets it. */
   providerStatus?: ProviderStatusSnapshot | null;
   onOpenModels?: () => void;
+  /** Opens Settings on Models → allow-list (#147); the strip warning icon's action. */
+  onOpenAllowList?: () => void;
   /** Completion sound state + controls, owned by AppShell so tasks finishing in
    *  a non-active workspace can still ring. */
   soundEnabled?: boolean;
@@ -110,7 +112,7 @@ function isGroupAnchor(message: AgentMessage): boolean {
   return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, providerStatus, onOpenModels, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onSubagentsChange, providerStatus, onOpenModels, onOpenAllowList, onOpenFile, onSideDialogChange, onRespondSideDialog, onRevealSideDialog, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -136,7 +138,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
 
   const {
     loading, error, refreshError, data, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, hiddenByProvider, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, toolPreset, thinkingLevel,
     retryInfo, fallbackInfo, contextUsage, tokensPerSecond, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
@@ -535,8 +537,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
-      modelScopeWarnings={modelScopeWarnings}
-      hiddenModelCount={hiddenModelCount}
       onModelChange={handleModelChange}
       modelRoles={modelRoles}
       onRoleModelChange={handleRoleModelChange}
@@ -581,7 +581,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onAttentionNeed
   // shell owns the poll, so a session switch (this component is re-keyed)
   // never blanks it.
   const providerStatusElement = providerStatus && onOpenModels ? (
-    <ProviderStatusStrip snapshot={providerStatus} onOpenModels={onOpenModels} />
+    <ProviderStatusStrip
+      snapshot={providerStatus}
+      onOpenModels={onOpenModels}
+      onOpenAllowList={onOpenAllowList ?? onOpenModels}
+      hiddenModelCount={hiddenModelCount}
+      hiddenByProvider={hiddenByProvider}
+      modelScopeWarnings={modelScopeWarnings}
+      cwd={session?.cwd ?? newSessionCwd}
+    />
   ) : null;
 
   if (loading) {

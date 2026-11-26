@@ -428,6 +428,8 @@ type ModelsResponse = {
   thinkingLevelPins?: Record<string, string>;
   roles?: ModelRoleAssignment[];
   hiddenModelCount?: number;
+  /** Per-provider split of the models the `enabledModels` allow-list hides (#147). */
+  hiddenByProvider?: { provider: string; hidden: number; visible: number }[];
   modelError?: string;
   modelScopeWarnings?: string[];
 };
@@ -498,6 +500,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelScopeWarnings, setModelScopeWarnings] = useState<string[]>([]);
   const [hiddenModelCount, setHiddenModelCount] = useState<number | undefined>(undefined);
+  const [hiddenByProvider, setHiddenByProvider] = useState<{ provider: string; hidden: number; visible: number }[] | undefined>(undefined);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [modelRoles, setModelRoles] = useState<ModelRoleAssignment[]>([]);
@@ -2957,6 +2960,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setModelError(d.modelError ?? null);
     setModelScopeWarnings(d.modelScopeWarnings ?? []);
     setHiddenModelCount(d.hiddenModelCount);
+    setHiddenByProvider(d.hiddenByProvider);
     setModelThinkingLevels(d.thinkingLevels ?? {});
     setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
     setModelRoles(d.roles ?? []);
@@ -3464,7 +3468,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, refreshError, activeLeafId, messages: shownMessages, entryIds: shownEntryIds, streamState,
-    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, hiddenByProvider, modelThinkingLevels, modelThinkingLevelMaps, modelRoles, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, fallbackInfo, contextUsage, tokensPerSecond, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, subagents, planMode,
