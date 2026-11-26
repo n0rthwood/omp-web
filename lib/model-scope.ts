@@ -40,6 +40,14 @@ function anchorToNamedProvider(
   return models.filter((scoped) => scoped.model.provider === providerId);
 }
 
+export interface HiddenByProviderEntry {
+  provider: string;
+  /** Available models of this provider the allow-list hides. */
+  hidden: number;
+  /** Available models of this provider the allow-list admits. */
+  visible: number;
+}
+
 export interface ModelScopeResult {
   /** Models the UI should offer, in resolver order (all available when unscoped). */
   visible: readonly Model<Api>[];
@@ -49,6 +57,13 @@ export interface ModelScopeResult {
   thinkingLevelPins: Record<string, string>;
   /** Resolver diagnostics, e.g. a pattern that matched no model. */
   warnings: string[];
+  /**
+   * Per-provider split of the available models the allow-list hides, most
+   * hidden first then by provider name. Empty when no scope is in effect (no
+   * patterns, or a fallback to every available model), where "hidden" would be
+   * a lie (#147).
+   */
+  hiddenByProvider: HiddenByProviderEntry[];
 }
 
 export interface InitialModelScopeOptions {
@@ -71,6 +86,54 @@ function matchesModel(
 }
 
 /**
+ * Group the available models the scope hides by provider (#147).
+ *
+ * Only providers with at least one hidden model are listed; a provider whose
+ * models are all visible is absent. The `visible` count is what the same scope
+ * admits for that provider, so a consumer can show "hidden N / visible M".
+ */
+function splitHiddenByProvider(
+  available: readonly Model<Api>[],
+  visible: readonly Model<Api>[],
+): HiddenByProviderEntry[] {
+  const visibleKeys = new Set<string>();
+  const visibleByProvider = new Map<string, number>();
+  for (const model of visible) {
+    visibleKeys.add(`${model.provider}/${model.id}`);
+    visibleByProvider.set(model.provider, (visibleByProvider.get(model.provider) ?? 0) + 1);
+  }
+  const hiddenByProvider = new Map<string, number>();
+  for (const model of available) {
+    if (visibleKeys.has(`${model.provider}/${model.id}`)) continue;
+    hiddenByProvider.set(model.provider, (hiddenByProvider.get(model.provider) ?? 0) + 1);
+  }
+  return [...hiddenByProvider]
+    .map(([provider, hidden]) => ({ provider, hidden, visible: visibleByProvider.get(provider) ?? 0 }))
+    .sort((a, b) => b.hidden - a.hidden || a.provider.localeCompare(b.provider));
+}
+
+/**
+ * The `provider/modelId` keys of `available` that `scope` hides.
+ *
+ * The scoped `/api/models` response stays counts-only; the allow-list editor
+ * and the hidden-models popover read the unscoped `?all=1` listing and need to
+ * know which of its rows the current scope rejects (#147).
+ */
+export function hiddenModelKeys(
+  available: readonly Model<Api>[],
+  scope: ModelScopeResult,
+): Set<string> {
+  const visibleKeys = new Set(scope.visible.map((model) => `${model.provider}/${model.id}`));
+  const hidden = new Set<string>();
+  for (const model of available) {
+    const key = `${model.provider}/${model.id}`;
+    if (!visibleKeys.has(key)) hidden.add(key);
+  }
+  return hidden;
+}
+
+
+/**
  * Resolve the visible model list for `patterns`.
  *
  * Falls back to every available model when no patterns are configured or when
@@ -89,10 +152,12 @@ export async function resolveVisibleModels(
       scopedModels: [],
       thinkingLevelPins: {},
       warnings: [],
+      hiddenByProvider: [],
     };
   }
 
-  const providerIds = new Set(modelRegistry.getAvailable().map((model) => model.provider));
+  const available = modelRegistry.getAvailable();
+  const providerIds = new Set(available.map((model) => model.provider));
   // Resolve one pattern at a time: anchoring is a per-pattern decision, and it
   // also subsumes the old re-resolve pass that surfaced omp's silent drops.
   const scopedModels: ScopedModel[] = [];
@@ -122,10 +187,11 @@ export async function resolveVisibleModels(
 
   if (scopedModels.length === 0) {
     return {
-      visible: modelRegistry.getAvailable(),
+      visible: available,
       scopedModels: [],
       thinkingLevelPins: {},
       warnings,
+      hiddenByProvider: [],
     };
   }
 
@@ -143,6 +209,7 @@ export async function resolveVisibleModels(
     scopedModels,
     thinkingLevelPins,
     warnings,
+    hiddenByProvider: splitHiddenByProvider(available, scopedModels.map((scoped) => scoped.model)),
   };
 }
 
