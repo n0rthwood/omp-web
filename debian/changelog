@@ -1,3 +1,17 @@
+omp-web (0.5.48) jammy; urgency=medium
+
+  * Provider page polish (#146): the settings dialog is drag-resizable with
+    the size persisted in localStorage (measured default 1244x864 so a
+    typical 9-column model table fits without scrolling), the provider tree
+    collapses to a 42px icon rail to free space, and the model table keeps a
+    visible scrollbar only as a narrow-viewport fallback. Cost values are
+    rounded (no float tails), the OAuth card's long failure reason wraps
+    with expand/collapse instead of overflowing, outline subagent row titles
+    localize when toolNames is empty, and the settings frame labels are
+    translated.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 03:41:00 +0000
+
 omp-web (0.5.47) jammy; urgency=medium
 
   * Outline subagent rows reconcile across journal rows (#142): wait-result
