@@ -13,6 +13,14 @@
  * route change is needed: a provider with reports + windows already renders
  * through the generic branch in lib/provider-status.ts.
  *
+ * A usage probe must also follow the credential inference would actually use:
+ * when a shadowing source (models.yml `apiKey` pin / runtime override / config
+ * fallback) owns the provider, stored rows are unreachable for inference and a
+ * probe of them reports another account's quota or nothing; non-shadowing
+ * sources (login rows, OAuth, env) keep the SDK's per-credential behaviour so
+ * key pools are still probed key by key. `followsInferenceCredential` adds that
+ * semantic to every registry entry, so a future adapter inherits it.
+ *
  * Future adapter: Bailian Token Plan consumed quota lives behind the console
  * gateway (`/tokenplan/personal/api/v2/usage`) and needs a console-cookie
  * credential the fleet does not have — see .gh-issue/zhipu-usage-strip.md.
@@ -68,6 +76,41 @@ export const zhipuCodingPlanUsageProvider: UsageProvider = {
     (zaiUsageProvider.supports?.(zaiParams(params)) ?? false),
 };
 
+/**
+ * The slice of `authStorage.keys` the inference-following wrapper needs.
+ * Structural so the wrapper stays testable without a real AuthStorage.
+ */
+export interface InferenceKeySource {
+  source(provider: string): { kind: string } | undefined;
+  peek(provider: string): Promise<string | undefined>;
+}
+
+/** Source kinds that sit above stored login/OAuth rows in inference precedence. */
+const SHADOWING_SOURCE_KINDS: Record<string, true> = { config: true, runtime: true };
+
+/**
+ * Wrap a probe so it follows the credential inference would use.
+ *
+ * `supports`/`id`/`cacheVersion` pass through untouched: the SDK evaluates
+ * `supports` on the original params before `fetchUsage` runs, so only the
+ * credential is substituted here.
+ */
+export function followsInferenceCredential(probe: UsageProvider, keys: InferenceKeySource): UsageProvider {
+  return {
+    ...probe,
+    async fetchUsage(params, ctx) {
+      const kind = keys.source(params.provider)?.kind;
+      if (kind !== undefined && SHADOWING_SOURCE_KINDS[kind]) {
+        const apiKey = await keys.peek(params.provider);
+        // No resolvable inference key: keep the original credential rather than
+        // sending an empty Authorization header.
+        if (apiKey) params = { ...params, credential: { type: "api_key", apiKey } };
+      }
+      return probe.fetchUsage(params, ctx);
+    },
+  };
+}
+
 /** Registry of runtime usage-provider overrides, keyed by provider id. */
 export const USAGE_PROVIDER_OVERRIDES: Readonly<Record<string, UsageProvider>> = {
   [ZHIPU_PROVIDER]: zhipuCodingPlanUsageProvider,
@@ -76,6 +119,6 @@ export const USAGE_PROVIDER_OVERRIDES: Readonly<Record<string, UsageProvider>> =
 /** Install every registry entry on a runtime's auth storage (idempotent). */
 export function installUsageProviderOverrides(authStorage: AuthStorage): void {
   for (const [provider, usageProvider] of Object.entries(USAGE_PROVIDER_OVERRIDES)) {
-    authStorage.usage.setProvider(provider, usageProvider);
+    authStorage.usage.setProvider(provider, followsInferenceCredential(usageProvider, authStorage.keys));
   }
 }
