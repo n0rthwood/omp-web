@@ -1041,7 +1041,6 @@ export const enLocale: LocalePlugin = {
     "providerStatus.hiddenTitle": "Models hidden by the allow-list",
     "providerStatus.hiddenTotal": "{count} configured models are hidden by the enabledModels allow-list",
     "providerStatus.hiddenProviderCounts": "{hidden} hidden · {visible} visible",
-    "providerStatus.hiddenMore": "{count} more",
     "providerStatus.hiddenAction": "Open the model allow-list",
     "providerStatus.hiddenWarningsTitle": "Model scope warnings",
     "providerStatus.nextPoll": "next poll {time}",

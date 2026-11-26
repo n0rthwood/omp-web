@@ -1,7 +1,7 @@
 // Hidden-model warning icon on the provider status strip (#147):
 //   T1 the icon exists only when something is hidden or a scope pattern failed.
 //   T2 the unscoped listing groups under the summary's provider order.
-//   T3 a large group is capped and its overflow is stated in words.
+//   T3 a large group lists every id; nothing is capped or counted as "more".
 //   T4 the popover lists providers in order, with counts, ids and warnings.
 //   T5 the popover is clamped to the viewport and flips above when needed.
 // The DOM behaviour (hover, focus, Escape, activation) has no harness in this
@@ -19,10 +19,8 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const {
-  HIDDEN_IDS_CAP,
   HiddenModelsNotice,
   HiddenModelsPopover,
-  capHiddenIds,
   groupHiddenModels,
   hiddenNoticeVisible,
   placePopover,
@@ -113,22 +111,12 @@ test("a provider missing from the summary is appended with its own counts", () =
   assert.deepEqual(groups[1], { provider: "xai", hidden: 1, visible: 0, ids: ["x-1"] });
 });
 
-// ── T3 cap ──────────────────────────────────────────────────────────────────
-
-test("a large group is capped and the overflow is counted", () => {
+test("a provider with more ids than any former cap lists every one, with no overflow text", () => {
   const ids = Array.from({ length: 629 }, (_, index) => `openrouter/model-${index}`);
-  const { shown, overflow } = capHiddenIds(ids);
-  assert.equal(HIDDEN_IDS_CAP, 8);
-  assert.equal(shown.length, 8);
-  assert.equal(shown[0], "openrouter/model-0");
-  assert.equal(overflow, 621);
-});
-
-test("a group at the cap lists every id with no overflow", () => {
-  const ids = Array.from({ length: HIDDEN_IDS_CAP }, (_, index) => `anthropic/claude-${index}`);
-  const { shown, overflow } = capHiddenIds(ids);
-  assert.equal(shown.length, HIDDEN_IDS_CAP);
-  assert.equal(overflow, 0);
+  const html = popover({ groups: [{ provider: "openrouter", hidden: 629, visible: 7, ids }] });
+  assert.equal([...html.matchAll(/data-testid="hidden-model-id"/g)].length, 629);
+  assert.match(html, /openrouter\/model-628/);
+  assert.doesNotMatch(html, /more/);
 });
 
 // ── T4 popover content ──────────────────────────────────────────────────────
@@ -148,13 +136,6 @@ test("the popover lists providers in order with their counts and ids", () => {
   assert.match(html, /696 configured models are hidden/);
 });
 
-test("the popover states the overflow of a capped group in words", () => {
-  const ids = Array.from({ length: 629 }, (_, index) => `openrouter/model-${index}`);
-  const html = popover({ groups: [{ provider: "openrouter", hidden: 629, visible: 7, ids }] });
-  assert.match(html, /621 more/);
-  assert.match(html, /openrouter\/model-0/);
-  assert.doesNotMatch(html, /openrouter\/model-8/);
-});
 
 test("a known provider is named and an unknown one stays the raw id", () => {
   const html = popover({

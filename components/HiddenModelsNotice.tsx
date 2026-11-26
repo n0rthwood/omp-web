@@ -24,18 +24,11 @@ import type { ModelCatalogEntry } from "@/lib/models-cache";
 import { providerLabel } from "@/lib/provider-label";
 
 /**
- * Ids listed per provider before the rest is stated in words.
- *
- * Measured in the browser with the gateway-shaped fixture (629/37/22/8 hidden,
- * long real-world ids such as `anthropic/claude-fable-latest`): the fixed
- * content (title, total, four provider rows, three overflow lines, action,
- * padding) is ~250px and a text line is 16.5px. The ids render as one wrapped
- * inline flow, so eight ids per provider cost a few lines each instead of eight
- * — 1714px with the old one-id-per-line list at cap 30, ~430px now, which sits
- * above the icon at 1280×800 and 1920×1080. `max-height` below is the fallback
- * for viewports shorter than that.
+ * The popover is an overlay: it may cover the chat, and it lists every hidden
+ * id of every provider — no per-provider preview cap and no "N more" line.
+ * When the list is taller than the viewport it scrolls, with a visible
+ * scrollbar (`max-height` below).
  */
-export const HIDDEN_IDS_CAP = 8;
 
 /** How long the pointer may take to travel from the icon into the popover. */
 const CLOSE_DELAY_MS = 180;
@@ -84,10 +77,6 @@ export function groupHiddenModels(
   return groups;
 }
 
-/** Ids to render for one group, plus how many are stated in words instead. */
-export function capHiddenIds(ids: string[], cap = HIDDEN_IDS_CAP): { shown: string[]; overflow: number } {
-  return { shown: ids.slice(0, cap), overflow: Math.max(0, ids.length - cap) };
-}
 
 export interface PopoverAnchor {
   left: number;
@@ -138,12 +127,11 @@ interface PopoverProps {
 
 /**
  * Popover body, kept free of positioning and hover state so the content —
- * provider order, counts, the id cap and the scope-warning section — is
+ * provider order, counts, every hidden id and the scope-warning section — is
  * renderable on its own.
  */
 export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, countsOnly, names, onOpenAllowList }: PopoverProps) {
   const { t } = useI18n();
-  const overflowTotal = groups.reduce((sum, group) => sum + capHiddenIds(group.ids).overflow, 0);
   return (
     <>
       <div style={{ fontWeight: 600, color: "var(--warning)" }}>{t("providerStatus.hiddenTitle")}</div>
@@ -154,7 +142,7 @@ export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, counts
       )}
       {groups.map((group) => {
         // Counts only while the ids load, and for a remote that omits the flags.
-        const { shown, overflow } = countsOnly ? { shown: [], overflow: 0 } : capHiddenIds(group.ids);
+        const shown = countsOnly ? [] : group.ids;
         return (
           <div key={group.provider} style={{ marginTop: 6 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
@@ -170,7 +158,6 @@ export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, counts
                 ))}
               </div>
             )}
-            {overflow > 0 && <div style={{ color: "var(--text-dim)" }}>{t("providerStatus.hiddenMore", { count: overflow })}</div>}
           </div>
         );
       })}
@@ -201,11 +188,6 @@ export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, counts
         }}
       >
         {t("providerStatus.hiddenAction")}
-        {overflowTotal > 0 && (
-          <span style={{ marginLeft: 6, color: "var(--text-dim)" }}>
-            {t("providerStatus.hiddenMore", { count: overflowTotal })}
-          </span>
-        )}
       </button>
     </>
   );
@@ -298,8 +280,15 @@ export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warning
       setPosition((prev) => (prev && prev.top === next.top && prev.left === next.left ? prev : next));
     };
     update();
+    // The popover's own size changes after the first paint (width clamps,
+    // wrapped ids), and a stale size anchors it over the icon it belongs to.
+    const observer = new ResizeObserver(update);
+    if (popoverRef.current) observer.observe(popoverRef.current);
     window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
   }, [open, entries, loading, hiddenModelCount, warnings.length]);
 
   if (!visible) return null;
@@ -388,7 +377,7 @@ export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warning
             maxHeight: "calc(100vh - 16px)",
             overflowY: "auto",
             scrollbarWidth: "thin",
-            scrollbarColor: "var(--border) transparent",
+            scrollbarColor: "var(--text-dim) transparent",
             padding: "8px 10px",
             border: "1px solid rgba(234,179,8,0.35)",
             borderRadius: 6,

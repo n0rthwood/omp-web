@@ -136,7 +136,7 @@ test("every strip string is translated in both locales", () => {
     "providerStatus.dataTime", "providerStatus.ageMinutes", "providerStatus.ageHours",
     "providerStatus.nextPoll", "providerStatus.pending",
     "providerStatus.hiddenIcon", "providerStatus.hiddenTitle", "providerStatus.hiddenTotal",
-    "providerStatus.hiddenProviderCounts", "providerStatus.hiddenMore",
+    "providerStatus.hiddenProviderCounts",
     "providerStatus.hiddenAction", "providerStatus.hiddenWarningsTitle",
   ]) {
     assert.equal(typeof enLocale.messages[key], "string", `en missing ${key}`);

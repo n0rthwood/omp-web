@@ -1041,7 +1041,6 @@ export const zhCNLocale: LocalePlugin = {
     "providerStatus.hiddenTitle": "被允许列表隐藏的模型",
     "providerStatus.hiddenTotal": "有 {count} 个已配置的模型被 enabledModels 允许列表隐藏",
     "providerStatus.hiddenProviderCounts": "隐藏 {hidden} · 可见 {visible}",
-    "providerStatus.hiddenMore": "还有 {count} 个",
     "providerStatus.hiddenAction": "打开模型允许列表",
     "providerStatus.hiddenWarningsTitle": "模型范围告警",
     "providerStatus.nextPoll": "下次轮询 {time}",
