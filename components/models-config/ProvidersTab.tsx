@@ -33,6 +33,26 @@ const GROUP_LABEL_KEYS: Record<ProviderSource, { title: string; sub: string }> =
   config: { title: "models.groupConfig", sub: "models.groupConfigSub" },
 };
 
+const TREE_COLLAPSED_STORAGE_KEY = "omp-providers-tree-collapsed";
+
+/**
+ * Read-before-paint: the persisted provider-tree state. With no stored
+ * preference the tree starts collapsed below 1400px — measured on the 9-column
+ * table (#146), the expanded tree needs ~1600px before every column fits, so a
+ * 1280px viewport only shows the whole table as a rail.
+ */
+function readStoredTreeCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const stored = window.localStorage.getItem(TREE_COLLAPSED_STORAGE_KEY);
+    if (stored === "1") return true;
+    if (stored === "0") return false;
+  } catch {
+    // Private mode: fall through to the viewport default.
+  }
+  return window.innerWidth < 1400;
+}
+
 /**
  * Tab 3 — providers, merged into one row per provider.
  *
@@ -98,6 +118,19 @@ export function ProvidersTab({
 }) {
   const { t } = useI18n();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // #146: the provider tree collapses to an icon rail so the model table gets
+  // the width; the state is a per-browser preference (localStorage).
+  const [treeCollapsed, setTreeCollapsed] = useState(readStoredTreeCollapsed);
+  const toggleTree = () => {
+    setTreeCollapsed((current) => {
+      const next = !current;
+      try { window.localStorage.setItem(TREE_COLLAPSED_STORAGE_KEY, next ? "1" : "0"); } catch {
+        // Storage unavailable: the collapse still applies for this session.
+      }
+      return next;
+    });
+  };
+  const treeToggleLabel = treeCollapsed ? t("models.expandProviderTree") : t("models.collapseProviderTree");
 
   const rows = useMemo(
     () => mergeProviderRows(oauthProviders, apiKeyProviders, config.providers ?? {}),
@@ -157,8 +190,34 @@ export function ProvidersTab({
   const hideable = selected !== null && !selected.config && selected.apiKey?.source === "env";
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 340px) 1fr", gap: 16, height: "100%" }}>
-      <div style={{ borderRight: "1px solid var(--border)", paddingRight: 14, overflowY: "auto" }}>
+    <div data-testid="providers-tab" data-tree-collapsed={treeCollapsed ? "true" : undefined}
+      style={{ display: "grid", gridTemplateColumns: treeCollapsed ? "42px minmax(0, 1fr)" : "minmax(240px, 340px) 1fr", gap: 16, height: "100%" }}>
+      <div style={{ borderRight: "1px solid var(--border)", paddingRight: 14, overflowY: "auto", minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: treeCollapsed ? "center" : "flex-end", marginBottom: 6 }}>
+          <button type="button" data-testid="provider-tree-toggle" aria-expanded={!treeCollapsed} aria-label={treeToggleLabel} title={treeToggleLabel} onClick={toggleTree}
+            style={{ display: "grid", placeItems: "center", width: 22, height: 22, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer" }}>
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: treeCollapsed ? "rotate(180deg)" : undefined }}>
+              <path d="M4 2.5l4 3.5-4 3.5" />
+            </svg>
+          </button>
+        </div>
+        {treeCollapsed ? (
+          <div data-testid="provider-tree-rail">
+            {grouped.flatMap((group) => group.rows).map((row) => (
+              <button key={row.id} type="button" data-testid="provider-list-item" data-provider-id={row.id}
+                aria-current={row.id === selectedId} aria-label={row.name} title={row.name}
+                onClick={() => setSelectedId(row.id)}
+                style={{ display: "grid", placeItems: "center", width: "100%", height: 30, marginBottom: 2, padding: 0, background: row.id === selectedId ? "var(--bg-selected)" : "transparent", border: "1px solid transparent", borderRadius: 6, cursor: "pointer" }}>
+                <ProviderIcon id={row.id} size={16} />
+              </button>
+            ))}
+            <button type="button" data-testid="add-provider-button" aria-label={t("i18n.addProvider")} title={t("i18n.addProvider")} onClick={onAddProvider}
+              style={{ display: "grid", placeItems: "center", width: "100%", height: 28, padding: 0, background: "none", border: "1px dashed var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", fontSize: 14 }}>
+              +
+            </button>
+          </div>
+        ) : null}
+        {!treeCollapsed && (<>
         {grouped.length === 0 && (
           <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "8px 4px" }}>{t("models.noProviders")}</div>
         )}
@@ -242,6 +301,7 @@ export function ProvidersTab({
             {t("models.syncConfig")}
           </button>
         </div>
+        </>)}
       </div>
 
       <div style={{ overflowY: "auto", minWidth: 0 }}>

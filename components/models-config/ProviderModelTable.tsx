@@ -27,13 +27,24 @@ const COLUMN_KEYS = [
   "models.actionsColumn",
 ];
 
-const CELL_STYLE = { padding: "4px 10px", borderBottom: "1px solid var(--border)" } as const;
+const CELL_STYLE = { padding: "4px 6px", borderBottom: "1px solid var(--border)" } as const;
 
 function formatTokens(value: number | undefined): string {
   if (value === undefined) return "—";
   if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
   if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
   return String(value);
+}
+
+/**
+ * #146: catalog costs are binary floats (`0.45499999999999996`), so the raw
+ * value is unreadable in a table cell. Four significant digits keep the
+ * quoted precision without the tail; zero stays a plain `0`.
+ */
+function formatCost(value: number | undefined): string {
+  if (value === undefined) return "0";
+  if (!Number.isFinite(value) || value === 0) return String(value);
+  return String(Number(value.toPrecision(4)));
 }
 
 /** Which efforts the row offers: a definition's own map, else what the registry supports. */
@@ -78,12 +89,12 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
   };
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+    <div className="model-table-scroll" style={{ border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
         <thead>
           <tr>
             {COLUMN_KEYS.map((key) => (
-              <th key={key} style={{ textAlign: "left", fontWeight: 600, color: "var(--text-muted)", fontSize: 11, padding: "6px 10px", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>
+              <th key={key} style={{ textAlign: "left", fontWeight: 600, color: "var(--text-muted)", fontSize: 11, padding: "6px 6px", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>
                 {t(key)}
               </th>
             ))}
@@ -122,7 +133,7 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
                   </td>
                   <td style={{ ...CELL_STYLE, fontFamily: "var(--font-mono)" }}>{thinkingLabel(row, t("models.thinkingDefault"))}</td>
                   <td style={{ ...CELL_STYLE, fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>
-                    {cost ? `${cost.input ?? 0} / ${cost.output ?? 0}` : "—"}
+                    {cost ? `${formatCost(cost.input)} / ${formatCost(cost.output)}` : "—"}
                   </td>
                   <td style={CELL_STYLE}>
                     <HealthBadge health={modelHealth} />

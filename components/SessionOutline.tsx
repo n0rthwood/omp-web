@@ -8,7 +8,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/hooks/useI18n";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { SubagentDetail, formatSubagentDuration } from "./SubagentDetail";
-import { localizedToolPreview } from "@/lib/tool-name-i18n";
+import { isLocalizedToolPreview, localizedToolPreview } from "@/lib/tool-name-i18n";
 import { stripIrcEnvelope } from "@/lib/irc-message";
 
 // #104: journal outline panel. Rendered either as a persistent rail beside the
@@ -18,11 +18,14 @@ import { stripIrcEnvelope } from "@/lib/irc-message";
 
 /** #143: outline previews are server-built text. Tool rows carry the raw tool
  *  id list (`toolNames`), system rows can carry an `irc:incoming` envelope —
- *  localize the former and strip the latter so no literal `<irc>` shows. */
-function outlinePreviewText(entry: SessionOutlineEntry, t: (key: string, params?: Record<string, string | number>) => string): string {
-  return entry.toolNames && entry.toolNames.length > 0
-    ? localizedToolPreview(entry.preview, t)
-    : stripIrcEnvelope(entry.preview);
+ *  localize the former and strip the latter so no literal `<irc>` shows.
+ *  #146: a tool-only row can arrive without `toolNames` (journal rebuild, old
+ *  payload); its preview is then the bare id list, which is still localized,
+ *  so a subagent row never shows the raw `task` / `todo, task`. */
+export function outlinePreviewText(entry: SessionOutlineEntry, t: (key: string, params?: Record<string, string | number>) => string): string {
+  if (entry.toolNames && entry.toolNames.length > 0) return localizedToolPreview(entry.preview, t);
+  const text = stripIrcEnvelope(entry.preview);
+  return isLocalizedToolPreview(text) ? localizedToolPreview(text, t) : text;
 }
 
 /** #137: resizable rail geometry. The width is a per-browser preference

@@ -37,6 +37,9 @@ export function OAuthCard({ provider, health, onRefresh }: {
   const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
   const [inputValue, setInputValue] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
+  // #146: a tombstone's cause can be a full upstream error body; clamp it by
+  // default and expand on demand so the card never overflows horizontally.
+  const [causeExpanded, setCauseExpanded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // The paste input stays mounted for the whole auth→success/error window,
@@ -139,15 +142,21 @@ export function OAuthCard({ provider, health, onRefresh }: {
   const showProgress = verifying || Boolean(inputRequest?.progress);
   const expiresAt = health?.expiresAt ? new Date(health.expiresAt).toLocaleString() : null;
   const lastRefreshAt = health?.lastRefreshAt ? new Date(health.lastRefreshAt).toLocaleString() : null;
+  // Longer than the three-line clamp: the cause gets an expand toggle.
+  const longCause = (health?.cause?.length ?? 0) > 120;
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <SectionTitle>{t("models.oauthCardTitle")}</SectionTitle>
-        <HealthBadge
-          health={health}
-          label={health ? undefined : provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
-        />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, minWidth: 0 }}>
+        <div style={{ flex: "0 0 auto" }}>
+          <SectionTitle>{t("models.oauthCardTitle")}</SectionTitle>
+        </div>
+        <div style={{ minWidth: 0, display: "flex", justifyContent: "flex-end", overflow: "hidden" }}>
+          <HealthBadge
+            health={health}
+            label={health ? undefined : provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
+          />
+        </div>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 11, color: "var(--text-muted)" }}>
@@ -157,7 +166,21 @@ export function OAuthCard({ provider, health, onRefresh }: {
       </div>
 
       {health?.cause && (
-        <p style={{ margin: 0, fontSize: 11, color: "var(--danger, #f85149)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{health.cause}</p>
+        <div style={{ minWidth: 0 }}>
+          <p style={{
+            margin: 0, fontSize: 11, color: "var(--danger, #f85149)", fontFamily: "var(--font-mono)",
+            wordBreak: "break-all", overflowWrap: "anywhere",
+            ...(longCause && !causeExpanded
+              ? { display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" as const, overflow: "hidden" }
+              : {}),
+          }}>{health.cause}</p>
+          {longCause && (
+            <button type="button" onClick={() => setCauseExpanded((current) => !current)}
+              style={{ marginTop: 4, padding: 0, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>
+              {causeExpanded ? t("models.causeCollapse") : t("models.causeExpand")}
+            </button>
+          )}
+        </div>
       )}
 
       <div style={{ minHeight: 0 }}>

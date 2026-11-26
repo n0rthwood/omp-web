@@ -41,10 +41,13 @@ export function HealthBadge({ health, label, title }: {
   return (
     <span
       title={title ?? health?.cause}
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, whiteSpace: "nowrap", color: state === "ok" ? "var(--text-muted)" : STATE_COLORS[state] }}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, minWidth: 0, maxWidth: "100%", color: state === "ok" ? "var(--text-muted)" : STATE_COLORS[state] }}
     >
       <span style={{ width: 7, height: 7, borderRadius: "50%", background: STATE_COLORS[state], flex: "none" }} />
-      {text}
+      {/* #146: a long failure cause must not push the card title out of the
+          row — ellipsis here, full text in the `title` tooltip and the
+          card's own cause block. */}
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
     </span>
   );
 }

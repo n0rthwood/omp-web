@@ -118,3 +118,19 @@ export function localizedToolPreview(preview: string, t: Translate): string {
     })
     .join(", ");
 }
+
+/**
+ * #146: whether a preview is nothing but tool ids (`task`, `todo, task`,
+ * `read, +3 more`). Outline rows that reach the panel without their
+ * `toolNames` list — a journal rebuild, an older payload — still carry such a
+ * preview, and only those may be run through `localizedToolPreview`; prose
+ * that merely contains the word `read` must stay verbatim.
+ */
+export function isLocalizedToolPreview(preview: string): boolean {
+  if (typeof preview !== "string" || !preview.trim()) return false;
+  const tokens = preview.split(", ");
+  return tokens.length > 0 && tokens.every((token) =>
+    /^\+(\d+) more$/.test(token)
+    || token === "… more"
+    || toolNameKey(token) !== null);
+}

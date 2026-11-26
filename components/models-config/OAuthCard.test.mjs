@@ -40,3 +40,21 @@ test("the card shows when the credential was last refreshed", () => {
 test("without a known refresh time the line says so instead of inventing one", () => {
   assert.match(render({ state: "ok" }), /last refresh <code style="[^"]*">—<\/code>/);
 });
+
+test("a long failure cause is clamped with an expand toggle and no overflow", () => {
+  const cause = `oauth refresh failed: OAuthError: xai-oauth token refresh failed: 400 ${JSON.stringify({ error: "invalid_grant", error_description: "Invalid or unknown refresh token" })}`;
+  const html = render({ state: "disabled", cause });
+  assert.match(html, /Show full error/);
+  assert.match(html, /display:-webkit-box/);
+  assert.match(html, /-webkit-line-clamp:3/);
+  assert.match(html, /overflow-wrap:anywhere/);
+  // The header must not let the badge squeeze the title: title fixed, badge shrinks.
+  assert.match(html, /flex:0 0 auto/);
+  assert.match(html, /min-width:0/);
+});
+
+test("a short cause needs no expand toggle", () => {
+  const html = render({ state: "disabled", cause: "invalid_grant" });
+  assert.doesNotMatch(html, /Show full error/);
+  assert.ok(html.includes("invalid_grant"));
+});
