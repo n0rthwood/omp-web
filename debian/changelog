@@ -1,3 +1,25 @@
+omp-web (0.5.49) jammy; urgency=medium
+
+  * Provider quota in the composer status strip now covers two more plans
+    through a new runtime usage-probe registry (#148, #150). Zhipu GLM
+    Coding Plan reports its 5-hour, weekly and monthly windows from the
+    domestic BigModel monitor API, and Bailian Token Plan reports its
+    monthly quota by reading the locally installed `bl` CLI, which also
+    owns console-token renewal. A host without `bl` keeps the previous
+    presence dot, and the probe now follows the credential inference
+    actually uses, so a stale stored login row no longer makes a working
+    provider report "no usage data".
+  * Hidden-model notice (#147): the status strip carries a warning icon
+    whose popover lists every model id hidden by `enabledModels`, grouped
+    per provider, and opens Models settings straight on the allow-list tab;
+    the old composer banners are gone.
+  * Outline drill-down works for sessions recorded through the OpenAI
+    Responses API (#149): composite task call ids are preserved verbatim
+    instead of being truncated to the display cap, which had left task rows
+    unlinked to their subagent jobs.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 10:12:00 +0000
+
 omp-web (0.5.48) jammy; urgency=medium
 
   * Provider page polish (#146): the settings dialog is drag-resizable with
