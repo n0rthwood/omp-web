@@ -17,7 +17,7 @@ const { enLocale } = await jiti.import("../../lib/i18n/messages/en.ts");
 const { zhCNLocale } = await jiti.import("../../lib/i18n/messages/zh-CN.ts");
 const { translateMessage } = await jiti.import("../../lib/i18n/format.ts");
 
-function render(chain) {
+function render(chain, extra = {}) {
   return renderToStaticMarkup(
     React.createElement(
       I18nProvider,
@@ -28,6 +28,7 @@ function render(chain) {
         inherited: false,
         roleLabel: "default",
         onChange: () => {},
+        ...extra,
       }),
     ),
   );
@@ -50,4 +51,23 @@ test("the empty state says the same thing in Chinese", () => {
     translateMessage("zh-CN", "roles.backupsNone", { "zh-CN": zhCNLocale.messages }),
     "无降级 — 失败即报错",
   );
+});
+
+test("an inherited chain offers the override as an accent button, and no per-entry controls", () => {
+  const html = render(["a/m1", "a/m2"], { inherited: true, roleLabel: "vision" });
+  const button = html.match(/<button[^>]*data-testid="fallback-override"[^>]*>(.*?)<\/button>/s);
+  assert.ok(button, "the override control is a button");
+  assert.match(button[1], /inherited from default — Override/);
+  assert.match(button[0], /title="Give this role its own chain instead of the default one"/);
+  // It must not read like the dimmed dashed captions around it.
+  assert.match(button[0], /border:1px solid var\(--accent\)/);
+  assert.doesNotMatch(button[0], /dashed/);
+  assert.doesNotMatch(html, /aria-label="Remove backup/);
+});
+
+test("once the chain is the role's own, entries get their controls and the override is gone", () => {
+  const html = render(["a/m1", "a/m2"], { inherited: false, configured: ["a/m1", "a/m2"] });
+  assert.doesNotMatch(html, /fallback-override/);
+  assert.equal([...html.matchAll(/aria-label="Remove backup: /g)].length, 2);
+  assert.match(html, /Use default/);
 });

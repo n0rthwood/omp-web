@@ -113,9 +113,24 @@ export function FallbackChainEditor({
         />
 
         {inherited && chain.length > 0 && (
+          // The only way to edit an inherited chain, so it must read as a
+          // button — the same accent treatment as the active controls of this
+          // table — and not as a caption next to the dimmed chips.
           <button type="button" disabled={busy} title={t("roles.backupsOverrideHint")}
+            data-testid="fallback-override"
             onClick={() => onChange([...chain])}
-            style={{ padding: "2px 6px", border: "1px dashed var(--border)", borderRadius: 3, background: "transparent", color: "var(--text-dim)", cursor: busy ? "default" : "pointer", fontSize: 10, fontFamily: "var(--font-mono)" }}>
+            style={{
+              padding: "3px 10px",
+              border: "1px solid var(--accent)",
+              borderRadius: 6,
+              background: "var(--bg-selected)",
+              color: "var(--accent)",
+              cursor: busy ? "default" : "pointer",
+              fontSize: 11.5,
+              fontWeight: 600,
+              fontFamily: "var(--font-mono)",
+              opacity: busy ? 0.55 : 1,
+            }}>
             {t("roles.backupsInherited")} — {t("roles.backupsOverride")}
           </button>
         )}
