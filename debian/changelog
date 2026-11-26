@@ -1,3 +1,15 @@
+omp-web (0.5.51) jammy; urgency=medium
+
+  * Typing in the hidden-models overview filter no longer crashes the page
+    (#154). 0.5.50 matched allow-list globs with `Bun.Glob`, a global that
+    exists only in the Bun runtime, so the first keystroke threw `Bun is not
+    defined` in the browser and unmounted the app. The filter now uses a
+    browser-safe matcher, and a provider-anchored pattern such as
+    `Anthropic/*` lists that provider only instead of also matching the same
+    models re-sold through OpenRouter.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 18:10:00 +0000
+
 omp-web (0.5.50) jammy; urgency=medium
 
   * GPT-6.2 models from the Codex subscription are listed and callable
