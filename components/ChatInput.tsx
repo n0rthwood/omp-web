@@ -64,10 +64,6 @@ interface Props {
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string }[];
   modelError?: string | null;
-  /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
-  modelScopeWarnings?: string[];
-  /** Models that exist but the `enabledModels` allow-list hides from the picker. */
-  hiddenModelCount?: number;
   onModelChange?: (provider: string, modelId: string) => void;
   /** omp's model roles (default/smol/slow/plan/commit/…) with their assignments. */
   modelRoles?: ModelRoleAssignment[];
@@ -465,37 +461,6 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
 }
 
 /**
- * States how many models the `enabledModels` allow-list is hiding.
- *
- * A scoped install drops every model outside the allow-list without saying so,
- * which reads as "my provider is broken" when a configured key is involved
- * (#111). Renders nothing when no scope is in effect, since "0 hidden" is noise.
- */
-export function ModelHiddenCountBanner({ hiddenModelCount }: { hiddenModelCount?: number }) {
-  const { t } = useI18n();
-  if (!hiddenModelCount || hiddenModelCount <= 0) return null;
-  return (
-    <ModelNoticeBanner
-      tone="warning"
-      title={t("i18n.modelsHiddenTitle")}
-      body={t("i18n.modelsHiddenBody", { count: hiddenModelCount })}
-    />
-  );
-}
-
-/** Surfaces `enabledModels` patterns that matched nothing, so a typo is visible (#307). */
-export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
-  if (!warnings || warnings.length === 0) return null;
-  return (
-    <ModelNoticeBanner
-      tone="warning"
-      title={warnings.length > 1 ? "Model scope warnings" : "Model scope warning"}
-      body={warnings.join("\n")}
-    />
-  );
-}
-
-/**
  * #138: cross-model retry fallback banner.
  *
  * When the selected model hard-fails, the SDK walks `retry.fallbackChains`,
@@ -535,7 +500,7 @@ export function FallbackBanner({ info }: { info: FallbackBannerInfo }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, hiddenModelCount, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, onModelChange,
   modelRoles, onRoleModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   retryInfo, fallbackInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -1732,8 +1697,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
-        <ModelScopeWarningBanner warnings={modelScopeWarnings} />
-        <ModelHiddenCountBanner hiddenModelCount={hiddenModelCount} />
         {/* Queued steering / follow-up messages (delivered by omp on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
