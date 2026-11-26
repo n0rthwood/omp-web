@@ -19,6 +19,12 @@ export interface ModelCatalogEntry extends ModelCatalogFields {
   id: string;
   name: string;
   provider: string;
+  /**
+   * Whether the `enabledModels` allow-list currently hides this model. Only the
+   * unscoped listing (`?all=1`) sets it, and only while a scope resolves; a
+   * remote on an older release omits it (#147).
+   */
+  hidden?: boolean;
 }
 
 export interface ModelsData {
@@ -33,6 +39,12 @@ export interface ModelsData {
   roles: ModelRoleAssignment[];
   /** Chat models that credential-wise exist but the `enabledModels` allow-list hides. */
   hiddenModelCount?: number;
+  /**
+   * Per-provider split of the models the allow-list hides: most hidden first,
+   * then by provider name, listing only providers with a hidden model. Present
+   * exactly when `hiddenModelCount` is (#147).
+   */
+  hiddenByProvider?: { provider: string; hidden: number; visible: number }[];
   modelError?: string;
   /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
   modelScopeWarnings?: string[];
