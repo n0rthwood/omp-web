@@ -410,8 +410,8 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
   );
 }
 
-function ModelNoticeBanner({ tone, title, body }: { tone: "error" | "warning"; title: string; body: string }) {
-  const color = tone === "error" ? "239,68,68" : "234,179,8";
+function ModelNoticeBanner({ title, body }: { title: string; body: string }) {
+  const color = "239,68,68";
   return (
     <div
       role="alert"
@@ -457,7 +457,7 @@ function ModelNoticeBanner({ tone, title, body }: { tone: "error" | "warning"; t
 
 export function ModelErrorBanner({ error }: { error?: string | null }) {
   if (!error) return null;
-  return <ModelNoticeBanner tone="error" title="Model error" body={error} />;
+  return <ModelNoticeBanner title="Model error" body={error} />;
 }
 
 /**
