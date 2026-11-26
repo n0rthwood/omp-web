@@ -411,7 +411,14 @@ function toolCallCategory(content: unknown[]): "tool" | "write" | "wait" | "task
   return category;
 }
 
-/** Bounded task toolCall ids for pairing the spawn receipt at outline time. */
+/**
+ * Task toolCall ids for pairing the spawn receipt at outline time and for the
+ * client's live-snapshot merge (parentToolCallId). They are MATCHING KEYS, not
+ * display text, so they stay verbatim: Responses-API models emit composite ids
+ * (`call_<32hex>|fc_<48hex>`, 91 chars) and truncating them to a display cap
+ * made both pairings miss, leaving the spawn row undrillable (#149). The list
+ * stays bounded by the count cap.
+ */
 function taskToolCallIds(content: unknown[]): string[] {
   const ids: string[] = [];
   let seen = 0;
@@ -423,7 +430,7 @@ function taskToolCallIds(content: unknown[]): string[] {
     if (isTaskToolName(name)) {
       const id = typeof block.toolCallId === "string" ? block.toolCallId
         : typeof block.id === "string" ? block.id : "";
-      if (id && ids.length < OUTLINE_TASK_CALL_CAP) ids.push(id.slice(0, OUTLINE_JOB_ID_CAP));
+      if (id && ids.length < OUTLINE_TASK_CALL_CAP) ids.push(id);
     }
     if (seen > TOOL_NAME_SCAN_CAP) break;
   }
