@@ -1,3 +1,20 @@
+omp-web (0.5.50) jammy; urgency=medium
+
+  * GPT-6.2 models from the Codex subscription are listed and callable
+    (#153). The bundled SDK advertised Codex client 0.159.0, which OpenAI
+    version-gates, so `gpt-6.2-sol` and `gpt-6.2-astra` were hidden and a
+    call to them failed with `model_not_found`; a patch now advertises
+    0.169.0, the value upstream ships.
+  * The hidden-models overview filter understands allow-list globs (#151):
+    `Anthropic/*` matches the Anthropic rows, anchored to that provider,
+    instead of being treated as literal text, and a provider with no
+    configured models says so instead of showing "0 visible".
+  * The override control of an inherited fallback chain is an accent button
+    (#152) instead of a caption, so it reads as the way to fork the chain
+    onto a role such as vision.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 17:08:00 +0000
+
 omp-web (0.5.49) jammy; urgency=medium
 
   * Provider quota in the composer status strip now covers two more plans
