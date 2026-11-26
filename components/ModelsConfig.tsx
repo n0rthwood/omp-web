@@ -370,7 +370,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged, 
             ) : tab === "roles" ? (
               <RolesTab cwd={cwd ?? null} health={modelHealth} onModelsChanged={onModelsChanged} onSync={() => setSyncSections(["roles"])} />
             ) : tab === "allowList" ? (
-              <AllowListTab cwd={cwd ?? null} models={allModelList} health={modelHealth} onSaved={onModelsChanged} onSync={() => setSyncSections(["enabledModels"])} />
+              <AllowListTab cwd={cwd ?? null} models={allModelList} health={modelHealth} onSaved={() => { loadModels(); onModelsChanged?.(); }} onSync={() => setSyncSections(["enabledModels"])} />
             ) : (
               <ProvidersTab
                 config={config}

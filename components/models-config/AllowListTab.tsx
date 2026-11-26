@@ -42,26 +42,6 @@ export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
 
   const cwdQuery = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
 
-  // The parent's reload path (`onSaved` → `onModelsChanged` → `modelsRefreshKey`)
-  // refetches the *scoped* listing, which carries counts only, so a pattern write
-  // would leave this tab's `models` (the unscoped `?all=1` list) stale. Re-read it
-  // here so the overview and the search results show the new verdicts without a
-  // page reload. A newer `models` prop from the parent wins over this snapshot.
-  const [refreshed, setRefreshed] = useState<{ source: readonly ModelOption[]; cwd: string; list: ModelOption[] } | null>(null);
-  const allModels = refreshed && refreshed.source === models && refreshed.cwd === cwd ? refreshed.list : models;
-
-  const reloadAllModels = useCallback(async () => {
-    if (!cwd) return;
-    try {
-      const res = await fetch(apiPath(`/api/models?all=1&cwd=${encodeURIComponent(cwd)}`));
-      if (!res.ok) return;
-      const data = await res.json() as { modelList?: ModelOption[] };
-      setRefreshed({ source: models, cwd, list: data.modelList ?? [] });
-    } catch {
-      // The next parent reload brings fresh verdicts; the old ones stay meanwhile.
-    }
-  }, [cwd, models]);
-
   useEffect(() => {
     if (!cwd) {
       setLoading(false);
@@ -104,14 +84,13 @@ export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
       setProjectOverride(data.projectOverride === true);
       setSavedOk(true);
       onSaved?.();
-      void reloadAllModels();
       setTimeout(() => setSavedOk(false), 2000);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
-  }, [cwd, onSaved, reloadAllModels]);
+  }, [cwd, onSaved]);
 
   const patternSet = useMemo(() => new Set(patterns), [patterns]);
 
@@ -119,7 +98,7 @@ export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
     const needle = query.trim();
     if (!needle) return [];
     const byProvider = new Map<string, { model: ModelOption; selector: string; indices: number[]; score: number }[]>();
-    for (const model of allModels) {
+    for (const model of models) {
       const selector = modelSelector(model.provider, model.id);
       const match = fuzzyMatch(selector, needle);
       if (!match.hit) continue;
@@ -130,7 +109,7 @@ export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
     return [...byProvider.entries()]
       .map(([provider, hits]) => ({ provider, hits: hits.sort((a, b) => b.score - a.score || a.selector.localeCompare(b.selector)) }))
       .sort((a, b) => a.provider.localeCompare(b.provider));
-  }, [allModels, query]);
+  }, [models, query]);
 
   const matchCount = groups.reduce((total, group) => total + group.hits.length, 0);
 
