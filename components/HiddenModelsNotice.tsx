@@ -21,6 +21,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { apiPath } from "@/lib/api-path";
 import type { ModelCatalogEntry } from "@/lib/models-cache";
+import { providerLabel } from "@/lib/provider-label";
 
 /** Ids listed per provider before the rest is stated in words. */
 export const HIDDEN_IDS_CAP = 30;
@@ -112,7 +113,8 @@ interface PopoverProps {
   warnings: string[];
   /** Ids are still being fetched, or the remote omitted the flags. */
   countsOnly: boolean;
-  displayName: (provider: string) => string;
+  /** Display names by provider id; an unknown id falls back to the id. */
+  names?: Record<string, string>;
   onOpenAllowList: () => void;
 }
 
@@ -121,7 +123,7 @@ interface PopoverProps {
  * provider order, counts, the id cap and the scope-warning section — is
  * renderable on its own.
  */
-export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, countsOnly, displayName, onOpenAllowList }: PopoverProps) {
+export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, countsOnly, names, onOpenAllowList }: PopoverProps) {
   const { t } = useI18n();
   const overflowTotal = groups.reduce((sum, group) => sum + capHiddenIds(group.ids).overflow, 0);
   return (
@@ -138,7 +140,7 @@ export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, counts
         return (
           <div key={group.provider} style={{ marginTop: 6 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontWeight: 600 }}>{displayName(group.provider)}</span>
+              <span style={{ fontWeight: 600 }}>{providerLabel(group.provider, names)}</span>
               <span style={{ color: "var(--text-muted)" }}>
                 {t("providerStatus.hiddenProviderCounts", { hidden: group.hidden, visible: group.visible })}
               </span>
@@ -200,13 +202,13 @@ interface Props {
   warnings?: string[];
   /** Session cwd; the lazy id fetch is scoped to it. */
   cwd?: string | null;
-  /** Provider display name, reusing the strip's own naming. */
-  displayName: (provider: string) => string;
+  /** Display names by provider id, from the provider-status snapshot. */
+  names?: Record<string, string>;
   /** Opens Settings on Models → allow-list. */
   onOpenAllowList: () => void;
 }
 
-export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warnings = [], cwd, displayName, onOpenAllowList }: Props) {
+export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warnings = [], cwd, names, onOpenAllowList }: Props) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<ModelCatalogEntry[] | null>(null);
@@ -384,7 +386,7 @@ export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warning
             groups={groups}
             warnings={warnings}
             countsOnly={loading || entries === null}
-            displayName={displayName}
+            names={names}
             onOpenAllowList={activate}
           />
         </div>

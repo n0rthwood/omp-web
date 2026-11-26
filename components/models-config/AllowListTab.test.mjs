@@ -178,3 +178,15 @@ test("a filter shows a collapsed group's matches and drops its toggle", () => {
   assert.match(html, /openrouter\/openrouter-h1</);
   assert.doesNotMatch(html, /allow-list-overview-toggle/);
 });
+
+test("a group header shows the provider's display name when one is known", () => {
+  const models = fixture({ "zhipu-coding-plan": { hidden: 2, visible: 18 } });
+  const named = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(AllowListOverview, { models, names: { "zhipu-coding-plan": "Zhipu" } })),
+  );
+  assert.match(named, />Zhipu</);
+  assert.doesNotMatch(named, />zhipu-coding-plan</);
+
+  // Without a name source the raw id is the label.
+  assert.match(renderHtml(models), />zhipu-coding-plan</);
+});

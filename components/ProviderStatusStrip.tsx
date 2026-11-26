@@ -294,7 +294,7 @@ export function ProviderStatusStrip({ snapshot, onOpenModels, onOpenAllowList, h
         hiddenByProvider={hiddenByProvider}
         warnings={modelScopeWarnings}
         cwd={cwd}
-        displayName={(provider) => providers.find((entry) => entry.id === provider)?.displayName ?? provider}
+        names={Object.fromEntries(providers.map((entry) => [entry.id, entry.displayName]))}
         onOpenAllowList={onOpenAllowList}
       />
     </div>

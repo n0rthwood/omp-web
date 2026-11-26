@@ -99,6 +99,15 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged, 
       .map((machine) => ({ id: machine.id, name: machine.name })),
     [machines],
   );
+  // Display names for the allow-list overview's provider groups (#147): the
+  // catalog and OAuth lists are this panel's name sources, and a provider id
+  // with no entry there stays the raw id.
+  const providerNames = useMemo(() => {
+    const names: Record<string, string> = {};
+    for (const entry of apiKeyProviders) names[entry.id] = entry.displayName;
+    for (const entry of oauthProviders) names[entry.id] = entry.name;
+    return names;
+  }, [apiKeyProviders, oauthProviders]);
 
   useEffect(() => {
     setHiddenProviders(loadHiddenProviders());
@@ -370,7 +379,7 @@ export function ModelsConfig({ cwd, onClose, embedded = false, onModelsChanged, 
             ) : tab === "roles" ? (
               <RolesTab cwd={cwd ?? null} health={modelHealth} onModelsChanged={onModelsChanged} onSync={() => setSyncSections(["roles"])} />
             ) : tab === "allowList" ? (
-              <AllowListTab cwd={cwd ?? null} models={allModelList} health={modelHealth} onSaved={() => { loadModels(); onModelsChanged?.(); }} onSync={() => setSyncSections(["enabledModels"])} />
+              <AllowListTab cwd={cwd ?? null} models={allModelList} names={providerNames} health={modelHealth} onSaved={() => { loadModels(); onModelsChanged?.(); }} onSync={() => setSyncSections(["enabledModels"])} />
             ) : (
               <ProvidersTab
                 config={config}

@@ -29,7 +29,7 @@ const {
 } = await jiti.import("./HiddenModelsNotice.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
-const names = (provider) => ({ openrouter: "OpenRouter", anthropic: "Anthropic", xai: "xAI" })[provider] ?? provider;
+const names = { openrouter: "OpenRouter", anthropic: "Anthropic", xai: "xAI" };
 
 function popover(props) {
   return renderToStaticMarkup(
@@ -41,7 +41,7 @@ function popover(props) {
         groups: [],
         warnings: [],
         countsOnly: false,
-        displayName: names,
+        names,
         onOpenAllowList: () => {},
         ...props,
       }),
@@ -154,6 +154,17 @@ test("the popover states the overflow of a capped group in words", () => {
   assert.match(html, /599 more/);
   assert.match(html, /openrouter\/model-0/);
   assert.doesNotMatch(html, /openrouter\/model-30/);
+});
+
+test("a known provider is named and an unknown one stays the raw id", () => {
+  const html = popover({
+    groups: [
+      { provider: "fixture-acme", hidden: 3, visible: 0, ids: [] },
+      { provider: "openrouter", hidden: 1, visible: 0, ids: [] },
+    ],
+  });
+  assert.match(html, /fixture-acme/);
+  assert.match(html, /OpenRouter/);
 });
 
 test("the popover carries a separate scope-warning section", () => {

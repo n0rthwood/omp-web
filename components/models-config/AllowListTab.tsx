@@ -23,9 +23,11 @@ interface AllowListResponse {
  * `qwen4-max-preview`). Writes still go through
  * `GET/PUT /api/model-roles/allow-list`, so the stored format is unchanged.
  */
-export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
+export function AllowListTab({ cwd, models, names, health, onSaved, onSync }: {
   cwd: string | null;
   models: readonly ModelOption[];
+  /** Provider display names from the catalog lists; unknown ids fall back to the id. */
+  names?: Record<string, string>;
   health?: ModelHealthMap;
   onSaved?: () => void;
   onSync: () => void;
@@ -170,7 +172,7 @@ export function AllowListTab({ cwd, models, health, onSaved, onSync }: {
         })}
       </div>
 
-      <AllowListOverview models={allModels} />
+      <AllowListOverview models={models} names={names} />
 
       <input
         value={query}

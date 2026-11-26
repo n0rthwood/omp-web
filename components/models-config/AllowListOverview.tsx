@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { providerLabel } from "@/lib/provider-label";
 import { modelSelector, type ModelOption } from "./types";
 
 /**
@@ -101,7 +102,7 @@ export function buildAllowListOverview(models: readonly ModelOption[], keyword =
   return { hasVerdicts: true, groups, hiddenTotal, visibleTotal, total: hiddenTotal + visibleTotal, matchedTotal };
 }
 
-export function AllowListOverview({ models }: { models: readonly ModelOption[] }) {
+export function AllowListOverview({ models, names }: { models: readonly ModelOption[]; names?: Record<string, string> }) {
   const { t } = useI18n();
   const [filter, setFilter] = useState("");
   const data = useMemo(() => buildAllowListOverview(models, filter), [models, filter]);
@@ -138,7 +139,7 @@ export function AllowListOverview({ models }: { models: readonly ModelOption[] }
       )}
 
       {data.groups.map((group) => (
-        <OverviewGroup key={group.provider} group={group} filterActive={filter.trim().length > 0} />
+        <OverviewGroup key={group.provider} group={group} names={names} filterActive={filter.trim().length > 0} />
       ))}
     </section>
   );
@@ -158,7 +159,7 @@ export function overviewShowsIds(group: AllowListGroup, filterActive: boolean, e
   return group.matches.length > 0 && (filterActive || !group.collapsedByDefault || expanded);
 }
 
-export function OverviewGroup({ group, filterActive = false }: { group: AllowListGroup; filterActive?: boolean }) {
+export function OverviewGroup({ group, names, filterActive = false }: { group: AllowListGroup; names?: Record<string, string>; filterActive?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(!group.collapsedByDefault);
   const nothingHidden = group.hidden.length === 0;
@@ -172,7 +173,7 @@ export function OverviewGroup({ group, filterActive = false }: { group: AllowLis
       data-visible={group.visible}
       style={{ borderTop: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 8px", padding: "6px 12px" }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)" }}>{group.provider}</span>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)" }}>{providerLabel(group.provider, names)}</span>
         {nothingHidden ? (
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("models.allowListOverviewVisible", { count: group.visible })}</span>
         ) : (
