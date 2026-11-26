@@ -144,6 +144,18 @@ export function AllowListOverview({ models }: { models: readonly ModelOption[] }
   );
 }
 
+/**
+ * Whether a group lists its hidden ids. The collapse rule of `OverviewGroup`,
+ * pure so the "shrank below the threshold" case is testable without a DOM (#147).
+ *
+ * A group that is not collapsed-by-default always lists its models: the toggle
+ * only exists above the threshold, so a group that dropped to the threshold or
+ * below must not stay stuck closed with no way to open it.
+ */
+export function overviewShowsIds(group: AllowListGroup, expanded: boolean): boolean {
+  return group.matches.length > 0 && (!group.collapsedByDefault || expanded);
+}
+
 export function OverviewGroup({ group }: { group: AllowListGroup }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(!group.collapsedByDefault);
@@ -176,7 +188,7 @@ export function OverviewGroup({ group }: { group: AllowListGroup }) {
         )}
       </div>
 
-      {!nothingHidden && expanded && group.matches.length > 0 && (
+      {!nothingHidden && overviewShowsIds(group, expanded) && (
         <ul style={{ margin: 0, padding: "0 12px 8px 12px", listStyle: "none" }}>
           {group.matches.map((selector) => (
             <li key={selector} data-testid="allow-list-overview-model"

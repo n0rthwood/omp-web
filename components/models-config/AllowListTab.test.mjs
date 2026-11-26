@@ -13,7 +13,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AllowListOverview, OverviewGroup, buildAllowListOverview, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
+const { AllowListOverview, OverviewGroup, buildAllowListOverview, overviewShowsIds, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
 const { I18nProvider } = await jiti.import("../../hooks/useI18n.tsx");
 
 /** `{ provider: { hidden, visible } }` → a `?all=1`-shaped `modelList`. */
@@ -143,4 +143,23 @@ test("an expanded large group lists every hidden id", () => {
   );
   assert.equal([...html.matchAll(/data-testid="allow-list-overview-model"/g)].length, 629);
   assert.match(html, /openrouter\/openrouter-h628/);
+});
+
+test("a group that shrank to the threshold lists its ids even when it was mounted collapsed", () => {
+  const large = buildAllowListOverview(fixture({ openrouter: { hidden: 13, visible: 0 } })).groups[0];
+  assert.equal(large.collapsedByDefault, true);
+  // Mounted while it was large and never opened: the seeded state is closed.
+  assert.equal(overviewShowsIds(large, false), false);
+
+  // The allow-list widens and the same group drops to the threshold. Its toggle
+  // is gone, so the ids must be listed instead of staying stuck behind the
+  // closed state it was mounted with.
+  const shrunk = buildAllowListOverview(fixture({ openrouter: { hidden: 12, visible: 0 } })).groups[0];
+  assert.equal(shrunk.collapsedByDefault, false);
+  assert.equal(overviewShowsIds(shrunk, false), true);
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(OverviewGroup, { group: shrunk })),
+  );
+  assert.doesNotMatch(html, /allow-list-overview-toggle/);
+  assert.equal([...html.matchAll(/data-testid="allow-list-overview-model"/g)].length, 12);
 });
