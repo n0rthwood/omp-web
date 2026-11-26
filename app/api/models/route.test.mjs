@@ -114,3 +114,91 @@ test("the scoped picker call keeps requiring a project directory", async () => {
   // Only the catalog read (`?all=1`) was made project-less (#144).
   assert.equal((await call("")).status, 403);
 });
+
+// --- #147: per-provider hidden split and per-model hidden verdict ---
+
+const withAllowedRoots = async (run) => {
+  const previous = globalThis.__ompAllowedRootsCache;
+  globalThis.__ompAllowedRootsCache = { roots: new Set([base]), expiresAt: Date.now() + 60_000 };
+  try {
+    return await run();
+  } finally {
+    globalThis.__ompAllowedRootsCache = previous;
+  }
+};
+
+const scopedProject = join(base, "scope-split");
+const allProject = join(base, "scope-all");
+const plainProject = join(base, "scope-none");
+for (const dir of [scopedProject, allProject, plainProject]) mkdirSync(dir);
+
+// The scoped tests run against the real runtime settings with a runtime-only
+// `enabledModels` override, removed again afterwards: `set` persists the
+// pattern to the agent's config file, where the unscoped tests would read it.
+const { overrideOmpSetting } = await jiti.import("../../../lib/omp-setting-access.ts");
+
+const withScopedRuntime = async (run) => {
+  const runtime = await globalThis.__ompRuntimePromise;
+  overrideOmpSetting(runtime.settings, "enabledModels", ["openrouter/**"]);
+  try {
+    return await withAllowedRoots(run);
+  } finally {
+    overrideOmpSetting(runtime.settings, "enabledModels", undefined);
+  }
+};
+
+const json = (query) => call(query).then((res) => res.json());
+
+test("a scoped response reports the per-provider split behind hiddenModelCount", async () => {
+  const data = await withScopedRuntime(() => json(`?cwd=${encodeURIComponent(scopedProject)}`));
+
+  assert.equal(typeof data.hiddenModelCount, "number");
+  assert.ok(data.hiddenModelCount > 0, `expected hidden models, got ${data.hiddenModelCount}`);
+  assert.ok(Array.isArray(data.hiddenByProvider));
+  assert.equal(
+    data.hiddenByProvider.reduce((sum, entry) => sum + entry.hidden, 0),
+    data.hiddenModelCount,
+  );
+  const ordered = [...data.hiddenByProvider]
+    .sort((a, b) => b.hidden - a.hidden || a.provider.localeCompare(b.provider));
+  assert.deepEqual(data.hiddenByProvider, ordered);
+  for (const entry of data.hiddenByProvider) {
+    assert.ok(entry.hidden > 0, `${entry.provider} is listed with nothing hidden`);
+    assert.equal(typeof entry.visible, "number");
+  }
+  // `openrouter/**` admits that provider's whole catalog, so it is not listed.
+  assert.equal(data.hiddenByProvider.some((entry) => entry.provider === "openrouter"), false);
+  // The scoped listing is already filtered: no row carries a verdict.
+  for (const model of data.modelList) assert.equal(Object.hasOwn(model, "hidden"), false);
+  assert.equal(data.hiddenModelCount, modelRegistry.getAvailable().length - data.modelList.length);
+});
+
+test("?all=1 flags every row the scope hides", async () => {
+  const data = await withScopedRuntime(() => json(`?all=1&cwd=${encodeURIComponent(allProject)}`));
+
+  // The catalog read keeps its shape: counts, split and warnings stay out.
+  assert.equal(data.hiddenModelCount, undefined);
+  assert.equal(data.hiddenByProvider, undefined);
+  assert.equal(data.modelScopeWarnings, undefined);
+  assert.deepEqual(data.thinkingLevelPins, {});
+
+  const openrouter = modelRegistry.getAvailable().filter((model) => model.provider === "openrouter");
+  const hidden = data.modelList.filter((model) => model.hidden === true);
+  const visible = data.modelList.filter((model) => model.hidden === false);
+  assert.ok(openrouter.length > 0);
+  assert.equal(visible.length, openrouter.length);
+  assert.ok(hidden.length > 0);
+  assert.equal(hidden.length, data.modelList.length - openrouter.length);
+  for (const model of data.modelList) assert.equal(typeof model.hidden, "boolean");
+});
+
+test("no scope means no count, no split and no per-row verdict", async () => {
+  const scoped = await withAllowedRoots(() => json(`?cwd=${encodeURIComponent(plainProject)}`));
+  assert.equal(scoped.hiddenModelCount, undefined);
+  assert.equal(scoped.hiddenByProvider, undefined);
+
+  const all = await json("?all=1");
+  assert.equal(all.hiddenModelCount, undefined);
+  assert.equal(all.hiddenByProvider, undefined);
+  for (const model of all.modelList) assert.equal(Object.hasOwn(model, "hidden"), false);
+});

@@ -10,7 +10,7 @@ import {
   type ModelHealth,
   type ModelsData,
 } from "@/lib/models-cache";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { hiddenModelKeys, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getOmpSetting } from "@/lib/omp-setting-access";
 import { listModelRoles, readDefaultModelRole } from "@/lib/model-roles";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -66,14 +66,24 @@ async function loadModels(cwd: string | undefined, includeHidden = false): Promi
   // way the CLI does instead of comparing pattern strings literally. The
   // allow-list picker asks for `?all=1`: it must offer every configured model
   // (including ones the current scope hides), otherwise a pattern that would
-  // widen the scope can never be discovered (#140).
-  const scoped = includeHidden
-    ? null
-    : await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
+  // widen the scope can never be discovered (#140); there the scope only flags
+  // which of those rows the allow-list rejects (#147).
+  const scope = await resolveVisibleModels(modelRegistry, getOmpSetting(settings, "enabledModels"), settings);
+  const scoped = includeHidden ? null : scope;
   const visible = scoped ? scoped.visible : modelRegistry.getAvailable();
   const thinkingLevelPins = scoped?.thinkingLevelPins ?? {};
   const warnings = scoped?.warnings ?? [];
-  const modelList = visible.map(toCatalogEntry).sort(compareModelEntries);
+  // Only the unscoped listing carries the per-model verdict: the scoped one is
+  // already filtered, so every row it lists is visible by construction.
+  const hiddenKeys = includeHidden && scope.scopedModels.length > 0
+    ? hiddenModelKeys(visible, scope)
+    : undefined;
+  const modelList = visible
+    .map((model) => ({
+      ...toCatalogEntry(model),
+      ...(hiddenKeys ? { hidden: hiddenKeys.has(`${model.provider}/${model.id}`) } : {}),
+    }))
+    .sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -81,7 +91,7 @@ async function loadModels(cwd: string | undefined, includeHidden = false): Promi
   }
 
   const defaultRole = readDefaultModelRole(settings, visible);
-  const initial = selectInitialModelScope({ visible, scopedModels: scoped?.scopedModels ?? [], thinkingLevelPins, warnings }, {
+  const initial = selectInitialModelScope({ visible, scopedModels: scoped?.scopedModels ?? [], thinkingLevelPins, warnings, hiddenByProvider: scope.hiddenByProvider }, {
     ...(defaultRole ? { defaultModel: defaultRole } : {}),
   });
   if (initial.model) {
@@ -98,6 +108,11 @@ async function loadModels(cwd: string | undefined, includeHidden = false): Promi
   // is in effect, where "0 hidden" would be misleading noise.
   const hiddenModelCount = scoped && scoped.scopedModels.length > 0
     ? modelRegistry.getAvailable().length - visible.length
+    : undefined;
+  // The per-provider split rides with the count: both are absent when no scope
+  // is in effect, and an empty split would read as "nothing hidden" (#147).
+  const hiddenByProvider = hiddenModelCount !== undefined && hiddenModelCount > 0
+    ? scope.hiddenByProvider
     : undefined;
 
   // Per-model credential health for the health bar (#139). Only the models
@@ -122,6 +137,7 @@ async function loadModels(cwd: string | undefined, includeHidden = false): Promi
       thinkingLevelPins,
       roles,
       ...(hiddenModelCount !== undefined ? { hiddenModelCount } : {}),
+      ...(hiddenByProvider ? { hiddenByProvider } : {}),
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
       ...(Object.keys(modelHealth).length > 0 ? { modelHealth } : {}),
     },
