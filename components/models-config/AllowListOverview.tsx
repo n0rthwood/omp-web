@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { providerLabel } from "@/lib/provider-label";
+import { globToRegExp } from "./client-glob";
 import { modelSelector, type ModelOption } from "./types";
 
 /**
@@ -70,12 +71,13 @@ export function buildAllowListOverview(models: readonly ModelOption[], keyword =
     byProvider.set(model.provider, entry);
   }
 
+  const providerIds = new Set(byProvider.keys());
   const groups: AllowListGroup[] = [...byProvider.entries()].map(([provider, entry]) => {
     const hidden = entry.hidden.sort((a, b) => a.localeCompare(b));
     return {
       provider,
       hidden,
-      matches: hidden.filter((selector) => matchesAllowListFilter(selector, needle)),
+      matches: hidden.filter((selector) => matchesAllowListFilter(selector, needle, providerIds)),
       visible: entry.visible,
       total: entry.total,
       collapsedByDefault: hidden.length > COLLAPSE_THRESHOLD,
@@ -111,20 +113,23 @@ export function buildAllowListOverview(models: readonly ModelOption[], keyword =
  * the old substring behaviour; an exact selector is a substring match by
  * definition.
  */
-export function matchesAllowListFilter(selector: string, needle: string): boolean {
+export function matchesAllowListFilter(selector: string, needle: string, providers: ReadonlySet<string>): boolean {
   if (!needle) return true;
+  const lower = selector.toLowerCase();
+  const query = needle.toLowerCase();
   const slash = selector.indexOf("/");
-  const modelId = slash >= 0 ? selector.slice(slash + 1) : selector;
-  // A pattern that names a provider is a statement about that provider only:
-  // `Anthropic/*` must not match a re-sold `openrouter/anthropic/...` row.
-  const provider = slash >= 0 ? selector.slice(0, slash) : undefined;
-  const anchored = provider !== undefined && needle.toLowerCase().startsWith(`${provider.toLowerCase()}/`)
-    ? needle.toLowerCase()
-    : undefined;
-  if (anchored !== undefined) return new Bun.Glob(anchored).match(selector.toLowerCase());
-  const glob = new Bun.Glob(needle);
-  if (glob.match(selector.toLowerCase()) || glob.match(modelId.toLowerCase())) return true;
-  return selector.toLowerCase().includes(needle);
+  const provider = slash >= 0 ? lower.slice(0, slash) : lower;
+  const modelId = slash >= 0 ? lower.slice(slash + 1) : lower;
+  // Browser code: never `Bun.Glob` here — that global does not exist client-side.
+  const glob = globToRegExp(query);
+  // A leading segment that names a listed provider makes the pattern a
+  // statement about that provider only: `Anthropic/*` lists Anthropic rows and
+  // leaves out the same models re-sold as `openrouter/anthropic/...`.
+  const named = /^([^/]+)\//.exec(query)?.[1];
+  if (named !== undefined && providers.has(named)) return provider === named && glob.test(lower);
+  // Bare text or a bare model-id glob: omp's resolver also matches the bare
+  // model id, so keep that; plain text stays a substring match.
+  return glob.test(lower) || glob.test(modelId) || lower.includes(query);
 }
 
 export function AllowListOverview({ models, names }: { models: readonly ModelOption[]; names?: Record<string, string> }) {

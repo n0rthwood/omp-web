@@ -17,6 +17,16 @@ const eslintConfig = [
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  {
+    // `components/**` is browser code ("use client"): the `Bun` global does
+    // not exist there, and referencing it unmounts the whole app at runtime
+    // (#154). Server-side matching lives in `lib/` / `app/`.
+    files: ["components/**/*.{ts,tsx}"],
+    ignores: ["components/**/*.test.{ts,tsx,mjs}"],
+    rules: {
+      "no-restricted-globals": ["error", { name: "Bun", message: "The Bun global is not available in browser code." }],
+    },
+  },
 ];
 
 export default eslintConfig;

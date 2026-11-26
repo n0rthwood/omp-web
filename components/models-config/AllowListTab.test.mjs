@@ -8,6 +8,8 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
@@ -191,6 +193,8 @@ test("a group header shows the provider's display name when one is known", () =>
   assert.match(renderHtml(models), />zhipu-coding-plan</);
 });
 
+const PROVIDERS = new Set(["anthropic", "openrouter"]);
+
 test("the overview filter accepts allow-list globs, anchored to the named provider", () => {
   const models = fixture({ anthropic: { hidden: 2, visible: 0 }, openrouter: { hidden: 2, visible: 0 } });
   models[0].id = "claude-opus-5";
@@ -200,18 +204,68 @@ test("the overview filter accepts allow-list globs, anchored to the named provid
   models[3].provider = "openrouter";
   models[3].id = "anthropic/claude-sonnet-5";
 
-  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/*"), true);
-  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "Anthropic/*"), true);
-  assert.equal(matchesAllowListFilter("openrouter/anthropic/claude-opus-5", "Anthropic/*"), false);
-  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "claude-opus"), true);
-  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/claude-opus-5"), true);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/*", PROVIDERS), true);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "Anthropic/*", PROVIDERS), true);
+  // The same model re-sold by OpenRouter is not an Anthropic row.
+  assert.equal(matchesAllowListFilter("openrouter/anthropic/claude-opus-5", "Anthropic/*", PROVIDERS), false);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "claude-opus", PROVIDERS), true);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/claude-opus-5", PROVIDERS), true);
 
   const narrowed = buildAllowListOverview(models, "Anthropic/*");
   assert.deepEqual(narrowed.groups.find((group) => group.provider === "anthropic")?.matches, [
     "anthropic/claude-opus-5",
     "anthropic/claude-sonnet-5",
   ]);
-  assert.equal(narrowed.matchedTotal, 4);
+  assert.deepEqual(narrowed.groups.find((group) => group.provider === "openrouter")?.matches, []);
+  assert.equal(narrowed.matchedTotal, 2);
+});
+
+test("the browser glob follows omp's allow-list rules: * stays in one segment, ** crosses /, {a,b} alternates", () => {
+  const match = (selector, needle) => matchesAllowListFilter(selector, needle, PROVIDERS);
+  // `*` does not cross a slash; nested ids need `**` — as the panel's hint says.
+  assert.equal(match("openrouter/anthropic/claude-opus-5", "openrouter/*"), false);
+  assert.equal(match("openrouter/anthropic/claude-opus-5", "openrouter/**"), true);
+  // Alternation, e.g. the Claude 5-series entry.
+  const claude5 = "anthropic/claude-{fable,haiku,mythos,opus,sonnet}-5*";
+  assert.equal(match("anthropic/claude-opus-5-5", claude5), true);
+  assert.equal(match("anthropic/claude-haiku-4-5", claude5), false);
+  // Regex metacharacters in an id are literal.
+  const ernie = "openrouter/baidu/ernie-5.5-flash-preview:free";
+  assert.equal(match(ernie, ernie), true);
+  assert.equal(match("openrouter/baidu/ernie-5x5-flash-preview:free", ernie), false);
+});
+
+// Runs the matcher in a runtime without the `Bun` global, the way a browser
+// has none: the #154 crash passed every in-process test because `bun test`
+// provides that global.
+const BUN_FREE_SCRIPT = `
+import { createJiti } from "jiti";
+if (typeof globalThis.Bun !== "undefined") throw new Error("this guard must run where Bun is absent");
+const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
+const { matchesAllowListFilter } = await jiti.import("./components/models-config/AllowListOverview.tsx");
+const providers = new Set(["anthropic", "openrouter"]);
+const checks = [
+  ["anthropic/claude-opus-5", "Anthropic/*", true],
+  ["openrouter/anthropic/claude-opus-5", "Anthropic/*", false],
+  ["openrouter/anthropic/claude-opus-5", "openrouter/anthropic/**", true],
+  ["anthropic/claude-opus-5", "claude", true],
+  ["xai/grok-4.6", "claude", false],
+];
+for (const [selector, needle, expected] of checks) {
+  if (matchesAllowListFilter(selector, needle, providers) !== expected) throw new Error("mismatch: " + needle + " vs " + selector);
+}
+console.log("bun-free-ok");
+`;
+
+test("the filter matcher never needs the Bun global (browser parity)", (t) => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const node = spawnSync("node", ["--input-type=module", "-e", BUN_FREE_SCRIPT], { cwd: root, encoding: "utf8" });
+  if (node.error?.code === "ENOENT") {
+    t.skip("node is not installed");
+    return;
+  }
+  assert.equal(node.status, 0, `node subprocess failed:\n${node.stderr}`);
+  assert.equal(node.stdout.trim(), "bun-free-ok");
 });
 
 test("a provider with no models is absent rather than rendered as an empty group", () => {
