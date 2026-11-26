@@ -5,7 +5,9 @@
  * compact line with each configured provider's brand icon, quota status dot
  * and headline numbers, ending in the time those numbers were measured. Hover
  * a provider for every window, reset time, data time and error; click opens
- * the Models settings modal.
+ * the Models settings modal. The trailing warning icon (#147) carries the
+ * `enabledModels` hidden-model counts and scope warnings that used to occupy a
+ * banner row of their own.
  *
  * Presentational only: the shell owns the poll (hooks/useProviderStatus)
  * because ChatWindow is re-keyed per session, which would restart an in-strip
@@ -27,6 +29,7 @@ import OpenRouterIcon from "@lobehub/icons/es/OpenRouter/components/Mono";
 import ZhipuColorIcon from "@lobehub/icons/es/Zhipu/components/Color";
 import QwenColorIcon from "@lobehub/icons/es/Qwen/components/Color";
 import ZAIIcon from "@lobehub/icons/es/ZAI/components/Mono";
+import { HiddenModelsNotice, hiddenNoticeVisible } from "./HiddenModelsNotice";
 
 type IconComponent = React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
 
@@ -143,10 +146,20 @@ function tooltipText(
   return lines.join("\n");
 }
 
-export function ProviderStatusStrip({ snapshot, onOpenModels }: {
+export function ProviderStatusStrip({ snapshot, onOpenModels, onOpenAllowList, hiddenModelCount, hiddenByProvider, modelScopeWarnings, cwd }: {
   /** Latest poll snapshot; `null` or an empty provider list renders nothing. */
   snapshot: ProviderStatusSnapshot | null;
   onOpenModels: () => void;
+  /** Opens Settings on Models → allow-list (#147); the warning icon's action. */
+  onOpenAllowList: () => void;
+  /** Models the `enabledModels` allow-list hides; `undefined` when no scope is in effect. */
+  hiddenModelCount?: number;
+  /** Per-provider split of `hiddenModelCount`, most hidden first. */
+  hiddenByProvider?: { provider: string; hidden: number; visible: number }[];
+  /** `enabledModels` patterns that matched nothing. */
+  modelScopeWarnings?: string[];
+  /** Session cwd; the icon's lazy id fetch is scoped to it. */
+  cwd?: string | null;
 }) {
   const { t } = useI18n();
   const providers = snapshot?.providers ?? [];
@@ -157,7 +170,9 @@ export function ProviderStatusStrip({ snapshot, onOpenModels }: {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
-  if (providers.length === 0) return null;
+  // A scope can hide models on a provider that has no credential row yet, so the
+  // warning icon outlives an empty provider list.
+  if (providers.length === 0 && !hiddenNoticeVisible(hiddenModelCount, modelScopeWarnings)) return null;
 
   const fetchedAt = snapshot?.fetchedAt ?? null;
   // A report-backed entry carries its own measurement time; everything else
@@ -189,17 +204,7 @@ export function ProviderStatusStrip({ snapshot, onOpenModels }: {
 
   return (
     <div
-      role="button"
-      tabIndex={0}
-      aria-label={t("providerStatus.title")}
       data-testid="provider-status-strip"
-      onClick={onOpenModels}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpenModels();
-        }
-      }}
       style={{
         display: "flex",
         flexWrap: "nowrap",
@@ -210,56 +215,88 @@ export function ProviderStatusStrip({ snapshot, onOpenModels }: {
         minWidth: 0,
         overflow: "hidden",
         whiteSpace: "nowrap",
-        cursor: "pointer",
         fontFamily: "var(--font-mono)",
         fontSize: 10.5,
         color: "var(--text-muted)",
         userSelect: "none",
       }}
     >
-      {providers.map((entry) => {
-        const brand = BRAND_ICONS[entry.id];
-        const text = headline(entry, t);
-        const color = statusColor(entry.status);
-        return (
-          <span
-            key={entry.id}
-            title={tooltipText(entry, entry.recordedAt ?? fetchedAt, t)}
-            style={{ display: "inline-flex", alignItems: "center", gap: 4, flex: "0 1 auto", minWidth: 0 }}
-          >
-            {brand ? (
-              <brand.Icon size={12} style={brand.hasColor ? undefined : { color: "var(--text-muted)", flexShrink: 0 }} />
-            ) : (
-              <span style={{ flexShrink: 0, maxWidth: 72, overflow: "hidden", textOverflow: "ellipsis" }}>{entry.displayName}</span>
-            )}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={t("providerStatus.title")}
+        onClick={onOpenModels}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpenModels();
+          }
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          flex: "1 1 auto",
+          minWidth: 0,
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+          cursor: "pointer",
+        }}
+      >
+        {providers.map((entry) => {
+          const brand = BRAND_ICONS[entry.id];
+          const text = headline(entry, t);
+          const color = statusColor(entry.status);
+          return (
             <span
-              aria-hidden="true"
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: color,
-                flexShrink: 0,
-                boxShadow: `0 0 0 2px color-mix(in srgb, ${color} 15%, transparent)`,
-              }}
-            />
-            {text !== null && (
-              <span className="provider-status-headline" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-                {text}
-              </span>
-            )}
+              key={entry.id}
+              title={tooltipText(entry, entry.recordedAt ?? fetchedAt, t)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, flex: "0 1 auto", minWidth: 0 }}
+            >
+              {brand ? (
+                <brand.Icon size={12} style={brand.hasColor ? undefined : { color: "var(--text-muted)", flexShrink: 0 }} />
+              ) : (
+                <span style={{ flexShrink: 0, maxWidth: 72, overflow: "hidden", textOverflow: "ellipsis" }}>{entry.displayName}</span>
+              )}
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: color,
+                  flexShrink: 0,
+                  boxShadow: `0 0 0 2px color-mix(in srgb, ${color} 15%, transparent)`,
+                }}
+              />
+              {text !== null && (
+                <span className="provider-status-headline" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {text}
+                </span>
+              )}
+            </span>
+          );
+        })}
+        {dataTimeLabel !== null && (
+          <span
+            data-testid="provider-status-data-time"
+            title={dataTimeTitle}
+            style={{ flexShrink: 0, marginLeft: "auto", color: "var(--text-dim)" }}
+          >
+            {t("providerStatus.dataTime", { time: dataTimeLabel })}
           </span>
-        );
-      })}
-      {dataTimeLabel !== null && (
-        <span
-          data-testid="provider-status-data-time"
-          title={dataTimeTitle}
-          style={{ flexShrink: 0, marginLeft: "auto", color: "var(--text-dim)" }}
-        >
-          {t("providerStatus.dataTime", { time: dataTimeLabel })}
-        </span>
-      )}
+        )}
+      </div>
+      {/* The notice never shrinks and sits last, so the provider region above
+          absorbs the squeeze and the icon stays visible at 390px. */}
+      <HiddenModelsNotice
+        hiddenModelCount={hiddenModelCount}
+        hiddenByProvider={hiddenByProvider}
+        warnings={modelScopeWarnings}
+        cwd={cwd}
+        displayName={(provider) => providers.find((entry) => entry.id === provider)?.displayName ?? provider}
+        onOpenAllowList={onOpenAllowList}
+      />
     </div>
   );
 }

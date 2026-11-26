@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages, buildImageAttachErrorMessage, resolveImageMimeType } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages, buildImageAttachErrorMessage, resolveImageMimeType } = await jiti.import("./ChatInput.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
 const draftStore = await jiti.import("../lib/draft-store.ts");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
@@ -34,18 +34,6 @@ test("renders the upstream model error", () => {
 
 test("does not render an empty model error", () => {
   assert.equal(renderToStaticMarkup(React.createElement(ModelErrorBanner, { error: null })), "");
-});
-
-test("renders enabledModels scope warnings", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ModelScopeWarningBanner, {
-      warnings: ['No models match pattern "ghost-gateway/*"'],
-    }),
-  );
-
-  assert.match(html, /Model scope warning/);
-  assert.match(html, /ghost-gateway/);
-  assert.equal(renderToStaticMarkup(React.createElement(ModelScopeWarningBanner, { warnings: [] })), "");
 });
 
 test("keeps the model selector visible when a model error leaves no options", () => {

@@ -51,12 +51,12 @@ function codex(overrides = {}) {
   };
 }
 
-function render(snapshot) {
+function render(snapshot, extra = {}) {
   return renderToStaticMarkup(
     React.createElement(
       I18nProvider,
       null,
-      React.createElement(ProviderStatusStrip, { snapshot, onOpenModels: () => {} }),
+      React.createElement(ProviderStatusStrip, { snapshot, onOpenModels: () => {}, onOpenAllowList: () => {}, ...extra }),
     ),
   );
 }
@@ -135,11 +135,65 @@ test("every strip string is translated in both locales", () => {
     "providerStatus.errorLine", "providerStatus.absent", "providerStatus.dataAt",
     "providerStatus.dataTime", "providerStatus.ageMinutes", "providerStatus.ageHours",
     "providerStatus.nextPoll", "providerStatus.pending",
+    "providerStatus.hiddenIcon", "providerStatus.hiddenTitle", "providerStatus.hiddenTotal",
+    "providerStatus.hiddenProviderCounts", "providerStatus.hiddenMore",
+    "providerStatus.hiddenAction", "providerStatus.hiddenWarningsTitle",
   ]) {
     assert.equal(typeof enLocale.messages[key], "string", `en missing ${key}`);
     assert.equal(typeof zhCNLocale.messages[key], "string", `zh-CN missing ${key}`);
     assert.notEqual(enLocale.messages[key], zhCNLocale.messages[key], `${key} is untranslated`);
   }
+});
+
+// ── T6 hidden-model warning icon (#147) ──────────────────────────────────────
+
+const withCodex = (extra) => render({ fetchedAt: Date.now(), nextPollAt: null, providers: [codex()] }, extra);
+
+test("no warning icon without hidden models and without scope warnings", () => {
+  assert.doesNotMatch(withCodex({}), /providerStatus\.hiddenIcon|hiddenIcon/);
+  assert.doesNotMatch(withCodex({ hiddenModelCount: 0 }), /aria-label="Models hidden/);
+  assert.doesNotMatch(withCodex({ modelScopeWarnings: [] }), /aria-label="Models hidden/);
+});
+
+test("the warning icon appears when models are hidden", () => {
+  const html = withCodex({ hiddenModelCount: 696 });
+  assert.match(html, /<button[^>]*aria-label="Models hidden by the enabledModels allow-list"/);
+  assert.match(html, /aria-expanded="false"/);
+});
+
+test("the warning icon appears when only a scope warning exists", () => {
+  const html = withCodex({ modelScopeWarnings: ['No models match pattern "ghost/*"'] });
+  assert.match(html, /aria-label="Models hidden by the enabledModels allow-list"/);
+});
+
+test("the icon is a real button outside the row's own button region", () => {
+  const html = withCodex({ hiddenModelCount: 5 });
+  // The row is a plain container; only the provider region carries the row's
+  // open action, so a click on the icon can never reach it.
+  const rowOpen = html.indexOf('role="button"');
+  const icon = html.indexOf('aria-label="Models hidden by the enabledModels allow-list"');
+  assert.ok(rowOpen > 0 && icon > rowOpen, "the icon follows the provider region");
+  assert.match(html, /data-testid="provider-status-strip"[^>]*style="[^"]*white-space:nowrap/);
+  // The icon is a sibling of the provider region, not nested inside it.
+  const regionEnd = html.indexOf('data-testid="provider-status-data-time"');
+  assert.ok(regionEnd > rowOpen && regionEnd < icon, "the icon sits after the provider region closes");
+  assert.match(html, /<button[^>]*type="button"[^>]*aria-expanded="false"/);
+});
+
+test("the icon never shrinks and the provider region absorbs the squeeze", () => {
+  const html = withCodex({ hiddenModelCount: 5 });
+  const iconAt = html.indexOf('aria-label="Models hidden by the enabledModels allow-list"');
+  // The icon's wrapper is the last child of the row and is pinned at its size,
+  // so the provider region (flex:1 1 auto, min-width:0) is what gives way.
+  assert.match(html.slice(iconAt - 200, iconAt), /flex-shrink:0;display:inline-flex;align-items:center/);
+  const rowEnd = html.indexOf("</div>", iconAt);
+  assert.ok(rowEnd > iconAt, "the icon closes the row");
+});
+
+test("the icon still renders when no provider row exists", () => {
+  const html = render({ fetchedAt: Date.now(), nextPollAt: null, providers: [] }, { hiddenModelCount: 12 });
+  assert.match(html, /aria-label="Models hidden by the enabledModels allow-list"/);
+  assert.doesNotMatch(html, /provider-status-headline/);
 });
 
 // ── T5 mount points ─────────────────────────────────────────────────────────

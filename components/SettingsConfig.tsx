@@ -40,6 +40,8 @@ interface SettingsConfigProps {
   sessionId: string | null;
   initialSection?: SettingsSection;
   initialPromptView?: PromptWorkspaceView;
+  /** Which Models tab to open on (#147); defaults to `roles`. */
+  initialModelsTab?: "roles" | "allowList";
   onClose: () => void;
   onModelsChanged?: () => void;
   onReloaded?: () => void;
@@ -201,7 +203,7 @@ function ThemePreview({ palette }: { palette: WebThemePalette }) {
   );
 }
 
-export function SettingsConfig({ cwd, sessionId, initialSection = "models", initialPromptView = "defaults", onClose, onModelsChanged, onReloaded }: SettingsConfigProps) {
+export function SettingsConfig({ cwd, sessionId, initialSection = "models", initialPromptView = "defaults", initialModelsTab, onClose, onModelsChanged, onReloaded }: SettingsConfigProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const promptPanel = useRef<PromptsConfigHandle>(null);
   const { t } = useI18n();
@@ -410,7 +412,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
         <main className={styles.content}>
           {visibleCoreSections.length === 0 ? (
             <div className={styles.empty}>{t("settings.empty")}</div>
-          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "static-content" ? <StaticContentConfig /> : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
+          ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded initialTab={initialModelsTab} onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "static-content" ? <StaticContentConfig /> : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
         </main>
         <button type="button" className={styles.resizeHandle} {...resizeHandleProps}>
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
