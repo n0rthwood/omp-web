@@ -118,16 +118,16 @@ test("a provider missing from the summary is appended with its own counts", () =
 test("a large group is capped and the overflow is counted", () => {
   const ids = Array.from({ length: 629 }, (_, index) => `openrouter/model-${index}`);
   const { shown, overflow } = capHiddenIds(ids);
-  assert.equal(HIDDEN_IDS_CAP, 30);
-  assert.equal(shown.length, 30);
+  assert.equal(HIDDEN_IDS_CAP, 8);
+  assert.equal(shown.length, 8);
   assert.equal(shown[0], "openrouter/model-0");
-  assert.equal(overflow, 599);
+  assert.equal(overflow, 621);
 });
 
-test("a small group lists every id with no overflow", () => {
-  const ids = Array.from({ length: 22 }, (_, index) => `anthropic/claude-${index}`);
+test("a group at the cap lists every id with no overflow", () => {
+  const ids = Array.from({ length: HIDDEN_IDS_CAP }, (_, index) => `anthropic/claude-${index}`);
   const { shown, overflow } = capHiddenIds(ids);
-  assert.equal(shown.length, 22);
+  assert.equal(shown.length, HIDDEN_IDS_CAP);
   assert.equal(overflow, 0);
 });
 
@@ -151,9 +151,9 @@ test("the popover lists providers in order with their counts and ids", () => {
 test("the popover states the overflow of a capped group in words", () => {
   const ids = Array.from({ length: 629 }, (_, index) => `openrouter/model-${index}`);
   const html = popover({ groups: [{ provider: "openrouter", hidden: 629, visible: 7, ids }] });
-  assert.match(html, /599 more/);
+  assert.match(html, /621 more/);
   assert.match(html, /openrouter\/model-0/);
-  assert.doesNotMatch(html, /openrouter\/model-30/);
+  assert.doesNotMatch(html, /openrouter\/model-8/);
 });
 
 test("a known provider is named and an unknown one stays the raw id", () => {
@@ -243,4 +243,12 @@ test("the popover stays inside a viewport too short for either side", () => {
   );
   assert.ok(placed.top >= 8);
   assert.ok(placed.top + 700 <= 500 || placed.top === 8, "clamped to the top margin");
+});
+
+test("a popover that fits neither above nor below stands beside the icon", () => {
+  const anchor = { left: 1244, right: 1260, top: 642, bottom: 668 };
+  const placed = placePopover(anchor, { width: 360, height: 779 }, { width: 1280, height: 800 });
+  assert.ok(placed.top >= 8 && placed.top + 779 <= 800, "inside the viewport");
+  // The icon must stay uncovered, or a click on it can never reach the button.
+  assert.ok(placed.left + 360 <= anchor.left, `popover right ${placed.left + 360} <= icon left ${anchor.left}`);
 });

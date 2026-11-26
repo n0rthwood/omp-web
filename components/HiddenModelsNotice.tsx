@@ -23,8 +23,18 @@ import { apiPath } from "@/lib/api-path";
 import type { ModelCatalogEntry } from "@/lib/models-cache";
 import { providerLabel } from "@/lib/provider-label";
 
-/** Ids listed per provider before the rest is stated in words. */
-export const HIDDEN_IDS_CAP = 30;
+/**
+ * Ids listed per provider before the rest is stated in words.
+ *
+ * Measured in the browser with the gateway-shaped fixture (629/37/22/8 hidden):
+ * the popover's fixed content (title, total, four provider rows, action) is
+ * ~211px and every id line is 16.5px, so the 30-id default came to 1714px and
+ * scrolled inside a 560px box at 1280×800. Eight ids per provider put the
+ * default popover at 778px, inside the 784px an 800px viewport allows and far
+ * inside 1080px, with no scrollbar; `max-height` below is the fallback for
+ * viewports shorter than that.
+ */
+export const HIDDEN_IDS_CAP = 8;
 
 /** How long the pointer may take to travel from the icon into the popover. */
 const CLOSE_DELAY_MS = 180;
@@ -86,8 +96,12 @@ export interface PopoverAnchor {
 }
 
 /**
- * Anchors the popover under the icon, clamped inside the viewport and flipped
- * above the icon when it would overflow the bottom edge.
+ * Anchors the popover under the icon, clamped inside the viewport, flipped
+ * above the icon when it would overflow the bottom edge, and — when it fits
+ * neither above nor below — stood beside the icon.
+ *
+ * The last case matters: a popover tall enough to be clamped to the viewport
+ * would cover the icon it belongs to, and a covered icon cannot be clicked.
  */
 export function placePopover(
   anchor: PopoverAnchor,
@@ -97,14 +111,17 @@ export function placePopover(
 ): { top: number; left: number } {
   const margin = 8;
   const maxLeft = Math.max(margin, viewport.width - size.width - margin);
-  const left = Math.min(Math.max(anchor.left, margin), maxLeft);
+  const clampLeft = (value: number) => Math.min(Math.max(value, margin), maxLeft);
   const below = anchor.bottom + gap;
-  let top = below;
-  if (below + size.height > viewport.height - margin) {
-    const above = anchor.top - gap - size.height;
-    top = above >= margin ? above : Math.max(margin, viewport.height - size.height - margin);
-  }
-  return { top, left };
+  if (below + size.height <= viewport.height - margin) return { top: below, left: clampLeft(anchor.left) };
+  const above = anchor.top - gap - size.height;
+  if (above >= margin) return { top: above, left: clampLeft(anchor.left) };
+  const besideLeft = anchor.left - size.width - gap;
+  const maxTop = Math.max(margin, viewport.height - size.height - margin);
+  return {
+    top: Math.min(Math.max(anchor.top - size.height / 2, margin), maxTop),
+    left: clampLeft(besideLeft >= margin ? besideLeft : anchor.right + gap),
+  };
 }
 
 interface PopoverProps {
@@ -364,11 +381,13 @@ export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warning
             top: position?.top ?? 0,
             left: position?.left ?? 0,
             visibility: position === null ? "hidden" : "visible",
-            zIndex: 300,
+            zIndex: 400,
             minWidth: 260,
             maxWidth: 360,
-            maxHeight: "70vh",
+            maxHeight: "calc(100vh - 16px)",
             overflowY: "auto",
+            scrollbarWidth: "thin",
+            scrollbarColor: "var(--border) transparent",
             padding: "8px 10px",
             border: "1px solid rgba(234,179,8,0.35)",
             borderRadius: 6,
