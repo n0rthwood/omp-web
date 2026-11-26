@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { changedModelFields, toModelDefinition } from "./model-override";
 import { HealthBadge } from "./HealthBadge";
@@ -55,6 +55,17 @@ function thinkingLabel(row: ModelRow, none: string): string {
 }
 
 /**
+ * #155: the provider table narrows as you type — a case-insensitive substring
+ * test against the model id and the display name, nothing cleverer. An empty
+ * query is the unfiltered list.
+ */
+export function filterProviderModelRows(rows: readonly ModelRow[], filter: string): ModelRow[] {
+  const needle = filter.trim().toLowerCase();
+  if (!needle) return [...rows];
+  return rows.filter((row) => row.id.toLowerCase().includes(needle) || (row.entry.name ?? "").toLowerCase().includes(needle));
+}
+
+/**
  * The lower half of the provider detail: every model this provider serves,
  * with inline modality toggles, a per-row edit drawer, and the entry that
  * appends a custom definition.
@@ -64,7 +75,7 @@ function thinkingLabel(row: ModelRow, none: string): string {
  * `models.yml` definition is rewritten in place. Either way there is exactly
  * one models.yml write path, the panel's own Save button.
  */
-export function ProviderModelTable({ providerName, rows, health, canAddModel, addModelBlockedReason, loggedOut, onUpdateModel, onOverrideModel, onCreateModel }: {
+export function ProviderModelTable({ providerName, rows, health, canAddModel, addModelBlockedReason, loggedOut, filter: filterProp, onFilterChange, onUpdateModel, onOverrideModel, onCreateModel }: {
   providerName: string;
   rows: readonly ModelRow[];
   health?: ModelHealthMap;
@@ -75,12 +86,22 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
   /** An OAuth provider with neither a login nor a key (`providerLoggedOut`): every row is dimmed — the catalog still lists them, but nothing can run. */
   loggedOut?: boolean;
   onUpdateModel: (index: number, model: ModelEntry) => void;
+  /** Controlled filter text (#155); the table keeps its own state when omitted. */
+  filter?: string;
+  /** Reports filter edits when the text is controlled from outside. */
+  onFilterChange?: (value: string) => void;
   onOverrideModel: (modelId: string, changed: ModelOverridePatch) => void;
   onCreateModel: (model: ModelEntry) => void;
 }) {
   const { t } = useI18n();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const filterInput = useRef<HTMLInputElement>(null);
+  const [internalFilter, setInternalFilter] = useState("");
+  const filter = filterProp ?? internalFilter;
+  const setFilter = onFilterChange ?? setInternalFilter;
+  const filtering = filter.trim() !== "";
+  const visibleRows = filterProviderModelRows(rows, filter);
 
   // A definition is rewritten in place; a catalog row becomes a sparse override.
   const writeEntry = (row: ModelRow, next: ModelEntry) => {
@@ -89,6 +110,34 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
   };
 
   return (
+    <>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border)" }}>
+      <input
+        ref={filterInput}
+        type="text"
+        data-testid="provider-model-filter"
+        aria-label={t("models.filterModels")}
+        placeholder={t("models.filterModelsPlaceholder")}
+        value={filter}
+        onChange={(event) => setFilter(event.target.value)}
+        style={{ flex: "1 1 auto", minWidth: 0, padding: "3px 8px", height: 24, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 11.5 }}
+      />
+      {filter !== "" && (
+        <button
+          type="button"
+          data-testid="provider-model-filter-clear"
+          aria-label={t("models.filterClear")}
+          title={t("models.filterClear")}
+          onClick={() => { setFilter(""); filterInput.current?.focus(); }}
+          style={{ padding: "0 6px", height: 24, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", fontSize: 12, lineHeight: 1 }}
+        >
+          ×
+        </button>
+      )}
+      <span data-testid="provider-model-filter-count" style={{ flex: "0 0 auto", color: "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap" }}>
+        {t("models.filterMatchCount", { matched: visibleRows.length, total: rows.length })}
+      </span>
+    </div>
     <div className="model-table-scroll" style={{ border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
         <thead>
@@ -101,14 +150,21 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 && !adding && (
+          {rows.length === 0 && !adding && !filtering && (
             <tr>
               <td colSpan={9} style={{ padding: 12, color: "var(--text-dim)", fontSize: 12 }}>
                 {t("models.noModels")}
               </td>
             </tr>
           )}
-          {rows.map((row) => {
+          {filtering && visibleRows.length === 0 && (
+            <tr data-testid="provider-model-filter-empty">
+              <td colSpan={9} style={{ padding: 12, color: "var(--text-dim)", fontSize: 12 }}>
+                {t("models.filterNoMatches", { query: filter.trim() })}
+              </td>
+            </tr>
+          )}
+          {visibleRows.map((row) => {
             const editing = editingId === row.id;
             const modelHealth = health?.[modelHealthKey(providerName, row.id)];
             // Mockup `tr.dim`: a model nothing can run right now is greyed as a whole row.
@@ -183,5 +239,6 @@ export function ProviderModelTable({ providerName, rows, health, canAddModel, ad
         </button>
       </div>
     </div>
+  </>
   );
 }
