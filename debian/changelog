@@ -7,6 +7,9 @@ omp-web (0.5.51) jammy; urgency=medium
     browser-safe matcher, and a provider-anchored pattern such as
     `Anthropic/*` lists that provider only instead of also matching the same
     models re-sold through OpenRouter.
+    The filter understands the full `enabledModels` glob syntax (`[5-9]`,
+    `?`, nested `{a,b}`, whole-segment `**`), pinned against `Bun.Glob`, so
+    a pattern pasted from the allow-list selects the same rows as the server.
 
  -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 18:10:00 +0000
 
