@@ -1,3 +1,14 @@
+omp-web (0.5.53) jammy; urgency=medium
+
+  * Static content: published HTML pages can now run their own same-origin
+    JavaScript. The document CSP moved script-src, script-src-attr and
+    script-src-elem from 'none' to 'self'; connect-src stays 'none' so a
+    published page cannot phone home from the browser. The server only serves
+    these bytes as static files and never executes anything under the mapping
+    root. Updated the static-content skill doc to match.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 20:45:00 +0000
+
 omp-web (0.5.52) jammy; urgency=medium
 
   * Typing in the hidden-models overview filter no longer crashes the page
