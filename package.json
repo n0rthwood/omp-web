@@ -96,6 +96,7 @@
   },
   "patchedDependencies": {
     "@oh-my-pi/pi-coding-agent@18.10.4": "patches/@oh-my-pi%2Fpi-coding-agent@18.10.4.patch",
-    "@oh-my-pi/pi-tui@18.10.4": "patches/@oh-my-pi%2Fpi-tui@18.10.4.patch"
+    "@oh-my-pi/pi-tui@18.10.4": "patches/@oh-my-pi%2Fpi-tui@18.10.4.patch",
+    "@oh-my-pi/pi-catalog@18.10.4": "patches/@oh-my-pi%2Fpi-catalog@18.10.4.patch"
   }
 }
