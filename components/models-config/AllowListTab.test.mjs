@@ -13,7 +13,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AllowListOverview, OverviewGroup, buildAllowListOverview, overviewShowsIds, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
+const { AllowListOverview, OverviewGroup, buildAllowListOverview, overviewShowsIds, matchesAllowListFilter, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
 const { I18nProvider } = await jiti.import("../../hooks/useI18n.tsx");
 
 /** `{ provider: { hidden, visible } }` → a `?all=1`-shaped `modelList`. */
@@ -189,4 +189,32 @@ test("a group header shows the provider's display name when one is known", () =>
 
   // Without a name source the raw id is the label.
   assert.match(renderHtml(models), />zhipu-coding-plan</);
+});
+
+test("the overview filter accepts allow-list globs, anchored to the named provider", () => {
+  const models = fixture({ anthropic: { hidden: 2, visible: 0 }, openrouter: { hidden: 2, visible: 0 } });
+  models[0].id = "claude-opus-5";
+  models[1].id = "claude-sonnet-5";
+  models[2].provider = "openrouter";
+  models[2].id = "anthropic/claude-opus-5";
+  models[3].provider = "openrouter";
+  models[3].id = "anthropic/claude-sonnet-5";
+
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/*"), true);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "Anthropic/*"), true);
+  assert.equal(matchesAllowListFilter("openrouter/anthropic/claude-opus-5", "Anthropic/*"), false);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "claude-opus"), true);
+  assert.equal(matchesAllowListFilter("anthropic/claude-opus-5", "anthropic/claude-opus-5"), true);
+
+  const narrowed = buildAllowListOverview(models, "Anthropic/*");
+  assert.deepEqual(narrowed.groups.find((group) => group.provider === "anthropic")?.matches, [
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+  ]);
+  assert.equal(narrowed.matchedTotal, 4);
+});
+
+test("a provider with no models is absent rather than rendered as an empty group", () => {
+  const html = renderHtml([{ id: "placeholder", name: "placeholder", provider: "unused-provider", hidden: false }]);
+  assert.doesNotMatch(html, /data-provider="bailian-token-plan"/);
 });
