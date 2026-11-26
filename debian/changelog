@@ -1,4 +1,4 @@
-omp-web (0.5.51) jammy; urgency=medium
+omp-web (0.5.52) jammy; urgency=medium
 
   * Typing in the hidden-models overview filter no longer crashes the page
     (#154). 0.5.50 matched allow-list globs with `Bun.Glob`, a global that
@@ -11,9 +11,9 @@ omp-web (0.5.51) jammy; urgency=medium
     `?`, nested `{a,b}`, whole-segment `**`), pinned against `Bun.Glob`, so
     a pattern pasted from the allow-list selects the same rows as the server.
 
- -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 18:10:00 +0000
+  * Provider model table: real-time substring filter — typing “free”, “sonnet” or any model id/name fragment narrows the list (#155).
 
-omp-web (0.5.50) jammy; urgency=medium
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 19:55:00 +0000
 
   * GPT-6.2 models from the Codex subscription are listed and callable
     (#153). The bundled SDK advertised Codex client 0.159.0, which OpenAI
