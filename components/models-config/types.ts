@@ -116,11 +116,19 @@ export interface ModelsHealthResponse {
   disabledModelCount: number;
 }
 
-/** One selectable model, as the roles/allow-list pickers consume them. */
+/**
+ * One selectable model, as the roles/allow-list pickers consume them.
+ *
+ * `hidden` is the allow-list verdict for this model, as set by the unscoped
+ * listing (`GET /api/models?all=1`): `true` when the current `enabledModels`
+ * scope hides it. A remote on an older release omits the field entirely, which
+ * is the signal to render no allow-list overview at all (#147).
+ */
 export interface ModelOption extends ModelCatalogFields {
   id: string;
   name: string;
   provider: string;
+  hidden?: boolean;
 }
 
 /** One provider's refresh, as the panel tracks it. */
