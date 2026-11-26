@@ -26,13 +26,14 @@ import { providerLabel } from "@/lib/provider-label";
 /**
  * Ids listed per provider before the rest is stated in words.
  *
- * Measured in the browser with the gateway-shaped fixture (629/37/22/8 hidden):
- * the popover's fixed content (title, total, four provider rows, action) is
- * ~211px and every id line is 16.5px, so the 30-id default came to 1714px and
- * scrolled inside a 560px box at 1280×800. Eight ids per provider put the
- * default popover at 778px, inside the 784px an 800px viewport allows and far
- * inside 1080px, with no scrollbar; `max-height` below is the fallback for
- * viewports shorter than that.
+ * Measured in the browser with the gateway-shaped fixture (629/37/22/8 hidden,
+ * long real-world ids such as `anthropic/claude-fable-latest`): the fixed
+ * content (title, total, four provider rows, three overflow lines, action,
+ * padding) is ~250px and a text line is 16.5px. The ids render as one wrapped
+ * inline flow, so eight ids per provider cost a few lines each instead of eight
+ * — 1714px with the old one-id-per-line list at cap 30, ~430px now, which sits
+ * above the icon at 1280×800 and 1920×1080. `max-height` below is the fallback
+ * for viewports shorter than that.
  */
 export const HIDDEN_IDS_CAP = 8;
 
@@ -163,11 +164,11 @@ export function HiddenModelsPopover({ hiddenModelCount, groups, warnings, counts
               </span>
             </div>
             {shown.length > 0 && (
-              <ul style={{ margin: "2px 0 0", paddingLeft: 16, color: "var(--text-muted)" }}>
-                {shown.map((id) => (
-                  <li key={id} style={{ overflowWrap: "anywhere" }}>{id}</li>
+              <div data-testid="hidden-model-ids" style={{ margin: "2px 0 0", color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+                {shown.map((id, index) => (
+                  <span key={id} data-testid="hidden-model-id">{index > 0 ? " · " : ""}{id}</span>
                 ))}
-              </ul>
+              </div>
             )}
             {overflow > 0 && <div style={{ color: "var(--text-dim)" }}>{t("providerStatus.hiddenMore", { count: overflow })}</div>}
           </div>
@@ -383,7 +384,7 @@ export function HiddenModelsNotice({ hiddenModelCount, hiddenByProvider, warning
             visibility: position === null ? "hidden" : "visible",
             zIndex: 400,
             minWidth: 260,
-            maxWidth: 360,
+            maxWidth: "min(520px, calc(100vw - 16px))",
             maxHeight: "calc(100vh - 16px)",
             overflowY: "auto",
             scrollbarWidth: "thin",
