@@ -16,8 +16,10 @@
  *   (heuristic: equal `GET /api/v1/credits` total_credits + total_usage),
  *   counted once per account, then summed across distinct accounts.
  * - Presence-only entries for configured providers without a usage probe
- *   (zhipu-coding-plan, alibaba-coding-plan, …): green dot = credential rows
- *   exist. ZERO upstream requests for these.
+ *   (alibaba-coding-plan, …): green dot = credential rows exist. ZERO
+ *   upstream requests for these. Providers whose upstream the SDK supports
+ *   under another id get a real probe through the runtime override registry
+ *   (lib/usage-providers.ts — zhipu-coding-plan → the ZAI monitor API).
  *
  * Cycle spacing: base 30min + uniform random 0–300s, recomputed EVERY cycle
  * (owner decision). `OMP_WEB_PROVIDER_POLL_MS` overrides the base for tests.

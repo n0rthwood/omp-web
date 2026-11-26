@@ -5,6 +5,7 @@ import {
   Settings,
 } from "@oh-my-pi/pi-coding-agent";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import { installUsageProviderOverrides } from "./usage-providers";
 
 /**
  * Process-wide omp services.
@@ -33,6 +34,11 @@ async function createRuntime(): Promise<OmpRuntime> {
   const agentDir = getAgentDir();
   const settings = await Settings.init({ agentDir });
   const authStorage = await discoverAuthStorage(agentDir);
+  // Usage probes for providers whose upstream the SDK knows under another id
+  // (zhipu-coding-plan → the ZAI monitor API). Installed before anything can
+  // read the runtime so the status poller and health scans see them; a rebuild
+  // after invalidateOmpRuntime() reinstalls them.
+  installUsageProviderOverrides(authStorage);
   // Pinning the registry to this exact AuthStorage keeps credential_disabled
   // events flowing to the same instance the routes read from.
   const modelRegistry = new ModelRegistry(authStorage);
