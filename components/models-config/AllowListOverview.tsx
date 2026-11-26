@@ -144,7 +144,7 @@ export function AllowListOverview({ models }: { models: readonly ModelOption[] }
   );
 }
 
-function OverviewGroup({ group }: { group: AllowListGroup }) {
+export function OverviewGroup({ group }: { group: AllowListGroup }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(!group.collapsedByDefault);
   const nothingHidden = group.hidden.length === 0;

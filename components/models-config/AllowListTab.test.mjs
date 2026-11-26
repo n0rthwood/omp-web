@@ -13,7 +13,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AllowListOverview, buildAllowListOverview, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
+const { AllowListOverview, OverviewGroup, buildAllowListOverview, COLLAPSE_THRESHOLD } = await jiti.import("./AllowListOverview.tsx");
 const { I18nProvider } = await jiti.import("../../hooks/useI18n.tsx");
 
 /** `{ provider: { hidden, visible } }` → a `?all=1`-shaped `modelList`. */
@@ -37,7 +37,8 @@ function renderHtml(models) {
 }
 
 test("no per-model verdict (older remote) renders no overview at all", () => {
-  const models = fixture({ openrouter: { hidden: 0, visible: 3 } }).map(({ hidden, ...rest }) => rest);
+  const models = fixture({ openrouter: { hidden: 0, visible: 3 } })
+    .map((model) => ({ id: model.id, name: model.name, provider: model.provider }));
   const data = buildAllowListOverview(models);
   assert.equal(data.hasVerdicts, false);
   assert.deepEqual(data.groups, []);
@@ -73,7 +74,7 @@ test("providers with hidden models come first, most hidden first, then by name",
 test("each group counts hidden and visible models and sorts its hidden ids", () => {
   const data = buildAllowListOverview(fixture({
     anthropic: { hidden: 2, visible: 7 },
-    xai: { hidden: 0, visible: 0 },
+    xai: { hidden: 0, visible: 2 },
   }));
   const anthropic = data.groups.find((group) => group.provider === "anthropic");
   assert.equal(anthropic.hidden.length, 2);
@@ -82,7 +83,7 @@ test("each group counts hidden and visible models and sorts its hidden ids", () 
   assert.deepEqual(anthropic.hidden, ["anthropic/anthropic-h0", "anthropic/anthropic-h1"]);
   const xai = data.groups.find((group) => group.provider === "xai");
   assert.equal(xai.hidden.length, 0);
-  assert.equal(xai.visible, 0);
+  assert.equal(xai.visible, 2);
 });
 
 test("a provider with nothing hidden is a compact row: name and visible count only", () => {
@@ -90,7 +91,7 @@ test("a provider with nothing hidden is a compact row: name and visible count on
   const row = html.slice(html.indexOf('data-provider="zhipu-coding-plan"'));
   const compact = row.slice(0, row.indexOf("</div>", row.indexOf("data-visible")));
   assert.match(compact, /18 visible/);
-  assert.doesNotMatch(compact, /hidden/);
+  assert.doesNotMatch(compact, />0 hidden</);
   assert.doesNotMatch(compact, /allow-list-overview-model/);
   assert.doesNotMatch(compact, /allow-list-overview-toggle/);
 });
@@ -133,4 +134,13 @@ test("the summary line states the configured total and the hidden total", () => 
   const html = renderHtml(fixture({ openrouter: { hidden: 629, visible: 7 }, joyai: { hidden: 0, visible: 2 } }));
   assert.match(html, /638 models configured, 629 hidden by the allow-list/);
   assert.match(html, /data-testid="allow-list-overview"/);
+});
+
+test("an expanded large group lists every hidden id", () => {
+  const group = buildAllowListOverview(fixture({ openrouter: { hidden: 629, visible: 7 } })).groups[0];
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(OverviewGroup, { group: { ...group, collapsedByDefault: false } })),
+  );
+  assert.equal([...html.matchAll(/data-testid="allow-list-overview-model"/g)].length, 629);
+  assert.match(html, /openrouter\/openrouter-h628/);
 });
