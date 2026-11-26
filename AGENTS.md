@@ -573,6 +573,7 @@ lib/
   session-title.ts     thin wrapper over omp's own title generator
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
+  usage-providers.ts   runtime usage-probe registry (zhipu-coding-plan → SDK ZAI API; alibaba-token-plan → local `bl` CLI)
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts          project/worktree resolution and git worktree operations
 
