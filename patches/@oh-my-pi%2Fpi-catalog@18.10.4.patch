@@ -1,0 +1,13 @@
+diff --git a/src/wire/codex.ts b/src/wire/codex.ts
+index d15a39ccac84c0a326935df4796ea20a788a5ca0..439668be651a718dcf10bed6637fe9c3dd85fc55 100644
+--- a/src/wire/codex.ts
++++ b/src/wire/codex.ts
+@@ -31,7 +31,7 @@ export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
+  * omitted from `/models` at 0.155.1 and listed at 0.159.0. An older pin
+  * silently hides newer SKUs from discovery.
+  */
+-export const CODEX_CLIENT_VERSION = "0.159.0";
++export const CODEX_CLIENT_VERSION = "0.169.0";
+ 
+ export const OPENAI_HEADERS = {
+ 	BETA: "OpenAI-Beta",
