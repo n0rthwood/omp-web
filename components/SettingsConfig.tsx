@@ -25,6 +25,13 @@ import type {
   WebThemePalette,
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
+import { useResizableModal } from "@/hooks/useResizableModal";
+import {
+  SETTINGS_WINDOW_DEFAULT_HEIGHT,
+  SETTINGS_WINDOW_DEFAULT_WIDTH,
+} from "@/lib/panel-layout";
+
+const SETTINGS_WINDOW_SIZE_STORAGE_KEY = "omp-settings-window-size";
 
 type SettingsSection = "models" | "prompts" | "themes" | "skills" | "plugins" | "mcp" | "users" | "machines" | "static-content" | `settings:${string}`;
 
@@ -38,16 +45,16 @@ interface SettingsConfigProps {
   onReloaded?: () => void;
 }
 
-const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean; requiresAdmin?: boolean }> = [
-  { id: "models", label: "Models", icon: "model", requiresAdmin: true },
-  { id: "prompts", label: "Prompts", icon: "context", requiresAdmin: true },
-  { id: "themes", label: "Themes", icon: "theme", requiresAdmin: true },
-  { id: "static-content", label: "Static content", icon: "static-content" },
-  { id: "skills", label: "Skills", icon: "skill", requiresCwd: true, requiresAdmin: true },
-  { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
-  { id: "mcp", label: "MCP", icon: "mcp", requiresAdmin: true },
-  { id: "users", label: "Users", icon: "user", requiresAdmin: true },
-  { id: "machines", label: "Machines", icon: "machine", requiresAdmin: true },
+const CORE_SECTIONS: Array<{ id: SettingsSection; labelKey: string; icon: string; requiresCwd?: boolean; requiresAdmin?: boolean }> = [
+  { id: "models", labelKey: "settings.sectionModels", icon: "model", requiresAdmin: true },
+  { id: "prompts", labelKey: "settings.sectionPrompts", icon: "context", requiresAdmin: true },
+  { id: "themes", labelKey: "settings.sectionThemes", icon: "theme", requiresAdmin: true },
+  { id: "static-content", labelKey: "settings.sectionStaticContent", icon: "static-content" },
+  { id: "skills", labelKey: "settings.sectionSkills", icon: "skill", requiresCwd: true, requiresAdmin: true },
+  { id: "plugins", labelKey: "settings.sectionPlugins", icon: "plugin", requiresCwd: true, requiresAdmin: true },
+  { id: "mcp", labelKey: "settings.sectionMcp", icon: "mcp", requiresAdmin: true },
+  { id: "users", labelKey: "settings.sectionUsers", icon: "user", requiresAdmin: true },
+  { id: "machines", labelKey: "settings.sectionMachines", icon: "machine", requiresAdmin: true },
 ];
 
 const ICON_PATHS: Record<string, React.ReactNode> = {
@@ -209,6 +216,13 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
   const [loggingOut, setLoggingOut] = useState(false);
   const { theme, toggleTheme } = useTheme();
   const { user: webUser } = useWebUser();
+  // #146: the dialog is user-resizable so the provider model table fits
+  // without horizontal scrolling; the size is a per-browser preference.
+  const { size, isResizing, handleProps: resizeHandleProps } = useResizableModal({
+    storageKey: SETTINGS_WINDOW_SIZE_STORAGE_KEY,
+    defaultSize: { width: SETTINGS_WINDOW_DEFAULT_WIDTH, height: SETTINGS_WINDOW_DEFAULT_HEIGHT },
+    label: t("settings.resizeWindow"),
+  });
   // Fail closed: admin-only sections stay hidden until web-me confirms the role.
   const isAdminUser = webUser?.role === "admin";
   const visibleCoreSections = CORE_SECTIONS.filter((item) => !item.requiresAdmin || isAdminUser);
@@ -307,7 +321,7 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
     }
   }, [onReloaded, sessionId]);
   const selectedTab = settings?.tabs.find((tab) => tab.id === activeTab);
-  const pageTitle = query.trim() ? `Search · ${filteredFields.length}` : selectedTab?.label ?? "Settings";
+  const pageTitle = query.trim() ? t("settings.searchResults", { count: filteredFields.length }) : selectedTab?.label ?? t("settings.title");
 
   const renderFields = (fields: SettingsField[], groups: string[]) => {
     const orderedGroups = [...groups, ...fields.map((field) => field.group ?? "General").filter((group) => !groups.includes(group))];
@@ -319,10 +333,10 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
   };
 
   const renderThemeSection = () => {
-    if (!settings) return <div className={styles.empty}>{loading ? "Loading themes…" : loadError ?? "Themes unavailable"}</div>;
+    if (!settings) return <div className={styles.empty}>{loading ? t("settings.themesLoading") : loadError ?? t("settings.themesUnavailable")}</div>;
     return (
       <div className={styles.scrollContent}>
-        <header className={styles.contentHeader}><h2 className={styles.contentTitle}>Themes</h2><p className={styles.contentDescription}>The web interface uses the same dark and light theme mappings as omp. Changes are persisted to <code>~/.omp/agent/config.yml</code> and applied here immediately.</p></header>
+        <header className={styles.contentHeader}><h2 className={styles.contentTitle}>{t("settings.sectionThemes")}</h2><p className={styles.contentDescription}>The web interface uses the same dark and light theme mappings as omp. Changes are persisted to <code>~/.omp/agent/config.yml</code> and applied here immediately.</p></header>
         <div className={styles.settingsBody}>
           <div className={styles.themeGrid}>{(["dark", "light"] as const).map((mode) => {
             const field = settings.fields.find((item) => item.path === `theme.${mode}`)!;
@@ -370,32 +384,39 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", init
 
   return (
     <div className={styles.backdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
-      <div className={styles.window} role="dialog" aria-modal="true" aria-label="Settings">
+      <div className={styles.window} role="dialog" aria-modal="true" aria-label={t("settings.title")}
+        data-resizing={isResizing ? "true" : undefined}
+        style={{ width: size.width, height: size.height }}>
         <aside className={styles.sidebar}>
-          <div className={styles.brand}><div className={styles.eyebrow}>omp /settings</div><h1 className={styles.title}>Settings</h1><code className={styles.context} title={cwd ?? "Global configuration"}>{cwd ?? "Global configuration"}</code></div>
-          {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => { const value = event.target.value; navigateSettings(() => setQuery(value)); }} /></div>}
+          <div className={styles.brand}><div className={styles.eyebrow}>{t("settings.eyebrow")}</div><h1 className={styles.title}>{t("settings.title")}</h1><code className={styles.context} title={cwd ?? t("settings.globalConfig")}>{cwd ?? t("settings.globalConfig")}</code></div>
+          {isAdminUser && <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder={t("settings.searchPlaceholder")} onChange={(event) => { const value = event.target.value; navigateSettings(() => setQuery(value)); }} /></div>}
           <nav className={styles.nav}>
-            <div className={styles.navLabel}>Configuration</div>
-            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? `${item.label} requires a project` : item.label} onClick={() => navigateSettings(() => { setQuery(""); setSection(item.id); })}><SettingsIcon kind={item.icon}/><span>{item.id === "prompts" ? t("prompts.title") : item.id === "static-content" ? t("staticContent.title") : item.label}</span></button>)}
+            <div className={styles.navLabel}>{t("settings.configuration")}</div>
+            {visibleCoreSections.map((item) => <button key={item.id} type="button" className={styles.navButton} data-active={!query && activeSection === item.id} disabled={item.requiresCwd && !cwd} title={item.requiresCwd && !cwd ? t("settings.requiresProject", { label: t(item.labelKey) }) : t(item.labelKey)} onClick={() => navigateSettings(() => { setQuery(""); setSection(item.id); })}><SettingsIcon kind={item.icon}/><span>{t(item.labelKey)}</span></button>)}
             {isAdminUser && settings && (<>
-              <div className={styles.navLabel}>OMP settings</div>
+              <div className={styles.navLabel}>{t("settings.ompSettings")}</div>
               {settings.tabs.map((tab) => <button key={tab.id} type="button" className={styles.navButton} data-active={!query && activeTab === tab.id} onClick={() => navigateSettings(() => { setQuery(""); setSection(`settings:${tab.id}`); })}><SettingsIcon kind={tab.id}/><span>{tab.label}</span></button>)}
             </>)}
           </nav>
           <div className={styles.closeRail}>
             {webUser && webUser.username !== "__anonymous" && (
               <button type="button" className={styles.closeButton} style={{ marginBottom: 6 }} disabled={loggingOut} onClick={() => void handleLogout()}>
-                <span>{loggingOut ? "Logging out…" : `Log out ${webUser.username}`}</span>
+                <span>{loggingOut ? t("settings.loggingOut") : t("settings.logout", { user: webUser.username })}</span>
               </button>
             )}
-            <button type="button" className={styles.closeButton} onClick={close}><span>Close settings</span><span aria-hidden="true">×</span></button>
+            <button type="button" className={styles.closeButton} onClick={close}><span>{t("settings.close")}</span><span aria-hidden="true">×</span></button>
           </div>
         </aside>
         <main className={styles.content}>
           {visibleCoreSections.length === 0 ? (
-            <div className={styles.empty}>No settings are available for this user.</div>
+            <div className={styles.empty}>{t("settings.empty")}</div>
           ) : query.trim() ? renderGenericSettings() : activeSection === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : activeSection === "prompts" ? <PromptsConfig ref={promptPanel} cwd={cwd} sessionId={sessionId} initialView={initialPromptView} /> : activeSection === "themes" ? renderThemeSection() : activeSection === "static-content" ? <StaticContentConfig /> : activeSection === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : activeSection === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : activeSection === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : activeSection === "users" ? <WebUsersConfig /> : activeSection === "machines" ? <MachinesConfig /> : renderGenericSettings()}
         </main>
+        <button type="button" className={styles.resizeHandle} {...resizeHandleProps}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
+            <path d="M10 2 2 10M10 6l-4 4" />
+          </svg>
+        </button>
       </div>
     </div>
   );

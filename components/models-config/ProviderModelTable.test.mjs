@@ -38,6 +38,42 @@ function render(props = {}) {
     .map((match) => ({ id: match[1], attrs: match[2] }));
 }
 
+function renderHtml(props = {}) {
+  return renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ProviderModelTable, {
+        providerName: "anthropic",
+        rows: ROWS,
+        canAddModel: false,
+        onUpdateModel: () => {},
+        onOverrideModel: () => {},
+        onCreateModel: () => {},
+        ...props,
+      }),
+    ),
+  );
+}
+
+test("the table scrolls horizontally inside a styled scrollbar box", () => {
+  const html = renderHtml();
+  assert.match(html, /class="model-table-scroll"/);
+  assert.match(html, /overflow-x:auto/);
+  assert.doesNotMatch(html, /class="model-table-scroll"[^>]*overflow:hidden/);
+});
+
+test("catalog costs are rounded and zero stays 0", () => {
+  const html = renderHtml({
+    rows: [{ id: "m", source: "catalog", configIndex: null, entry: { id: "m", cost: { input: 0.45499999999999996, output: 1.8199999999999998 } } }],
+  });
+  assert.ok(html.includes("0.455 / 1.82"), html.slice(html.indexOf("0.455") - 80, html.indexOf("0.455") + 40));
+  assert.doesNotMatch(html, /0\.45499999999999996/);
+  assert.doesNotMatch(html, /1\.8199999999999998/);
+  const zero = renderHtml({ rows: [{ id: "z", source: "catalog", configIndex: null, entry: { id: "z", cost: { input: 0, output: 0 } } }] });
+  assert.ok(zero.includes("0 / 0"));
+});
+
 test("an OAuth provider with no login dims every row", () => {
   const rows = render({ loggedOut: true });
   assert.equal(rows.length, 2);

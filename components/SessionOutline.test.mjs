@@ -470,3 +470,24 @@ test("#137 multi-job spawn rows expand to a per-job list with live status and du
   assert.match(html, />✗</, "a job without a live snapshot keeps its parsed status");
   assert.match(html, /data-testid="outline-back"/);
 });
+
+// #146: a tool-only row that reaches the panel without its `toolNames` list
+// (journal rebuild, older host payload) still localizes its bare id preview.
+const { outlinePreviewText } = await import("./SessionOutline.tsx");
+const { translateMessage } = await import("../lib/i18n/format.ts");
+const messages = { en: enLocale.messages, "zh-CN": zhCNLocale.messages };
+const zhT = (key, params) => translateMessage("zh-CN", key, messages, params);
+const enT = (key, params) => translateMessage("en", key, messages, params);
+
+test("#146 localizes tool-only row titles without toolNames", () => {
+  assert.equal(outlinePreviewText({ role: "subagent", preview: "task" }, zhT), "任务");
+  assert.equal(outlinePreviewText({ role: "subagent", preview: "todo, task" }, zhT), "待办列表, 任务");
+  assert.equal(outlinePreviewText({ role: "tool", preview: "read, +3 more" }, zhT), "读取, 另有 3 个");
+  assert.equal(outlinePreviewText({ role: "tool", preview: "write, bash", toolNames: ["write", "bash"] }, zhT), "写入, 命令行");
+  assert.equal(outlinePreviewText({ role: "tool", preview: "write", toolNames: ["write"] }, enT), "write");
+});
+
+test("#146 prose previews are never treated as tool ids", () => {
+  assert.equal(outlinePreviewText({ role: "assistant", preview: "我先看看代码" }, zhT), "我先看看代码");
+  assert.equal(outlinePreviewText({ role: "assistant", preview: "read the file" }, zhT), "read the file");
+});

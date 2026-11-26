@@ -16,6 +16,14 @@ export const SIDEBAR_DRAWER_DEFAULT_WIDTH = 580;
 export const SIDEBAR_DRAWER_MAX_WIDTH = 780;
 
 export const RIGHT_PANEL_FALLBACK_WIDTH = 560;
+
+// Settings dialog (#146): the window is user-resizable and its collapsed
+// provider tree is a narrow icon rail, so a nine-column model table fits
+// without horizontal scrolling on a 1280px viewport.
+export const SETTINGS_WINDOW_DEFAULT_WIDTH = 1244;
+export const SETTINGS_WINDOW_DEFAULT_HEIGHT = 864;
+export const SETTINGS_WINDOW_MIN_WIDTH = 760;
+export const SETTINGS_WINDOW_MIN_HEIGHT = 520;
 export const RIGHT_PANEL_MIN_WIDTH = 300;
 export const RIGHT_PANEL_MAX_WIDTH = 1200;
 
