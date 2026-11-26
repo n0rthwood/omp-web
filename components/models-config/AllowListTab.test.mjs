@@ -149,17 +149,32 @@ test("a group that shrank to the threshold lists its ids even when it was mounte
   const large = buildAllowListOverview(fixture({ openrouter: { hidden: 13, visible: 0 } })).groups[0];
   assert.equal(large.collapsedByDefault, true);
   // Mounted while it was large and never opened: the seeded state is closed.
-  assert.equal(overviewShowsIds(large, false), false);
+  assert.equal(overviewShowsIds(large, false, false), false);
 
   // The allow-list widens and the same group drops to the threshold. Its toggle
   // is gone, so the ids must be listed instead of staying stuck behind the
   // closed state it was mounted with.
   const shrunk = buildAllowListOverview(fixture({ openrouter: { hidden: 12, visible: 0 } })).groups[0];
   assert.equal(shrunk.collapsedByDefault, false);
-  assert.equal(overviewShowsIds(shrunk, false), true);
+  assert.equal(overviewShowsIds(shrunk, false, false), true);
   const html = renderToStaticMarkup(
     React.createElement(I18nProvider, null, React.createElement(OverviewGroup, { group: shrunk })),
   );
   assert.doesNotMatch(html, /allow-list-overview-toggle/);
   assert.equal([...html.matchAll(/data-testid="allow-list-overview-model"/g)].length, 12);
+});
+
+test("a filter shows a collapsed group's matches and drops its toggle", () => {
+  const group = buildAllowListOverview(fixture({ openrouter: { hidden: 13, visible: 0 } })).groups[0];
+  const narrowed = { ...group, matches: group.matches.filter((selector) => selector.endsWith("-h1")) };
+  assert.deepEqual(narrowed.matches, ["openrouter/openrouter-h1"]);
+  assert.equal(overviewShowsIds(narrowed, false, false), false);
+  assert.equal(overviewShowsIds(narrowed, true, false), true);
+
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(OverviewGroup, { group: narrowed, filterActive: true })),
+  );
+  assert.equal([...html.matchAll(/data-testid="allow-list-overview-model"/g)].length, 1);
+  assert.match(html, /openrouter\/openrouter-h1</);
+  assert.doesNotMatch(html, /allow-list-overview-toggle/);
 });

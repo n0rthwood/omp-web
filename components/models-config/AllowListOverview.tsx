@@ -138,7 +138,7 @@ export function AllowListOverview({ models }: { models: readonly ModelOption[] }
       )}
 
       {data.groups.map((group) => (
-        <OverviewGroup key={group.provider} group={group} />
+        <OverviewGroup key={group.provider} group={group} filterActive={filter.trim().length > 0} />
       ))}
     </section>
   );
@@ -146,20 +146,23 @@ export function AllowListOverview({ models }: { models: readonly ModelOption[] }
 
 /**
  * Whether a group lists its hidden ids. The collapse rule of `OverviewGroup`,
- * pure so the "shrank below the threshold" case is testable without a DOM (#147).
+ * pure so the "shrank below the threshold" and "filter is active" cases are
+ * testable without a DOM (#147).
  *
  * A group that is not collapsed-by-default always lists its models: the toggle
  * only exists above the threshold, so a group that dropped to the threshold or
- * below must not stay stuck closed with no way to open it.
+ * below must not stay stuck closed with no way to open it. A filter shows its
+ * matches whatever the collapsed state is.
  */
-export function overviewShowsIds(group: AllowListGroup, expanded: boolean): boolean {
-  return group.matches.length > 0 && (!group.collapsedByDefault || expanded);
+export function overviewShowsIds(group: AllowListGroup, filterActive: boolean, expanded: boolean): boolean {
+  return group.matches.length > 0 && (filterActive || !group.collapsedByDefault || expanded);
 }
 
-export function OverviewGroup({ group }: { group: AllowListGroup }) {
+export function OverviewGroup({ group, filterActive = false }: { group: AllowListGroup; filterActive?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(!group.collapsedByDefault);
   const nothingHidden = group.hidden.length === 0;
+  const collapsible = group.collapsedByDefault && !filterActive;
 
   return (
     <div
@@ -177,7 +180,7 @@ export function OverviewGroup({ group }: { group: AllowListGroup }) {
             <span style={{ fontSize: 11, color: "var(--warning, #e3b341)" }}>{t("models.allowListOverviewHidden", { count: group.hidden.length })}</span>
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("models.allowListOverviewVisible", { count: group.visible })}</span>
             <span style={{ flex: 1 }} />
-            {group.collapsedByDefault && (
+            {collapsible && (
               <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}
                 data-testid="allow-list-overview-toggle"
                 style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 999, padding: "2px 9px", fontSize: 11, color: "var(--text-muted)", cursor: "pointer" }}>
@@ -188,7 +191,7 @@ export function OverviewGroup({ group }: { group: AllowListGroup }) {
         )}
       </div>
 
-      {!nothingHidden && overviewShowsIds(group, expanded) && (
+      {!nothingHidden && overviewShowsIds(group, filterActive, expanded) && (
         <ul style={{ margin: 0, padding: "0 12px 8px 12px", listStyle: "none" }}>
           {group.matches.map((selector) => (
             <li key={selector} data-testid="allow-list-overview-model"
