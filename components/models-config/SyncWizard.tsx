@@ -234,7 +234,7 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
             data-testid="sync-diff"
             data-machine={machineId}
             data-status={pushed?.status}
-            style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}
+            style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", flexShrink: 0 }}
           >
             <div style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "6px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
               <span style={{ fontSize: 12.5, fontWeight: 650, color: "var(--text)" }}>{machine?.name ?? machineId}</span>
