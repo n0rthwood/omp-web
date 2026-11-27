@@ -72,6 +72,18 @@ export function shouldEnterPlanModeOnStartupWeb(
 }
 
 /**
+ * Startup mode for a brand-new chat, before any prompt exists: the composer
+ * must show the mode the host will really start in, so the answer is derived
+ * from the same settings the session host reads (issue #161).
+ */
+export function planModeStartupInfo(defaultOnStartup: boolean, available: boolean): WebPlanModeInfo {
+  if (defaultOnStartup && available) {
+    return { enabled: true, planFilePath: WEB_DEFAULT_PLAN_FILE_URL, available };
+  }
+  return { enabled: false, available };
+}
+
+/**
  * Reconstruct plan-mode state from a session's journal entries — the last
  * `mode_change` entry wins. This is the same contract the TUI persists
  * (`InteractiveMode.#enterPlanMode` appends `mode: "plan"` with the plan file

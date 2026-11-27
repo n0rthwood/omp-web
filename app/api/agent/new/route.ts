@@ -8,6 +8,7 @@ import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getWebUserOrSynthetic } from "@/lib/web-auth-context";
+import type { WebPlanModeInfo } from "@/lib/plan-mode-web";
 import { isAdmin, isPathVisible } from "@/lib/web-visibility";
 // omp owns the selector grammar (including abbreviations like "med"); reuse its
 // parser so the browser and the CLI accept exactly the same values.
@@ -103,6 +104,7 @@ export async function POST(req: Request) {
     const state = await session.send({ type: "get_state" }) as {
       model?: { id: string; provider: string };
       thinkingLevel?: string;
+      planMode?: WebPlanModeInfo | null;
     };
 
     if (promptCommand.type === "ensure_session") {
@@ -114,6 +116,9 @@ export async function POST(req: Request) {
           ? { provider: state.model.provider, modelId: state.model.id }
           : null,
         thinkingLevel: state.thinkingLevel,
+        // The host may enter plan mode while creating the session; the client
+        // needs that mode before the first prompt (issue #161).
+        planMode: state.planMode ?? null,
       });
     }
 
@@ -128,6 +133,7 @@ export async function POST(req: Request) {
         ? { provider: state.model.provider, modelId: state.model.id }
         : null,
       thinkingLevel: state.thinkingLevel,
+      planMode: state.planMode ?? null,
     });
   } catch (error) {
     return NextResponse.json({
