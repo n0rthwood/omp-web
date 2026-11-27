@@ -478,11 +478,16 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           ))}
         </div>
 
-        {/* `flex: 1` + `minHeight: 0` are what make this the scroll region: a
-            column flex child defaults to `min-height: auto`, so it grows to its
-            content height, the dialog's `max-height` clips it, and `overflow-y:
-            auto` never has anything to scroll. Cards keep their natural height
-            (they set `flexShrink: 0`) and the body scrolls instead. */}
+        {/* The body is the dialog's scroll region, stated explicitly: `flex: 1`
+            sizes it to the space left by the header and footer, and
+            `minHeight: 0` keeps that true if the body ever stops being a
+            scroll container (a flex item's automatic minimum size is only 0
+            *because* `overflow-y` is not `visible`).
+            Each card sets `flexShrink: 0`, so cards render at their natural
+            height and the body scrolls instead of compressing them — with the
+            default `flex-shrink: 1` every card collapses (`overflow: hidden`
+            then hides the diff rows) and the body has nothing to scroll
+            (measured on 0.5.59: 78px rendered for 250px of content). */}
         <div
           data-testid="sync-body"
           style={{
