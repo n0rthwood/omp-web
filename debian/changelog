@@ -1,3 +1,14 @@
+omp-web (0.5.56) jammy; urgency=medium
+
+  * Static content CSP: restore missing style-src and worker-src
+    directives that were accidentally dropped in 0.5.55. Without
+    style-src, browsers fall back to default-src 'none' and block
+    inline <style> tags, breaking rendering of published static HTML
+    pages. style-src is now 'self' 'unsafe-inline' so inline styles
+    work; connect-src stays 'none'.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 22:30:00 +0000
+
 omp-web (0.5.55) jammy; urgency=medium
 
   * Static content links: inline-code /static/<machine>/<mapping>/… references
