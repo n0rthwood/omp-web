@@ -189,6 +189,11 @@ origin and use its normal auth/session path.
   trailing slash) serves `index.html`, falling back to `index.htm`; if neither
   exists it is 404. Directories are never listed. The Gateway applies the same
   behavior when forwarding to a remote machine.
+- Any other asset path resolves like a plain static server: the exact file
+  first, then `<path>.html` / `<path>.htm` when the request has no extension,
+  then `<path>/index.html` / `<path>/index.htm`. `.../en` therefore serves
+  `en/index.html` and `.../en#customers` is a valid in-page deep link; missing
+  paths stay 404 and directories are never listed.
 
 Generated HTML, SVG, and XML documents are served with a CSP that allows
 same-origin scripts (`script-src 'self'`), so published pages can run their

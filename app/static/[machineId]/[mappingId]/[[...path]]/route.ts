@@ -23,7 +23,8 @@ function encodedPathSegment(segment: string): string {
 export async function GET(request: Request, context: RouteContext) {
   const { machineId, mappingId, path: rawPath } = await context.params;
   // A bare mapping URL (`/static/<machine>/<mapping>`) carries no catch-all
-  // segments; it resolves to index.html/index.htm in the shared resolver.
+  // segments; it resolves to index.html/index.htm in the shared resolver, and
+  // any other path falls back to `.html`/`.htm`/`<dir>/index.*` there too.
   const path = rawPath ?? [];
   const local = isLocalStaticMachineId(machineId);
   const denied = await requireMachineGrant(

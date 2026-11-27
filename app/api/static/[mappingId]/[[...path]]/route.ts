@@ -12,6 +12,7 @@ export async function GET(request: Request, context: RouteContext) {
   const { mappingId, path } = await context.params;
   const denied = await requireMachineGrant(request, LOCAL_STATIC_MACHINE_ID, `/api/static/${mappingId}`);
   if (denied) return denied;
-  // A bare mapping URL resolves to index.html/index.htm in the shared resolver.
+  // A bare mapping URL resolves to index.html/index.htm in the shared resolver,
+  // which also applies the `.html`/`.htm`/`<dir>/index.*` fallbacks.
   return serveStaticMappingFile(request, mappingId, path ?? []);
 }

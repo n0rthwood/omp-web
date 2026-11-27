@@ -170,10 +170,32 @@ export function validateStaticAssetSegments(segments: readonly string[]): void {
 }
 
 /**
- * Fixed index fallback order for a bare mapping URL (`/static/<machine>/<mapping>`).
- * Only these two names are ever tried; a directory is never listed.
+ * Fixed index names tried for a bare mapping URL (`/static/<machine>/<mapping>`)
+ * and for a directory path (`/static/<machine>/<mapping>/en`). Only these two
+ * names are ever tried; a directory is never listed.
  */
 const INDEX_FILE_SEGMENTS: readonly string[][] = [["index.html"], ["index.htm"]];
+
+const HTML_EXTENSION_SUFFIXES = [".html", ".htm"] as const;
+
+/**
+ * Ordered candidate paths for one requested asset path, matching what a plain
+ * static server does: the exact file, then the same name with a `.html`/`.htm`
+ * suffix when the request has no extension, then `<path>/index.html` and
+ * `<path>/index.htm`. The first candidate that is a real regular file inside
+ * the mapping root wins.
+ */
+function staticPathCandidates(segments: readonly string[]): readonly string[][] {
+  if (segments.length === 0) return INDEX_FILE_SEGMENTS;
+  const last = segments[segments.length - 1] as string;
+  const parent = segments.slice(0, -1);
+  const candidates: string[][] = [[...segments]];
+  if (!last.includes(".")) {
+    for (const suffix of HTML_EXTENSION_SUFFIXES) candidates.push([...parent, `${last}${suffix}`]);
+  }
+  for (const indexSegments of INDEX_FILE_SEGMENTS) candidates.push([...segments, ...indexSegments]);
+  return candidates;
+}
 
 function normalizeEntryFile(input: unknown): string {
   if (input === undefined) return "index.html";
@@ -685,9 +707,11 @@ export function revokeStaticMapping(id: string, content: "delete" | "retain" = "
 /**
  * Resolve an existing file while enforcing registered active state, realpath
  * containment, and symlink rejection. This is the only fs path resolver used
- * by the internal and public static routes. An empty segment list (a bare
- * mapping URL) resolves to index.html, then index.htm; if neither exists it
- * resolves to null (404). Directories are never listed.
+ * by the internal and public static routes. A bare mapping URL resolves to
+ * index.html, then index.htm; any other path resolves to the exact file, then
+ * `<path>.html` / `<path>.htm` when it carries no extension, then
+ * `<path>/index.html` / `<path>/index.htm`. If nothing matches it resolves to
+ * null (404). Directories are never listed.
  */
 export function resolveStaticMappingFile(
   id: string,
@@ -717,7 +741,7 @@ export function resolveStaticMappingFile(
   }
   const rootRel = relative(realStaticRoot, realRoot);
   if (rootRel.startsWith("..") || isAbsolute(rootRel) || rootRel === "") return null;
-  const candidates = segments.length > 0 ? [segments] : INDEX_FILE_SEGMENTS;
+  const candidates = staticPathCandidates(segments);
   for (const candidate of candidates) {
     const requested = resolve(root, ...candidate);
     if (!requested.startsWith(`${root}/`)) continue;

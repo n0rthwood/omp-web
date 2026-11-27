@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createJiti } from "jiti";
@@ -126,7 +126,7 @@ test("a granted user can read local static content without a project grant", asy
     params({ machineId: "joysort187", mappingId: "local-report", path: ["index.html"] }),
   );
   assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+  assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
 
   // The same row is NOT discoverable through the project-filtered management
   // list — discovery and direct serving are different boundaries.
@@ -160,7 +160,7 @@ test("a machine-granted user streams remote static bytes without forwarding brow
       params({ machineId: "gpu-1", mappingId: "remote-report", path: ["index.html"] }),
     );
     assert.equal(response.status, 200);
-    assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+    assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "http://gpu-1.local/api/static/remote-report/index.html");
     const outbound = new Headers(calls[0].init.headers);
@@ -199,7 +199,7 @@ test("a bare mapping URL serves index.html first and never lists the directory",
   assert.equal(response.status, 200);
   assert.equal(await response.text(), "<h1>html wins</h1>");
   assert.match(response.headers.get("content-type"), /text\/html/);
-  assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+  assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
 
   // Explicit asset paths keep their exact behavior.
   const explicit = await route.GET(
@@ -257,6 +257,43 @@ test("a bare mapping URL with neither index file is 404 without a directory list
   assert.ok(!body.includes("notes.txt"), "no directory listing may be exposed");
 });
 
+test("a directory path serves its index file with document CSP", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const { mappings } = await loadLibs();
+  const mapping = mappings.createStaticMapping({ id: "dir-html", lifecycle: "persistent", projectRoot: "/opt/projects/main" });
+  const root = mappings.getStaticMappingRoot(mapping.id);
+  mkdirSync(join(root, "en"), { recursive: true });
+  writeFileSync(join(root, "en", "index.html"), "<h1>en page</h1><h2 id=\"customers\">customers</h2>");
+  writeFileSync(join(root, "report.html"), "<h1>report</h1>");
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+
+  const directory = await route.GET(
+    request("/static/joysort187/dir-html/en", cookie),
+    params({ machineId: "joysort187", mappingId: "dir-html", path: ["en"] }),
+  );
+  assert.equal(directory.status, 200);
+  assert.match(directory.headers.get("content-type"), /text\/html/);
+  assert.match(directory.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.match(await directory.text(), /id="customers"/);
+
+  const extensionless = await route.GET(
+    request("/static/joysort187/dir-html/report", cookie),
+    params({ machineId: "joysort187", mappingId: "dir-html", path: ["report"] }),
+  );
+  assert.equal(extensionless.status, 200);
+  assert.equal(await extensionless.text(), "<h1>report</h1>");
+
+  const missing = await route.GET(
+    request("/static/joysort187/dir-html/en/missing", cookie),
+    params({ machineId: "joysort187", mappingId: "dir-html", path: ["en", "missing"] }),
+  );
+  assert.equal(missing.status, 404);
+});
+
 test("a bare remote mapping URL forwards the bare internal path and passes a remote 404 through", async (t) => {
   t.after(restoreEnv);
   const dir = setup();
@@ -280,7 +317,7 @@ test("a bare remote mapping URL forwards the bare internal path and passes a rem
     );
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "<h1>remote index</h1>");
-    assert.match(response.headers.get("content-security-policy"), /script-src 'none'/);
+    assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "http://gpu-1.local/api/static/remote-bare");
     const outbound = new Headers(calls[0].init.headers);

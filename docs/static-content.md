@@ -141,6 +141,13 @@ unauthenticated endpoint.
   exists it is 404. Directories are never listed. The Gateway forwards the
   bare internal path (`GET /api/static/:mappingId`) so remote machines apply
   the same index fallback and 404 behavior.
+- Any other asset path resolves like a plain static server: the exact file
+  first, then `<path>.html` and `<path>.htm` when the request has no
+  extension, then `<path>/index.html` and `<path>/index.htm`. So
+  `/static/<machine>/<mapping>/en` serves `en/index.html`, `.../en/#customers`
+  is a stable deep link, and `/static/<machine>/<mapping>/report` serves
+  `report.html` without the caller typing the extension. Missing paths stay
+  404; directories are never listed.
 
 Generated HTML, SVG, and XML document responses carry a restrictive CSP:
 inline/external scripts and network connections are disabled, while same-origin
