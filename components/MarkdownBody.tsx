@@ -37,6 +37,22 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       }
       const resolved = onOpenFile ? resolveMarkdownPathCandidate(raw.trim(), cwd) : null;
       if (resolved && onOpenFile) {
+        // Static content URLs (/static/...) are served over HTTP, never as
+        // local filesystem paths. Render them as ordinary anchor links that
+        // open in a new tab, instead of routing through the file sidebar.
+        if (resolved.filePath.startsWith("/static/")) {
+          delete props.node;
+          return (
+            <a
+              href={resolved.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="chat-path-link"
+            >
+              {children}
+            </a>
+          );
+        }
         delete props.node;
         return (
           <code
