@@ -1,3 +1,18 @@
+omp-web (0.5.58) jammy; urgency=medium
+
+  * Static mappings: any asset path now resolves like a plain static
+    server — the exact file first, then `<path>.html`/`<path>.htm` when
+    the request carries no extension, then `<path>/index.html` and
+    `<path>/index.htm` (#157). A directory URL such as
+    `/static/<machine>/<id>/en` serves `en/index.html`, so in-page deep
+    links like `.../en#customers` work; missing paths stay 404 and
+    directories are never listed. Containment, realpath and symlink
+    rejection still run per candidate.
+  * Route tests: CSP assertions realigned with the 0.5.53 relaxation
+    (`script-src 'self'`), which had left the static route test file red.
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 27 Nov 2026 15:10:00 +0000
+
 omp-web (0.5.57) jammy; urgency=medium
 
   * Sidebar: compact project and conversation rows following the outline
