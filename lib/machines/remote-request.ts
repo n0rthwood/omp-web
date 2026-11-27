@@ -29,6 +29,9 @@ const PASSTHROUGH_RESPONSE_HEADERS: Record<string, true> = {
   "content-range": true,
   "accept-ranges": true,
   "content-disposition": true,
+  // Static content canonicalizes directory URLs by redirecting to the index
+  // document; dropping Location would turn that redirect into a body-less 302.
+  "location": true,
   "etag": true,
   "last-modified": true,
   "cache-control": true,

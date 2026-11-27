@@ -185,15 +185,18 @@ origin and use its normal auth/session path.
 - `GET /static/:machineId/:mappingId/:asset...` serves the authenticated
   origin-relative public path; registered remote IDs stream bytes through the
   Gateway without forwarding browser cookies or authorization headers.
-- A bare mapping URL (`GET /static/:machineId/:mappingId`, with or without a
-  trailing slash) serves `index.html`, falling back to `index.htm`; if neither
-  exists it is 404. Directories are never listed. The Gateway applies the same
-  behavior when forwarding to a remote machine.
+- A bare mapping URL and a directory path both `302` to the index document they
+  resolve to (`index.html`, then `index.htm`; `.../en` → `.../en/index.html`).
+  A directory URL is not a document URL: relative references such as
+  `../assets/site.css` resolve against the page's own URL, and Next normalizes
+  the trailing slash away, so a directory URL loses a level and every
+  stylesheet, script and image 404s. The redirect target is the canonical URL,
+  and the fragment survives it (`.../en#customers` still hits the anchor).
 - Any other asset path resolves like a plain static server: the exact file
   first, then `<path>.html` / `<path>.htm` when the request has no extension,
-  then `<path>/index.html` / `<path>/index.htm`. `.../en` therefore serves
-  `en/index.html` and `.../en#customers` is a valid in-page deep link; missing
-  paths stay 404 and directories are never listed.
+  then `<path>/index.html` / `<path>/index.htm`. An extension-less asset is
+  served directly — its base directory is unchanged. Missing paths stay 404 and
+  directories are never listed.
 
 Generated HTML, SVG, and XML documents are served with a CSP that allows
 same-origin scripts (`script-src 'self'`), so published pages can run their

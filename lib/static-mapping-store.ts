@@ -712,11 +712,20 @@ export function revokeStaticMapping(id: string, content: "delete" | "retain" = "
  * `<path>.html` / `<path>.htm` when it carries no extension, then
  * `<path>/index.html` / `<path>/index.htm`. If nothing matches it resolves to
  * null (404). Directories are never listed.
+ *
+ * `resolvedSegments` is the candidate that matched. It is longer than the
+ * request when an index file was appended, which is how callers know a
+ * directory URL must be redirected to its index document.
  */
 export function resolveStaticMappingFile(
   id: string,
   segments: readonly string[],
-): { mapping: StaticMappingRecord; filePath: string; stat: Stats } | null {
+): {
+  mapping: StaticMappingRecord;
+  filePath: string;
+  stat: Stats;
+  resolvedSegments: readonly string[];
+} | null {
   validateStaticMappingId(id);
   if (segments.length > 0) validateStaticAssetSegments(segments);
   const mapping = getStaticMapping(id);
@@ -760,7 +769,7 @@ export function resolveStaticMappingFile(
       continue;
     }
     if (!stat.isFile()) continue;
-    return { mapping, filePath: realFile, stat };
+    return { mapping, filePath: realFile, stat, resolvedSegments: candidate };
   }
   return null;
 }

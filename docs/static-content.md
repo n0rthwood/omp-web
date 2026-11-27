@@ -136,18 +136,24 @@ unauthenticated endpoint.
 - `GET /static/:machineId/:mappingId/:asset...` — authenticated public path;
   the Gateway streams registered remote machine bytes without forwarding the
   browser's cookie or authorization header.
-- A bare mapping URL (`GET /static/:machineId/:mappingId`, with or without a
-  trailing slash) serves `index.html`, falling back to `index.htm`; if neither
-  exists it is 404. Directories are never listed. The Gateway forwards the
-  bare internal path (`GET /api/static/:mappingId`) so remote machines apply
-  the same index fallback and 404 behavior.
+- A bare mapping URL (`GET /static/:machineId/:mappingId`) and a directory
+  path (`GET /static/:machineId/:mappingId/en`) both `302` to the index
+  document they resolve to — `index.html`, then `index.htm` (`en/index.html`).
+  The redirect is not cosmetic: a published page's relative URLs
+  (`../assets/site.css`, `./#customers`) resolve against its own URL, and a
+  directory URL is not a document URL — `trailingSlash` is false, so Next
+  normalizes `/en/` back to `/en` and the browser treats `en` as a file name,
+  making `../assets/*` escape one level too far and losing every stylesheet,
+  script and image. The redirect target is the canonical URL, the same base the
+  recorded `publicPath` uses, and the fragment survives it, so `.../en#customers`
+  lands on the anchor. The Gateway rewrites the internal `/api/static` prefix of
+  a proxied redirect to `/static/<machineId>`.
 - Any other asset path resolves like a plain static server: the exact file
   first, then `<path>.html` and `<path>.htm` when the request has no
-  extension, then `<path>/index.html` and `<path>/index.htm`. So
-  `/static/<machine>/<mapping>/en` serves `en/index.html`, `.../en/#customers`
-  is a stable deep link, and `/static/<machine>/<mapping>/report` serves
-  `report.html` without the caller typing the extension. Missing paths stay
-  404; directories are never listed.
+  extension, then `<path>/index.html` and `<path>/index.htm`. An
+  extension-less asset is served directly (its base directory is unchanged), so
+  `/static/<machine>/<mapping>/report` returns `report.html` without the caller
+  typing the extension. Missing paths stay 404; directories are never listed.
 
 Generated HTML, SVG, and XML document responses carry a restrictive CSP:
 inline/external scripts and network connections are disabled, while same-origin

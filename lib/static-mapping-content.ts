@@ -44,6 +44,7 @@ export interface StaticMappingFileResolution {
   mapping: StaticMappingRecord;
   filePath: string;
   stat: Stats;
+  resolvedSegments: readonly string[];
 }
 
 interface ByteRange {
@@ -194,21 +195,26 @@ function notModified(request: Request, headers: Headers): boolean {
   return Boolean(since && modified && Date.parse(since) >= Date.parse(modified));
 }
 
-export function serveStaticMappingFile(request: Request, mappingId: string, segments: readonly string[]): Response {
-  let resolved: StaticMappingFileResolution | null;
+function resolveForServing(
+  mappingId: string,
+  segments: readonly string[],
+): { resolved: StaticMappingFileResolution | null } | { error: Response } {
   try {
-    resolved = resolveStaticMappingFile(mappingId, segments);
+    return { resolved: resolveStaticMappingFile(mappingId, segments) };
   } catch (error) {
     if (isStaticMappingError(error)) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: error.status,
-        headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
-      });
+      return {
+        error: new Response(JSON.stringify({ error: error.message }), {
+          status: error.status,
+          headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+        }),
+      };
     }
     throw error;
   }
-  if (!resolved) return new Response("Not found", { status: 404 });
+}
 
+function serveResolvedFile(request: Request, resolved: StaticMappingFileResolution): Response {
   const { filePath, stat } = resolved;
   const headers = commonHeaders(stat, contentType(filePath));
   if (notModified(request, headers)) return new Response(null, { status: 304, headers });
@@ -227,4 +233,54 @@ export function serveStaticMappingFile(request: Request, mappingId: string, segm
   headers.set("Content-Length", String(length));
   headers.set("Content-Range", `bytes ${range.start}-${range.end}/${stat.size}`);
   return new Response(createBodyStream(filePath, range), { status: 206, headers });
+}
+
+export function serveStaticMappingFile(request: Request, mappingId: string, segments: readonly string[]): Response {
+  const outcome = resolveForServing(mappingId, segments);
+  if ("error" in outcome) return outcome.error;
+  if (!outcome.resolved) return new Response("Not found", { status: 404 });
+  return serveResolvedFile(request, outcome.resolved);
+}
+
+/**
+ * Serve a mapping request the way a plain static file server does, including
+ * its canonical URL rule.
+ *
+ * A published page's relative URLs (`../assets/site.css`, `./#customers`)
+ * resolve against the *document* URL. `/static/<machine>/<id>/en` is not a
+ * document URL: because `trailingSlash` is false, Next normalizes `/en/` to
+ * `/en`, and a trailing-slash base cannot survive — so the browser treats `en`
+ * as a file name and `../assets/x` escapes one directory too far, losing every
+ * stylesheet, script and image.
+ *
+ * A request that had to append an index file therefore redirects to that file
+ * (`302 Location: <publicBasePath>/en/index.html`), which is both the canonical
+ * URL and exactly the base the page was authored against — the same base the
+ * recorded `publicPath` already uses. The fragment survives the redirect, so
+ * `.../en#customers` still lands on the anchor. `publicBasePath` is the
+ * caller's own URL prefix (`/static/<machine>/<id>` or `/api/static/<id>`), so
+ * the redirect never has to be rewritten by the fleet proxy.
+ */
+export function serveStaticMappingRequest(
+  request: Request,
+  mappingId: string,
+  segments: readonly string[],
+  publicBasePath: string,
+): Response {
+  const outcome = resolveForServing(mappingId, segments);
+  if ("error" in outcome) return outcome.error;
+  const resolved = outcome.resolved;
+  if (!resolved) return new Response("Not found", { status: 404 });
+
+  if (resolved.resolvedSegments.length > segments.length) {
+    const target = resolved.resolvedSegments.map((segment) => encodeURIComponent(segment)).join("/");
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: `${publicBasePath}/${target}${new URL(request.url).search}`,
+        "Cache-Control": "private, no-cache, must-revalidate",
+      },
+    });
+  }
+  return serveResolvedFile(request, resolved);
 }

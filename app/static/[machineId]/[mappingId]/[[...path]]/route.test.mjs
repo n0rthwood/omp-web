@@ -178,7 +178,7 @@ test("a machine-granted user streams remote static bytes without forwarding brow
   }
 });
 
-test("a bare mapping URL serves index.html first and never lists the directory", async (t) => {
+test("a bare mapping URL redirects to its index document", async (t) => {
   t.after(restoreEnv);
   const dir = setup();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -192,9 +192,17 @@ test("a bare mapping URL serves index.html first and never lists the directory",
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");
 
-  const response = await route.GET(
-    request("/static/joysort187/bare-html", cookie),
+  const bare = await route.GET(
+    request("/static/joysort187/bare-html?from=link", cookie),
     params({ machineId: "joysort187", mappingId: "bare-html", path: undefined }),
+  );
+  assert.equal(bare.status, 302);
+  assert.equal(bare.headers.get("location"), "/static/joysort187/bare-html/index.html?from=link");
+
+  // The redirect target is the page, and it carries the document policy.
+  const response = await route.GET(
+    request("/static/joysort187/bare-html/index.html", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-html", path: ["index.html"] }),
   );
   assert.equal(response.status, 200);
   assert.equal(await response.text(), "<h1>html wins</h1>");
@@ -216,7 +224,7 @@ test("a bare mapping URL serves index.html first and never lists the directory",
   assert.equal(await asset.text(), "not an index");
 });
 
-test("a bare mapping URL falls back to index.htm when index.html is absent", async (t) => {
+test("a bare mapping URL redirects to index.htm when index.html is absent", async (t) => {
   t.after(restoreEnv);
   const dir = setup();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -227,9 +235,16 @@ test("a bare mapping URL falls back to index.htm when index.html is absent", asy
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");
 
-  const response = await route.GET(
+  const bare = await route.GET(
     request("/static/joysort187/bare-htm", cookie),
     params({ machineId: "joysort187", mappingId: "bare-htm", path: undefined }),
+  );
+  assert.equal(bare.status, 302);
+  assert.equal(bare.headers.get("location"), "/static/joysort187/bare-htm/index.htm");
+
+  const response = await route.GET(
+    request("/static/joysort187/bare-htm/index.htm", cookie),
+    params({ machineId: "joysort187", mappingId: "bare-htm", path: ["index.htm"] }),
   );
   assert.equal(response.status, 200);
   assert.equal(await response.text(), "<h1>htm only</h1>");
@@ -257,7 +272,7 @@ test("a bare mapping URL with neither index file is 404 without a directory list
   assert.ok(!body.includes("notes.txt"), "no directory listing may be exposed");
 });
 
-test("a directory path serves its index file with document CSP", async (t) => {
+test("a directory path redirects to its index document and the document loads with CSP", async (t) => {
   t.after(restoreEnv);
   const dir = setup();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -266,20 +281,42 @@ test("a directory path serves its index file with document CSP", async (t) => {
   const mapping = mappings.createStaticMapping({ id: "dir-html", lifecycle: "persistent", projectRoot: "/opt/projects/main" });
   const root = mappings.getStaticMappingRoot(mapping.id);
   mkdirSync(join(root, "en"), { recursive: true });
+  mkdirSync(join(root, "assets"), { recursive: true });
   writeFileSync(join(root, "en", "index.html"), "<h1>en page</h1><h2 id=\"customers\">customers</h2>");
+  writeFileSync(join(root, "assets", "site.css"), "body{font-family:serif}");
   writeFileSync(join(root, "report.html"), "<h1>report</h1>");
   const cookie = await loginAs("granted");
   const route = await jiti.import("./route.ts");
 
+  // The directory URL is not a document URL: its base would lose one level and
+  // every relative asset would 404. It redirects to the page file instead.
   const directory = await route.GET(
     request("/static/joysort187/dir-html/en", cookie),
     params({ machineId: "joysort187", mappingId: "dir-html", path: ["en"] }),
   );
-  assert.equal(directory.status, 200);
-  assert.match(directory.headers.get("content-type"), /text\/html/);
-  assert.match(directory.headers.get("content-security-policy"), /script-src 'self'/);
-  assert.match(await directory.text(), /id="customers"/);
+  assert.equal(directory.status, 302);
+  assert.equal(directory.headers.get("location"), "/static/joysort187/dir-html/en/index.html");
 
+  const document = await route.GET(
+    request("/static/joysort187/dir-html/en/index.html", cookie),
+    params({ machineId: "joysort187", mappingId: "dir-html", path: ["en", "index.html"] }),
+  );
+  assert.equal(document.status, 200);
+  assert.match(document.headers.get("content-type"), /text\/html/);
+  assert.match(document.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.match(await document.text(), /id="customers"/);
+
+  // The asset the page reaches through `../assets/site.css` is inside the
+  // mapping and served as a plain file.
+  const asset = await route.GET(
+    request("/static/joysort187/dir-html/assets/site.css", cookie),
+    params({ machineId: "joysort187", mappingId: "dir-html", path: ["assets", "site.css"] }),
+  );
+  assert.equal(asset.status, 200);
+  assert.match(asset.headers.get("content-type"), /text\/css/);
+
+  // An extension-less asset keeps the same base directory, so it is served
+  // directly instead of redirecting.
   const extensionless = await route.GET(
     request("/static/joysort187/dir-html/report", cookie),
     params({ machineId: "joysort187", mappingId: "dir-html", path: ["report"] }),
@@ -292,6 +329,30 @@ test("a directory path serves its index file with document CSP", async (t) => {
     params({ machineId: "joysort187", mappingId: "dir-html", path: ["en", "missing"] }),
   );
   assert.equal(missing.status, 404);
+});
+
+test("a remote directory redirect is rewritten to the public static prefix", async (t) => {
+  t.after(restoreEnv);
+  const dir = setup();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await seed();
+  const cookie = await loginAs("granted");
+  const route = await jiti.import("./route.ts");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, {
+    status: 302,
+    headers: { location: "/api/static/remote-dir/en/index.html" },
+  });
+  try {
+    const response = await route.GET(
+      request("/static/gpu-1/remote-dir/en", cookie),
+      params({ machineId: "gpu-1", mappingId: "remote-dir", path: ["en"] }),
+    );
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), "/static/gpu-1/remote-dir/en/index.html");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("a bare remote mapping URL forwards the bare internal path and passes a remote 404 through", async (t) => {
