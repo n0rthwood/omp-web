@@ -1,3 +1,27 @@
+omp-web (0.5.60) jammy; urgency=medium
+
+  * Fleet sync, step 3: the per-machine cards no longer shrink below their
+    content. They are flex items of the step body, and their `overflow:
+    hidden` zeroed flexbox's automatic minimum size, so every card was
+    clipped (220px of content rendered in 82px) while the body reported no
+    scrollable overflow - the clipped rows could not be reached at all
+    (#158).
+  * Fleet sync now replaces provider blocks wholesale instead of deep-merging
+    them, and protects OAuth authentication on both ends using the machine's
+    real credential (`credentials.hasOAuth`), not the SDK's OAuth capability:
+    export withholds a no-key block only when the source is actually logged
+    into that provider, so an override-only block such as openrouter's
+    `modelOverrides` syncs whole while anthropic / openai-codex blocks stay
+    withheld; apply ignores payload entries for provider ids the target is
+    logged into via OAuth and keeps their blocks even under `prune` (#159).
+  * A real-run push that changes nothing is now reported as `in_sync`
+    ("Already in sync") instead of a bare "skipped", which is kept for dry
+    runs and the source-machine row; step 3 also lists the providers actually
+    excluded in that run instead of a hard-coded anthropic / openai-codex /
+    xai-oauth list (#159).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 27 Nov 2026 17:20:00 +0000
+
 omp-web (0.5.59) jammy; urgency=medium
 
   * Static mappings: a directory URL and the bare mapping URL now redirect
