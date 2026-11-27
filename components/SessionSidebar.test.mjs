@@ -74,5 +74,5 @@ test("minor #8: the project-recency ranking is a shared helper, not a local dupl
   assert.match(source, /import \{ mostRecentProjectRoots \} from "@\/lib\/project-recency";/);
   assert.match(source, /import \{ loadRemovedProjects, normalizeProjectKey, saveRemovedProjects \} from "@\/lib\/removed-projects";/);
   assert.doesNotMatch(source, /function getRecentProjects/);
-  assert.match(source, /const projectPaths = mostRecentProjectRoots\(sessionsForDisplay\)/);
+  assert.match(source, /const paths = mostRecentProjectRoots\(sessionsForDisplay\)/);
 });
