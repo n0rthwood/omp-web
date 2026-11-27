@@ -93,6 +93,8 @@ asset names, then use the returned `publicPath` exactly. Links inside generated
 HTML must stay relative (asset names relative to the document, or
 origin-relative `/static/…` paths) so they keep working on every configured
 domain exit without cross-domain re-authentication.
+The `publicPath` is an origin-relative HTTP URL (`/static/<machine-id>/<mapping-id>/…`), **not** a local filesystem path. omp-web's Markdown renderer and chat link resolver treat `/static/…` as a network link that opens in the browser (new tab); it is never resolved against the local file tree or sent to the file viewer. You can paste it into chat, Markdown, or HTML `href`/`src` attributes directly. Never pass a `publicPath` to `/api/files` or to any local file API.
+
 
 ### Create
 

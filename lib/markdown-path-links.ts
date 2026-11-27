@@ -19,6 +19,14 @@ const EXCLUDED_NODES: Record<string, true> = {
 /** Shared single-value detection for prose links and clickable inline code. */
 export function resolveMarkdownPathCandidate(value: string, cwd?: string): { href: string; filePath: string } | null {
   if (value.startsWith("~/") || value.includes("://")) return null;
+  // Static content URLs (/static/<machine>/<mapping>/...) are served over
+  // HTTP, never as local filesystem paths. Resolve them as network links so
+  // they open in the browser instead of the file sidebar.
+  if (value.startsWith("/static/")) {
+    const href = value.replace(/[.,;:!?)\]}'"]+$/, "");
+    if (!href) return null;
+    return { href, filePath: href };
+  }
   const match = SINGLE_PATH_PATTERN.exec(value);
   if (!match || match.index !== 0 || match[1] !== value) return null;
 
