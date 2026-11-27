@@ -1,3 +1,14 @@
+omp-web (0.5.54) jammy; urgency=medium
+
+  * Static content links: /static/<machine>/<mapping>/… public paths are no
+    longer misclassified as local filesystem paths. resolveLocalFileHref
+    exempts /static/ (alongside /api/ and /_next/), and bare /static/… text
+    in chat/Markdown is auto-linked as a network URL that opens in the
+    browser instead of being routed to the file sidebar. publicPath is now
+    documented as a network URL, not a local path.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 21:30:00 +0000
+
 omp-web (0.5.53) jammy; urgency=medium
 
   * Static content: published HTML pages can now run their own same-origin
