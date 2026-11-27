@@ -240,7 +240,7 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
             data-status={pushed?.status}
             style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", flexShrink: 0 }}
           >
-            <div style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "6px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
               <span style={{ fontSize: 12.5, fontWeight: 650, color: "var(--text)" }}>{machine?.name ?? machineId}</span>
               <span style={{ ...MONO, color: "var(--text-dim)", fontSize: 11 }}>{machineId}</span>
               <span style={{ flex: 1 }} />
@@ -253,12 +253,12 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
               </span>
             </div>
             {result && hasIssues(result) && (
-              <div style={{ padding: "5px 12px", borderBottom: "1px solid var(--border)", ...MONO, fontSize: 11.5, lineHeight: 1.5 }}>
+              <div style={{ padding: "7px 12px", borderBottom: "1px solid var(--border)", ...MONO, fontSize: 11.5, lineHeight: 1.6 }}>
                 <TargetIssues result={result} />
               </div>
             )}
             {rows.map((entry) => (
-              <div key={entry.label} style={{ display: "flex", gap: 10, padding: "6px 12px", fontSize: 12.3, borderBottom: "1px solid var(--border)" }}>
+              <div key={entry.label} style={{ display: "flex", gap: 10, padding: "8px 12px", fontSize: 12.3, lineHeight: 1.6, borderBottom: "1px solid var(--border)" }}>
                 <span style={{ ...MONO, width: 190, flexShrink: 0, color: "var(--text-dim)", fontSize: 11.8 }}>{entry.label}</span>
                 <span style={{ minWidth: 0, lineHeight: 1.5, wordBreak: "break-word" }}>
                   {entry.text}
@@ -478,7 +478,24 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
           ))}
         </div>
 
-        <div style={{ padding: "14px 18px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
+        {/* `flex: 1` + `minHeight: 0` are what make this the scroll region: a
+            column flex child defaults to `min-height: auto`, so it grows to its
+            content height, the dialog's `max-height` clips it, and `overflow-y:
+            auto` never has anything to scroll. Cards keep their natural height
+            (they set `flexShrink: 0`) and the body scrolls instead. */}
+        <div
+          data-testid="sync-body"
+          style={{
+            padding: "14px 18px",
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            flex: 1,
+            minHeight: 0,
+          }}
+        >
           {step === 1 ? (
             <>
               {(["providers", "roles", "enabledModels"] as const).map((section) => (
