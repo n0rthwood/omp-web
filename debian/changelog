@@ -1,3 +1,12 @@
+omp-web (0.5.55) jammy; urgency=medium
+
+  * Static content links: inline-code /static/<machine>/<mapping>/… references
+    in chat are now rendered as ordinary anchor links that open in a new tab,
+    instead of being routed through the file sidebar as local file paths.
+    resolveLocalFileHref also exempts /static/ from local path resolution.
+
+ -- JoySort Release Bot <release@joysort.cc>  Thu, 26 Nov 2026 22:00:00 +0000
+
 omp-web (0.5.54) jammy; urgency=medium
 
   * Static content links: /static/<machine>/<mapping>/… public paths are no
