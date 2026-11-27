@@ -1,3 +1,16 @@
+omp-web (0.5.61) jammy; urgency=medium
+
+  * Fleet sync, step 3: the body is now the dialog's explicit scroll region
+    (`flex: 1; minHeight: 0`, `data-testid="sync-body"`) and diff / finding
+    rows get more padding and line height, so each machine card occupies the
+    space its content needs and the modal scrolls instead of compressing it.
+    Measured on a production build shipped in this release: body
+    `clientHeight 732 < scrollHeight 1896` and every card renders at its
+    content height (250px of content in 250px), against 0.5.59's collapsed
+    78px-per-card with `scrollHeight == clientHeight` (also #158).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 27 Nov 2026 17:45:00 +0000
+
 omp-web (0.5.60) jammy; urgency=medium
 
   * Fleet sync, step 3: the per-machine cards no longer shrink below their
