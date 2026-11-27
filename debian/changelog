@@ -1,3 +1,16 @@
+omp-web (0.5.57) jammy; urgency=medium
+
+  * Sidebar: compact project and conversation rows following the outline
+    panel density (#156). Session titles are 12px with snug line height
+    and wrap to at most two lines instead of a single ellipsized line;
+    one-line rows shrink from 40px to ~25px and project headers from
+    34px to 26px. Hover actions overlay the time slot so rows never
+    reflow; mobile rows keep a 36px touch minimum.
+  * package.json version realigned with debian/changelog (it had been
+    left at 0.5.53 through the 0.5.54-0.5.56 releases).
+
+ -- JoySort Release Bot <release@joysort.cc>  Fri, 27 Nov 2026 02:50:00 +0000
+
 omp-web (0.5.56) jammy; urgency=medium
 
   * Static content CSP: restore missing style-src and worker-src
