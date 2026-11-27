@@ -32,7 +32,7 @@ export interface SyncWizardProps {
 interface TargetResult {
   machineId: string;
   machineName: string;
-  status: "applied" | "skipped" | "failed";
+  status: "applied" | "skipped" | "in_sync" | "failed";
   detail: string;
   changed?: boolean;
   warnings?: string[];
@@ -47,6 +47,7 @@ interface SyncRunResponse {
   error?: string;
   dryRun?: boolean;
   sourceMachine?: string;
+  excludedOAuthProviders?: string[];
   results?: TargetResult[];
 }
 
@@ -65,6 +66,7 @@ const SECTION_DETAIL_KEYS: Record<SyncSection, string> = {
 const STATUS_KEYS: Record<TargetResult["status"], string> = {
   applied: "sync.status.applied",
   skipped: "sync.status.skipped",
+  in_sync: "sync.status.inSync",
   failed: "sync.status.failed",
 };
 
@@ -211,7 +213,7 @@ function diffRows(applied: SyncApplyResult["applied"], sections: readonly SyncSe
 }
 
 /** Step 3 body: one block per selected machine — status, findings, content diff. */
-export function SyncDiffSummary({ machines, targets, sections, preflight, pushResults }: {
+export function SyncDiffSummary({ machines, targets, sections, preflight, pushResults, excludedOAuthProviders = [] }: {
   machines: readonly Machine[];
   targets: readonly string[];
   sections: readonly SyncSection[];
@@ -219,6 +221,8 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
   preflight: ReadonlyMap<string, TargetResult>;
   /** Real-run results once pushed; keyed by machine id. */
   pushResults: ReadonlyMap<string, TargetResult>;
+  /** OAuth providers whose subscription-login configuration was excluded. */
+  excludedOAuthProviders?: readonly string[];
 }) {
   const { t } = useI18n();
   return (
@@ -242,7 +246,7 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
               <span style={{ flex: 1 }} />
               <span data-testid="sync-diff-status" style={{ ...MONO, color: pushed ? (pushed.status === "failed" ? TONE_COLOR.bad : pushed.status === "skipped" ? TONE_COLOR.warn : "var(--success, #3fb950)") : undefined }}>
                 {pushed
-                  ? `${t(STATUS_KEYS[pushed.status])}${pushed.status === "failed" ? `: ${pushed.detail}` : ""}`
+                  ? `${t(STATUS_KEYS[pushed.status])}${pushed.status === "failed" || pushed.status === "skipped" ? `: ${pushed.detail}` : ""}`
                   : result
                     ? <PreflightStatus result={result} checking={false} expanded={false} />
                     : t("sync.noPreflightData")}
@@ -267,6 +271,11 @@ export function SyncDiffSummary({ machines, targets, sections, preflight, pushRe
           </div>
         );
       })}
+      {excludedOAuthProviders.length > 0 ? (
+        <p style={{ margin: 0, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
+          {t("sync.excludedActual", { providers: excludedOAuthProviders.join(" / ") })}
+        </p>
+      ) : null}
     </>
   );
 }
@@ -285,6 +294,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
   const [preflight, setPreflight] = useState<TargetResult[] | null>(null);
   const [pushResults, setPushResults] = useState<TargetResult[] | null>(null);
   const [sourceMachine, setSourceMachine] = useState<string | null>(null);
+  const [excludedOAuthProviders, setExcludedOAuthProviders] = useState<string[]>([]);
   // The gateway visits targets one by one, so a preflight can take a while.
   // It never traps the user: stepping back or closing abandons the request.
   const abortRef = useRef<AbortController | null>(null);
@@ -300,6 +310,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
     setPreflight(null);
     setPushResults(null);
     setError(null);
+    setExcludedOAuthProviders([]);
   }, [open, initialSections]);
 
   const run = useCallback(async (mode: "preflight" | "push") => {
@@ -325,6 +336,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
         return;
       }
       setSourceMachine(data.sourceMachine ?? null);
+      setExcludedOAuthProviders(data.excludedOAuthProviders ?? []);
       if (mode === "preflight") setPreflight(data.results ?? []);
       else setPushResults(data.results ?? []);
     } catch (caught) {
@@ -542,6 +554,7 @@ export function SyncWizard({ open, onClose, initialSections, machines }: SyncWiz
                 sections={sections}
                 preflight={preflightByMachine}
                 pushResults={pushByMachine}
+                excludedOAuthProviders={excludedOAuthProviders}
               />
               <p style={{ margin: 0, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
                 {t("sync.excludedNote")}

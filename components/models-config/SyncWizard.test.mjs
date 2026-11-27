@@ -57,7 +57,7 @@ test("step 1 presets sections from the entry point and marks OAuth as excluded",
   assert.match(section(html, "roles"), /checked/);
   assert.doesNotMatch(section(html, "providers"), /checked/);
   assert.doesNotMatch(section(html, "enabledModels"), /checked/);
-  assert.match(html, /anthropic \/ openai-codex \/ xai-oauth/);
+  assert.match(html, /Subscription-login provider configuration/);
 });
 
 test("the allow-list entry point presets only enabledModels", () => {
@@ -84,10 +84,10 @@ test("every wizard string is translated in both locales", () => {
     "sync.title", "sync.source", "sync.close", "sync.step.sections", "sync.step.targets",
     "sync.step.push", "sync.section.providers", "sync.section.providersDetail", "sync.section.roles",
     "sync.section.rolesDetail", "sync.section.enabledModels", "sync.section.enabledModelsDetail",
-    "sync.excludedNote", "sync.fallbackNote", "sync.targetsHint", "sync.noTargets", "sync.preflightAgain",
+    "sync.excludedNote", "sync.excludedActual", "sync.fallbackNote", "sync.targetsHint", "sync.noTargets", "sync.preflightAgain",
     "sync.checking", "sync.ready", "sync.readyChanges", "sync.readyInSync", "sync.hasIssues",
     "sync.issueMissingKey", "sync.issueNotLoggedIn", "sync.noPreflightData", "sync.diffChanges",
-    "sync.diffInSync", "sync.status.applied", "sync.status.skipped", "sync.status.failed", "sync.back",
+    "sync.diffInSync", "sync.status.applied", "sync.status.skipped", "sync.status.inSync", "sync.status.failed", "sync.back",
     "sync.cancel", "sync.next", "sync.push", "sync.done",
   ];
   for (const key of keys) {
@@ -166,13 +166,14 @@ const APPLIED = {
   fallbackChains: { added: [], updated: [], removed: [], unchanged: ["default"] },
 };
 
-function summary({ sections, targets = ALL_IDS, preflight = {}, pushResults = {} } = {}) {
+function summary({ sections, targets = ALL_IDS, preflight = {}, pushResults = {}, excludedOAuthProviders = [] } = {}) {
   return renderElement(React.createElement(SyncDiffSummary, {
     machines: MACHINES,
     targets,
     sections,
     preflight: new Map(Object.entries(preflight)),
     pushResults: new Map(Object.entries(pushResults)),
+    excludedOAuthProviders,
   }));
 }
 
@@ -236,6 +237,26 @@ test("after the push the header reports the push outcome instead of the prefligh
   const failed = html.slice(html.indexOf('data-machine="box-39"'));
   assert.match(failed, /Failed: boom/);
   assert.doesNotMatch(html, /credentials ready/, "preflight verdicts yield to the real outcome");
+});
+test("an in-sync push is labeled as already in sync, not skipped", () => {
+  const html = summary({
+    sections: ["providers"],
+    targets: ["box-202"],
+    pushResults: { "box-202": { ...READY, machineId: "box-202", status: "in_sync", detail: "Already in sync" } },
+  });
+  assert.match(html, /Already in sync/);
+  assert.doesNotMatch(html, /Skipped/);
+});
+
+test("excluded OAuth providers from a run are shown in the step-3 summary", async () => {
+  const html = summary({
+    sections: ["providers"],
+    targets: ["box-202"],
+    excludedOAuthProviders: ["openrouter"],
+  });
+  assert.match(html, /Subscription-login providers excluded in this run: openrouter/);
+  const source = await readFile(new URL("./SyncWizard.tsx", import.meta.url), "utf8");
+  assert.match(source, /setExcludedOAuthProviders\(data\.excludedOAuthProviders \?\? \[\]\)/);
 });
 
 test("only selected machines are summarised, and a machine without any result says so", () => {

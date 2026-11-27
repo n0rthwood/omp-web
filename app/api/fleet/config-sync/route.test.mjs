@@ -229,7 +229,7 @@ test("gateway pushes the declaration layer to each target serially and reports p
 
   const again = await POST(request({ targets: [machine.id], sections: ["providers", "roles"] }, { cookie }));
   const againBody = await again.json();
-  assert.equal(againBody.results[0].status, "skipped", "a second push is a no-op");
+  assert.equal(againBody.results[0].status, "in_sync", "a second push is a no-op");
   assert.equal(againBody.results[0].changed, false);
 });
 
@@ -316,7 +316,8 @@ test("the exported payload never carries a credential value", async (t) => {
   const response = await POST(request({ targets: [machine.id], sections: ["providers", "roles"] }, { cookie: await loginAs("root") }));
   const body = await response.json();
   assert.ok(!JSON.stringify(body).includes(secret), "the credential value must never cross the gateway");
-  assert.deepEqual(body.excludedOAuthProviders, ["anthropic"], "the OAuth block is withheld");
+  // The exclusion rule itself is covered with injected OAuth deps in lib/models-config-sync.test.mjs.
+  assert.deepEqual(body.excludedOAuthProviders, [], "no OAuth login in the fresh store, so nothing is withheld");
 });
 
 test("a target answering a malformed diff or unknown findings yields none instead of garbage (issue #145)", async (t) => {

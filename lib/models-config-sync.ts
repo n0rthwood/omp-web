@@ -6,13 +6,11 @@
  *   - `config.yml` → `modelRoles`, `enabledModels`, `retry.fallbackChains`
  *
  * Credentials never leave the machine: this module never reads a credential
- * value and never opens `agent.db`. A provider block is withheld when the SDK
- * can OAuth it *and* the block declares no key of its own — that is a
- * subscription login (anthropic, openai-codex, xai-oauth, …). A dual-auth
- * provider written with `apiKey: SOME_ENV_VAR` (zhipu-coding-plan, openrouter,
- * …) is a plain declaration and syncs; the field is a bare environment-variable
- * *name*, and the target's preflight only checks that the name is present,
- * never what it holds.
+ * value and never opens `agent.db`. Export withholds a no-key provider only
+ * when the source machine has an actual OAuth subscription credential for it;
+ * SDK OAuth capability alone does not protect it. Apply replaces same-id
+ * provider blocks wholesale, except target OAuth-login ids are protected from
+ * payload replacement while remote-only ids survive unless `prune` is enabled.
  *
  * Roles / allow-list entries that reference an OAuth provider are synced
  * verbatim — the target simply falls back through its own
@@ -96,6 +94,8 @@ export interface SyncDeps {
   envKeyNames: readonly string[];
   /** Provider ids the SDK declares as OAuth subscriptions. */
   oauthProviderIds: readonly string[];
+  /** Provider ids with an actual OAuth subscription credential on this machine. */
+  subscriptionLoginProviders: readonly string[];
   /** Whether the target holds any credential for `provider` (presence only). */
   hasOAuthCredential: (provider: string) => boolean;
   now?: () => Date;
@@ -196,10 +196,12 @@ export function readEnvKeyNames(agentDir: string): string[] {
 /** Real host deps: runtime auth storage for presence, SDK registry for OAuth ids. */
 export async function defaultSyncDeps(): Promise<SyncDeps> {
   const { agentDir, authStorage } = await getOmpRuntime();
+  const oauthProviderIds = getOAuthProviders().map((provider) => provider.storeCredentialsAs ?? provider.id);
   return {
     agentDir,
     envKeyNames: readEnvKeyNames(agentDir),
-    oauthProviderIds: getOAuthProviders().map((provider) => provider.storeCredentialsAs ?? provider.id),
+    oauthProviderIds,
+    subscriptionLoginProviders: oauthProviderIds.filter((provider) => authStorage.credentials.hasOAuth(provider)),
     hasOAuthCredential: (provider) =>
       authStorage.credentials.list(provider).length > 0 || Boolean(authStorage.keys.source(provider)?.concrete),
   };
@@ -213,20 +215,17 @@ export function exportDeclarationLayer(deps: SyncDeps): SyncExportPayload {
   const models = parseMapping(readText(firstExisting(deps.agentDir, MODELS_READ_CANDIDATES)));
   const config = parseMapping(readText(firstExisting(deps.agentDir, CONFIG_FILES)));
 
-  const oauth = new Set(deps.oauthProviderIds);
+  const subscriptionLogins = new Set(deps.subscriptionLoginProviders ?? []);
   const providers: Record<string, SyncProviderBlock> = {};
   const excludedOAuthProviders: string[] = [];
   const configured = models.providers;
   if (configured !== null && typeof configured === "object" && !Array.isArray(configured)) {
     for (const [id, block] of Object.entries(configured)) {
       if (block === null || typeof block !== "object" || Array.isArray(block)) continue;
-      // A block is a subscription login — withheld — when the SDK can OAuth it
-      // and the block itself declares no key of its own. A dual-auth provider
-      // written with `apiKey: SOME_ENV_VAR` (zhipu-coding-plan, openrouter, …)
-      // is a plain declaration and syncs like any other; its bare env-var name
-      // is not a credential.
+      // Only a source machine's actual OAuth subscription login is withheld
+      // when no apiKey is declared; SDK OAuth capability alone is not enough.
       const declaresKey = typeof block.apiKey === "string" && block.apiKey.length > 0;
-      if (oauth.has(id) && !declaresKey) {
+      if (subscriptionLogins.has(id) && !declaresKey) {
         excludedOAuthProviders.push(id);
         continue;
       }
@@ -440,9 +439,17 @@ export function applyDeclarationLayer(request: ParsedSyncRequest, deps: SyncDeps
   const wantRoles = sections.includes("roles");
   const wantEnabled = sections.includes("enabledModels");
 
-  // Providers merge per id; a remote-only block survives unless `prune`.
+  // Providers replace same-id blocks wholesale; remote-only blocks survive
+  // unless `prune`. Target OAuth-login ids are a hard guarantee: payload
+  // entries for them are ignored, and existing blocks survive even pruning.
+  const subscriptionLogins = new Set(deps.subscriptionLoginProviders ?? []);
   const nextProviders = wantProviders
-    ? { ...(request.prune ? {} : currentProviders), ...request.payload.providers }
+    ? {
+      ...(request.prune
+        ? Object.fromEntries(Object.entries(currentProviders).filter(([id]) => subscriptionLogins.has(id)))
+        : currentProviders),
+      ...Object.fromEntries(Object.entries(request.payload.providers).filter(([id]) => !subscriptionLogins.has(id))),
+    }
     : currentProviders;
   const nextRoles = wantRoles ? request.payload.roles : currentRoles;
   const nextEnabled = wantEnabled ? request.payload.enabledModels : currentEnabled;

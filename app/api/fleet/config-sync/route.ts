@@ -24,7 +24,7 @@ const APPLY_PATH = "/api/models-config/sync/apply";
 interface TargetResult {
   machineId: string;
   machineName: string;
-  status: "applied" | "skipped" | "failed";
+  status: "applied" | "skipped" | "in_sync" | "failed";
   detail: string;
   changed?: boolean;
   warnings?: string[];
@@ -224,7 +224,7 @@ export async function POST(req: Request) {
     results.push({
       machineId,
       machineName,
-      status: isDryRun ? "skipped" : changed ? "applied" : "skipped",
+      status: isDryRun ? "skipped" : changed ? "applied" : "in_sync",
       detail: isDryRun
         ? changed ? "Dry run: changes pending" : "Dry run: already in sync"
         : changed ? "Applied" : "Already in sync",
