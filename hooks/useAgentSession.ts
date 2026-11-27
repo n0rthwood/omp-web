@@ -1503,6 +1503,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sessionId?: string;
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
+        planMode?: WebPlanModeInfo | null;
         error?: string;
       } | null;
       // Read the body even on failure: the server's own `error` reason (e.g.
@@ -1514,6 +1515,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      // The host may enter plan mode while creating the session, so the
+      // composer must show that mode before the first prompt. A functional
+      // update keeps a user toggle made while this request was in flight.
+      setPlanMode((prev) => prev ?? result.planMode ?? null);
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
         setPendingModel(result.model);
         if (!selectedModel) setNewSessionDefaultModel(result.model);
@@ -3369,6 +3374,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A brand-new chat has no session yet, so nothing reports the mode the host
+  // will start in: `ensure_session` may enter plan mode (plan.defaultOnStartup)
+  // and the composer would otherwise show "Execute" until the first prompt.
+  // The functional update defers to a toggle or SSE mode_change that landed
+  // while this probe was in flight; a failure leaves planMode null (Execute).
+  useEffect(() => {
+    if (!isNew || !newSessionCwd || sessionIdRef.current || planMode !== null) return;
+    const controller = new AbortController();
+    void fetch(apiPath("/api/plan-mode/startup") + "?cwd=" + encodeURIComponent(newSessionCwd), {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (res) => (res.ok ? await res.json() as WebPlanModeInfo | null : null))
+      .then((info) => {
+        if (info) setPlanMode((prev) => prev ?? info);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [isNew, newSessionCwd, planMode]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
