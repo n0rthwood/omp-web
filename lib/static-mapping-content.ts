@@ -143,6 +143,9 @@ export const STATIC_DOCUMENT_CSP = [
   "object-src 'none'",
   "script-src 'self'",
   "script-src-attr 'self'",
+  "script-src-elem 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "worker-src 'none'",
 ].join("; ");
 
 function isStaticDocumentType(type: string): boolean {
