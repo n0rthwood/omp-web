@@ -1,3 +1,18 @@
+omp-web (0.5.62) jammy; urgency=medium
+
+  * Plan mode: the composer now shows the mode a new chat will really start
+    in, before the first prompt (#161). The session host enters plan mode
+    while the session is created (`get_state` runs the `plan.defaultOnStartup`
+    gate), but `POST /api/agent/new` dropped the `planMode` it already had,
+    and a session-less chat had no channel at all — the chip rendered
+    `planMode?.enabled ?? false`, i.e. Execute, whatever the config said.
+    `GET /api/plan-mode/startup?cwd=` answers for a chat with no session yet
+    (allow-listed for the fleet proxy), `ensure_session` returns `planMode`,
+    and the client seeds from the probe / adopts the creation value with a
+    functional update so a toggle made in flight wins.
+
+ -- JoySort Release Bot <release@joysort.cc>  Sat, 28 Nov 2026 02:30:00 +0000
+
 omp-web (0.5.61) jammy; urgency=medium
 
   * Fleet sync, step 3: the body is now the dialog's explicit scroll region
